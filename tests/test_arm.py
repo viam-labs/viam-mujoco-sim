@@ -164,7 +164,8 @@ def test_gripper_still_collides_with_arm_base(sim):
 
     arm = make_arm(sim)
     ids = arm._now()[1]
-    # found by random sweep within the MJCF joint ranges; gripper_body is ~98 mm into link_base
+    # found by random sweep; within both the MJCF joint ranges and Viam's joint limits, so
+    # the planner can command it. gripper_body is ~98 mm into link_base
     sim.data.qpos[ids.qpos] = [-6.082, 1.28, 0.422, -3.222, -0.427, -2.86]
     mujoco.mj_forward(sim.model, sim.data)
     gripper = sim.model.body("pick-arm/gripper_body").id

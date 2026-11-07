@@ -10,9 +10,9 @@ Attributes:
   grip_force_n (float)      - closing/opening force, (0, 10] N (default 5)
 
 The gripper is binary: Open, Grab and GoToInputs latch a state and return
-immediately, matching the viam-labs:isaac-sim Lite6 gripper. Grab and Open
-latch the command and return before the jaws move, so read IsMoving or
-IsHoldingSomething after the next physics step, or poll as scripted_pick.py does.
+immediately, matching the viam-labs:isaac-sim Lite6 gripper. The jaws move
+after the return, so read IsMoving or IsHoldingSomething after the next physics
+step, or poll as scripted_pick.py (in viam-modules/viam-isaac-sim) does.
 """
 
 import asyncio

@@ -1,9 +1,9 @@
 """Engine-side handles that the Viam component models call.
 
 Each handle registers a Contribution (what it adds to the scene) and, where it
-drives actuators, a step callback. Step callbacks are the only writers of
-data.ctrl. Handles store MuJoCo names, not ids, and resolve ids again whenever
-the sim's generation changes (every rebuild).
+drives actuators, a step callback. Only the sim thread writes data.ctrl (step
+callbacks, init, holds and close). The arm resolves ids again when the sim's
+generation changes (every rebuild); the gripper looks names up on each step.
 """
 
 from __future__ import annotations

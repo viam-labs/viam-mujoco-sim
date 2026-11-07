@@ -48,10 +48,12 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         # reports in Viam's convention.
         "flange_offset_wxyz": (0.0, 0.0, 0.0, 1.0),
         # MuJoCo collides meshes as convex hulls, which are inflated past the
-        # real links and jam reachable poses. Only pairs whose overlap comes
-        # from that inflation are excluded. Pairs that collide for real stay on
-        # (the gripper and links 4-6 against link_base/link1), because Viam's
-        # planner can't see the gripper and this is the only check on it.
+        # real links and jam reachable poses. Only the listed hull-inflation
+        # pairs are excluded; every other arm pair still collides, including
+        # links 3-6 and the gripper against link_base/link1, and link2 against
+        # links 5-6 and the gripper. That matters because Viam's kinematics
+        # model the base as a 1 mm sphere and give the gripper no geometry, so
+        # MuJoCo is the only check there.
         "self_collision_excluded_pairs": (
             *itertools.combinations(("link3", "link4", "link5", "link6", "gripper_body"), 2),
             ("link1", "link3"), ("link2", "link4"), ("link2", "link_base"),
@@ -178,7 +180,8 @@ class WorldConfig:
 @dataclass
 class Contribution:
     """What one component adds to the scene. build edits a fresh spec on every
-    rebuild; init runs once, on the first model that contains it."""
+    rebuild; init runs on the first model that contains the contribution, and
+    again on reset()."""
 
     build: Callable[[mujoco.MjSpec], None]
     init: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None
@@ -327,8 +330,7 @@ class SimManager:
 
     def set_contribution(self, name: str, contribution: Contribution) -> None:
         def apply() -> None:
-            if self.cfg is None:
-                self.require_world()
+            self.require_world()
             old = self._contributions.get(name)
             self._contributions[name] = contribution
             try:

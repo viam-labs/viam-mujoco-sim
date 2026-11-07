@@ -6,6 +6,7 @@ Attributes:
   world (string, required)         - name of the viam-labs:mujoco-sim:world component
   asset (string, required)         - known robot; "lite6" (with its wide gripper)
   position ([x,y,z] meters)        - fallback placement when no frame is set
+  orientation_wxyz ([w,x,y,z])     - fallback orientation when no frame is set
   orientation_rpy_deg ([r,p,y])    - fallback orientation when no frame is set
   move_timeout_sec (float)         - max time to wait for a move (default 30)
   max_joint_deg_s (float)          - per-joint velocity limit on the commanded
@@ -19,6 +20,8 @@ Attributes:
                                      (default 2.0)
   kinematics_url (string)          - override the kinematics file served by
                                      GetKinematics (.json = SVA, .urdf = URDF)
+
+Place it with the standard frame; frame.parent must be "world".
 """
 
 import asyncio
@@ -212,28 +215,13 @@ class MujocoArm(Arm, EasyResource):
         self._tolerance_rad = math.radians(
             float(attrs.get("path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG))
         )
-        freq = float(attrs.get("robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ))
-        if freq <= 0 or freq > _MAX_CONTROL_FREQ_HZ:
-            raise ValueError(
-                f"robot_control_freq_hz must be in (0, {_MAX_CONTROL_FREQ_HZ}]; got {freq}"
-            )
-        self._control_period = 1.0 / freq
-        step_deg = float(attrs.get("path_max_step_deg", _DEFAULT_MAX_STEP_DEG))
-        if step_deg <= 0 or step_deg > _MAX_MAX_STEP_DEG:
-            raise ValueError(
-                f"path_max_step_deg must be in (0, {_MAX_MAX_STEP_DEG}]; got {step_deg}"
-            )
-        self._max_step_rad = math.radians(step_deg)
-        self._attrs = attrs
-        attrs["is_moving_velocity_threshold_rad_s"] = (
-            _is_moving_velocity_threshold(attrs, config.name)
+        self._control_period = 1.0 / float(
+            attrs.get("robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ)
         )
-        max_joint_deg_s = _max_joint_deg_s(attrs, config.name)
-        if max_joint_deg_s is not None:
-            attrs["max_joint_deg_s"] = max_joint_deg_s
-        max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
-        if max_joint_deg_s2 is not None:
-            attrs["max_joint_deg_s2"] = max_joint_deg_s2
+        self._max_step_rad = math.radians(
+            float(attrs.get("path_max_step_deg", _DEFAULT_MAX_STEP_DEG))
+        )
+        self._attrs = attrs
         self._handle = ArmHandle(SimManager.get(), self.name, attrs)
 
     async def close(self) -> None:

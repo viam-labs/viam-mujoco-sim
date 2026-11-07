@@ -6,10 +6,14 @@ Attributes:
   fov_deg (float)          - vertical field of view (default 60)
   width / height (int)     - image size (default 640 x 480)
   position ([x,y,z] m)     - fallback placement when no frame is set
+                             (default (1, 1, 1))
+  orientation_wxyz ([w,x,y,z]) - fallback orientation when no frame is set
+  orientation_rpy_deg ([r,p,y]) - same, as roll/pitch/yaw; orientation_wxyz
+                             wins if both are given
 
-Place it with the standard frame (translation in mm). A frame orientation is
-read in Viam's camera convention: +Z forward, +Y down. `target`, when set,
-takes precedence over a frame orientation.
+Place it with the standard frame (translation in mm); frame.parent must be
+"world". A frame orientation is read in Viam's camera convention: +Z forward,
++Y down. `target`, when set, takes precedence over a frame orientation.
 """
 
 import asyncio
