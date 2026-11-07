@@ -36,6 +36,8 @@ def test_prop_config_validation():
         WorldConfig.from_attrs({"props": [{"name": "s", "type": "sphere"}]})
     with pytest.raises(ValueError, match="non-negative"):
         WorldConfig.from_attrs({"props": [{"name": "b", "static_friction": -1}]})
+    with pytest.raises(ValueError, match="dynamic_friction must be non-negative"):
+        WorldConfig.from_attrs({"props": [{"name": "b", "dynamic_friction": -1}]})
     with pytest.raises(ValueError, match="duplicate"):
         WorldConfig.from_attrs({"props": [{"name": "b"}, {"name": "b"}]})
     WorldConfig.from_attrs({"props": [{"name": "b", "static_friction": 0}]})

@@ -124,6 +124,10 @@ class PropSpec:
         friction = _finite(raw.get("static_friction", 1.0), f"prop {name}: static_friction")
         if friction < 0.0:
             raise ValueError(f"prop {name}: static_friction must be non-negative")
+        if "dynamic_friction" in raw and (
+            _finite(raw["dynamic_friction"], f"prop {name}: dynamic_friction") < 0.0
+        ):
+            raise ValueError(f"prop {name}: dynamic_friction must be non-negative")
         return cls(
             name=name,
             half_extents=tuple(size * item / 2.0 for item in scale),
@@ -239,7 +243,11 @@ class SimManager:
             return fn()
         future: Future = Future()
         self._tasks.put((fn, future))
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -250,7 +258,8 @@ class SimManager:
             while not self._stop.is_set():
                 self._drain_tasks()
                 self.tick()
-                time.sleep(0.001)
+                if self.cfg is None or self.cfg.real_time:
+                    time.sleep(0.001)
         finally:
             self._close_renderers()
 
@@ -286,7 +295,6 @@ class SimManager:
             except BaseException:
                 self.cfg = old
                 raise
-            self._reanchor()
 
         self.run(configure)
 
@@ -368,6 +376,7 @@ class SimManager:
         self._close_renderers()
         self.model, self.data = model, data
         self.generation += 1
+        self._reanchor()
 
     # ------------------------------------------------------------------
     # stepping
