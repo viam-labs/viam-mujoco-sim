@@ -18,7 +18,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:world`](#model-viam-labsmujoco-simworld) | `generic` | Owns the scene, props and step loop. Configure exactly one. |
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6 placed by its frame, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's integrated binary gripper. |
-| [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB camera placed by its frame, aimed with `target`. |
+| [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 
 ## Getting started
 
@@ -163,6 +163,9 @@ rate limited by `max_joint_deg_s`.
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
+| `depth` | bool | No | `false` | `GetImages` also returns a `depth` image. |
+| `depth_width` | int | No | half of `width` | Depth image and point cloud width in pixels. |
+| `depth_height` | int | No | half of `height` | Depth image and point cloud height in pixels. |
 
 The frame's `parent` must be `world`.
 
@@ -253,8 +256,9 @@ true.
 
 ## Model viam-labs:mujoco-sim:camera
 
-An RGB camera rendered offscreen. Place it with its standard frame and aim it
-at a point with `target`.
+An RGB-D camera rendered offscreen. Place it on the world with its standard
+frame and aim it at a point with `target`, or mount it on an arm's end effector
+by making the arm its frame parent.
 
 ### Configuration
 
@@ -289,16 +293,41 @@ at a point with `target`.
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
 
-The frame's `parent` must be `world`. A frame orientation is read in Viam's
-camera convention: +Z forward, +Y down.
+The frame's `parent` is `world` or a `viam-labs:mujoco-sim:arm`. A frame
+orientation is read in Viam's camera convention: +Z forward, +Y down.
+
+### Wrist camera
+
+With an arm as its frame parent, the camera rides that arm's end effector, and
+its frame is relative to the end-effector frame the frame system uses. With no
+orientation it looks along the tool axis. `target` is rejected, because it
+names a fixed point in the world. This one sits 60 mm to the side of the jaws
+and 30 mm down the tool axis:
+
+```json
+{
+  "name": "wrist-cam",
+  "api": "rdk:component:camera",
+  "model": "viam-labs:mujoco-sim:camera",
+  "frame": {
+    "parent": "pick-arm",
+    "translation": { "x": 0, "y": 60, "z": 30 }
+  },
+  "attributes": { "world": "sim-world", "fov_deg": 70, "depth": true }
+}
+```
+
+Mount it on the arm, not the gripper: the module doesn't know the gripper
+frame's offset. Until the arm is configured, the camera's methods return an
+error saying the camera is not in the scene.
 
 ### Supported API
 
 | Method | Notes |
 |---|---|
-| `GetImages` | One JPEG named after the component. |
-| `GetProperties` | Intrinsics computed from `fov_deg` and the image size. |
-| `GetPointCloud` | Not supported. |
+| `GetImages` | A JPEG named after the component and, with `depth`, a `depth` image in Viam's raw depth format (millimeters, 0 where nothing is in view). Both come from the same sim step. `filter_source_names` picks either one. Raw depth is uncompressed, 2 bytes a pixel: 150 KB a frame at the default 320 x 240, 600 KB at 640 x 480. |
+| `GetProperties` | Intrinsics of the color image, computed from `fov_deg` and the image size. The depth image has the same vertical field of view at its own size. |
+| `GetPointCloud` | Colored binary PCD in meters, in the camera's frame. Pixels with nothing in view are left out. Works whether or not `depth` is set. |
 
 ## Things to know
 
@@ -315,8 +344,12 @@ camera convention: +Z forward, +Y down.
   overlap at reachable wrist angles, so those wrist-link pairs are excluded.
   The gripper and links 3–6 still collide with the base and shoulder, which
   Viam's planner can't see.
-- **Place components relative to `world`.** Arm and camera frames must have
-  parent `world`; the gripper's frame parent is its arm.
+- **Place components relative to `world`.** Arm frames must have parent
+  `world`; the gripper's frame parent is its arm, and a camera's is `world` or
+  an arm.
+- **Depth is ideal.** It has no noise, holes or minimum range, unlike a real
+  depth sensor. On macOS, MuJoCo warns that depth accuracy is limited; at 1 m
+  it is still within 1 mm.
 - **Kinematics are vendored.** `GetKinematics` serves
   `assets/ufactory_lite6/lite6_kinematics.json` (from
   viam-ufactory-xarm@73551eac). The `kinematics_url` attribute overrides it.

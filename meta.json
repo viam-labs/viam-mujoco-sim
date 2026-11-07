@@ -26,7 +26,7 @@
     {
       "model": "viam-labs:mujoco-sim:camera",
       "api": "rdk:component:camera",
-      "short_description": "An RGB camera in the MuJoCo scene",
+      "short_description": "An RGB-D camera on the world or an arm's end effector",
       "markdown_link": "README.md#model-viam-labsmujoco-simcamera"
     }
   ],

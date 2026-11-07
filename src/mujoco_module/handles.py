@@ -25,6 +25,7 @@ Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]  # (w, x, y, z), MuJoCo's order
 
 DEFAULT_MAX_JOINT_DEG_S = 180.0
+VIAM_END_SITE = "viam_end"
 DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S = 0.01
 
 
@@ -100,6 +101,14 @@ class ArmHandle:
                     actuator.name = actuator.target
             frame = spec.worldbody.add_frame(pos=position, quat=orientation)
             spec.attach(child, prefix=self._prefix, frame=frame)
+            # Viam's end-effector frame, which children of the arm's frame
+            # (a wrist camera) are placed relative to.
+            flange = spec.site(self._prefix + meta["flange_site"])
+            end_quat = np.zeros(4)
+            mujoco.mju_mulQuat(end_quat, flange.quat, np.asarray(meta["flange_offset_wxyz"], float))
+            flange.parent.add_site(
+                name=self._prefix + VIAM_END_SITE, pos=list(flange.pos), quat=list(end_quat)
+            )
             for first, second in meta.get("self_collision_excluded_pairs", ()):
                 spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
 
@@ -487,43 +496,117 @@ _VIAM_TO_MUJOCO_CAMERA = Quaternion(0.0, 1.0, 0.0, 0.0)
 
 
 class CameraHandle:
+    """A camera on the world, or, with a parent arm, on that arm's end
+    effector. A mounted camera's position and orientation are relative to
+    Viam's end-effector frame, as the frame system reads them."""
+
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         self._sim = sim
         self.name = name
+        self.parent: str | None = attrs.get("parent")
         self.width = int(attrs.get("width", 640))
         self.height = int(attrs.get("height", 480))
         self.fov_deg = float(attrs.get("fov_deg", 60.0))
-        position = tuple(float(value) for value in attrs.get("position", (1.0, 1.0, 1.0)))
+        # depth defaults to half the color size: raw depth is 2 bytes a pixel, uncompressed
+        self.depth_width = int(attrs.get("depth_width", max(1, self.width // 2)))
+        self.depth_height = int(attrs.get("depth_height", max(1, self.height // 2)))
+        default_position = (0.0, 0.0, 0.0) if self.parent else (1.0, 1.0, 1.0)
+        position = tuple(float(value) for value in attrs.get("position", default_position))
         if attrs.get("target") is not None:
             quat = _look_at(position, attrs["target"])
-        elif attrs.get("orientation_wxyz") is not None:
-            mj = Quaternion(*[float(value) for value in attrs["orientation_wxyz"]]) * _VIAM_TO_MUJOCO_CAMERA
+        elif attrs.get("orientation_wxyz") is not None or self.parent:
+            viam = Quaternion(*[float(v) for v in attrs.get("orientation_wxyz", (1, 0, 0, 0))])
+            mj = viam * _VIAM_TO_MUJOCO_CAMERA
             quat = (mj.w, mj.i, mj.j, mj.k)
         else:
             quat = _look_at(position, (0.0, 0.0, 0.0))
 
         def build(spec: mujoco.MjSpec) -> None:
-            spec.worldbody.add_camera(
-                name=name, pos=list(position), quat=list(quat), fovy=self.fov_deg
+            body, pos, rot = spec.worldbody, np.asarray(position), np.asarray(quat)
+            if self.parent:
+                end = spec.site(f"{self.parent}/{VIAM_END_SITE}")
+                if end is None:
+                    return  # arm not configured (yet); render() says so
+                body = end.parent
+                pos = np.zeros(3)
+                mujoco.mju_rotVecQuat(pos, np.asarray(position), end.quat)
+                pos += end.pos
+                rot = np.zeros(4)
+                mujoco.mju_mulQuat(rot, end.quat, np.asarray(quat))
+            body.add_camera(name=name, pos=list(pos), quat=list(rot), fovy=self.fov_deg)
+            spec.visual.global_.offwidth = max(
+                spec.visual.global_.offwidth, self.width, self.depth_width
             )
-            spec.visual.global_.offwidth = max(spec.visual.global_.offwidth, self.width)
-            spec.visual.global_.offheight = max(spec.visual.global_.offheight, self.height)
+            spec.visual.global_.offheight = max(
+                spec.visual.global_.offheight, self.height, self.depth_height
+            )
 
-        sim.set_contribution(name, Contribution(build=build))
+        sizes = ((self.width, self.height), (self.depth_width, self.depth_height))
+        sim.set_contribution(
+            name, Contribution(build=build, late=bool(self.parent), render_sizes=sizes)
+        )
 
     def close(self) -> None:
         self._sim.remove_contribution(self.name)
 
     def get_rgb(self) -> np.ndarray:
-        return self._sim.render(self.name, self.width, self.height)
+        return self._sim.render(self.name, self.width, self.height)[0]
 
-    def intrinsics(self) -> dict[str, float]:
-        focal = (self.height / 2.0) / math.tan(math.radians(self.fov_deg) / 2.0)
+    def get_rgbd(self) -> tuple[np.ndarray, np.ndarray]:
+        """RGB and depth in meters (0 = nothing in view) from one sim state."""
+        rgb, depth = self._sim.render(
+            self.name, self.width, self.height, depth_size=(self.depth_width, self.depth_height)
+        )
+        assert depth is not None
+        return rgb, depth
+
+    def intrinsics(self, width: int | None = None, height: int | None = None) -> dict[str, float]:
+        """Pinhole intrinsics of the color image, or of an image of the given
+        size from the same camera (the depth image)."""
+        width, height = width or self.width, height or self.height
+        focal = (height / 2.0) / math.tan(math.radians(self.fov_deg) / 2.0)
         return {
-            "width_px": self.width,
-            "height_px": self.height,
+            "width_px": width,
+            "height_px": height,
             "focal_x_px": focal,
             "focal_y_px": focal,
-            "center_x_px": self.width / 2.0,
-            "center_y_px": self.height / 2.0,
+            "center_x_px": width / 2.0,
+            "center_y_px": height / 2.0,
         }
+
+    def point_cloud(self) -> tuple[np.ndarray, np.ndarray]:
+        """Points in Viam's camera frame (+Z forward, +Y down), meters, with
+        their RGB colors. Pixels with nothing in view are dropped."""
+        rgb, depth = self.get_rgbd()
+        k = self.intrinsics(self.depth_width, self.depth_height)
+        rows, cols = np.nonzero(depth)
+        z = depth[rows, cols]
+        x = (cols + 0.5 - k["center_x_px"]) * z / k["focal_x_px"]
+        y = (rows + 0.5 - k["center_y_px"]) * z / k["focal_y_px"]
+        # the color pixel each depth pixel's ray passes through
+        c = self.intrinsics()
+        u = np.clip(c["center_x_px"] + x / z * c["focal_x_px"], 0, self.width - 1).astype(int)
+        v = np.clip(c["center_y_px"] + y / z * c["focal_y_px"], 0, self.height - 1).astype(int)
+        return np.column_stack([x, y, z]).astype(np.float32), rgb[v, u]
+
+
+def encode_depth(depth_m: np.ndarray) -> bytes:
+    """Viam's raw depth format (image/vnd.viam.dep): "DEPTHMAP", width and
+    height as big-endian uint64, then big-endian uint16 millimeters."""
+    height, width = depth_m.shape
+    mm = np.clip(np.rint(depth_m * 1000.0), 0, 65535).astype(">u2")
+    return b"DEPTHMAP" + width.to_bytes(8, "big") + height.to_bytes(8, "big") + mm.tobytes()
+
+
+def encode_pcd(points: np.ndarray, colors: np.ndarray) -> bytes:
+    """Binary PCD in meters with packed rgb, as rdk's pointcloud reader expects."""
+    count = len(points)
+    header = (
+        "VERSION .7\nFIELDS x y z rgb\nSIZE 4 4 4 4\nTYPE F F F I\nCOUNT 1 1 1 1\n"
+        f"WIDTH {count}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS {count}\nDATA binary\n"
+    )
+    record = np.zeros(count, dtype=[("xyz", "<f4", 3), ("rgb", "<u4")])
+    record["xyz"] = points
+    c = colors.astype(np.uint32)
+    record["rgb"] = (c[:, 0] << 16) | (c[:, 1] << 8) | c[:, 2]
+    return header.encode() + record.tobytes()

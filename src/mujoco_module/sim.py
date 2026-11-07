@@ -181,10 +181,15 @@ class WorldConfig:
 class Contribution:
     """What one component adds to the scene. build edits a fresh spec on every
     rebuild; init runs on the first model that contains the contribution, and
-    again on reset()."""
+    again on reset(). late contributions build after the rest, so they can
+    attach to bodies another contribution added (a wrist camera on its arm).
+    render_sizes are (width, height) renderers built and warmed with each
+    model, so a camera's first frame doesn't stall the step loop."""
 
     build: Callable[[mujoco.MjSpec], None]
     init: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None
+    late: bool = False
+    render_sizes: tuple[tuple[int, int], ...] = ()
 
 
 def _copy_state(
@@ -392,7 +397,7 @@ class SimManager:
                 priority=PROP_CONTACT_PRIORITY,
                 solref=list(PROP_SOLREF),
             )
-        for contribution in self._contributions.values():
+        for contribution in sorted(self._contributions.values(), key=lambda c: c.late):
             contribution.build(spec)
         return spec
 
@@ -410,6 +415,8 @@ class SimManager:
         self._close_renderers()
         self.model, self.data = model, data
         self.generation += 1
+        for size in {size for c in self._contributions.values() for size in c.render_sizes}:
+            self._renderer(*size).render()  # the first draw uploads the scene to the GPU
         self._reanchor()
 
     # ------------------------------------------------------------------
@@ -596,16 +603,48 @@ class SimManager:
     # rendering
     # ------------------------------------------------------------------
 
-    def render(self, camera: str, width: int, height: int) -> np.ndarray:
-        def draw() -> np.ndarray:
+    def _renderer(self, width: int, height: int) -> mujoco.Renderer:
+        assert self.model is not None
+        renderer = self._renderers.get((width, height))
+        if renderer is None:
+            renderer = mujoco.Renderer(self.model, height=height, width=width)
+            self._renderers[(width, height)] = renderer
+        return renderer
+
+    def render(
+        self,
+        camera: str,
+        width: int,
+        height: int,
+        depth_size: tuple[int, int] | None = None,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        """RGB at width x height and, with depth_size, depth in meters along
+        the optical axis at that size, both from the same sim state. Depth is
+        0 where nothing is in view."""
+
+        def draw() -> tuple[np.ndarray, np.ndarray | None]:
             self.require_world()
-            key = (width, height)
-            renderer = self._renderers.get(key)
-            if renderer is None:
-                renderer = mujoco.Renderer(self.model, height=height, width=width)
-                self._renderers[key] = renderer
+            assert self.model is not None
+            if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera) < 0:
+                raise RuntimeError(
+                    f"camera {camera!r} is not in the scene; if its frame parent is "
+                    "an arm, configure that viam-labs:mujoco-sim:arm"
+                )
+            renderer = self._renderer(width, height)
             renderer.update_scene(self.data, camera=camera)
-            return renderer.render().copy()
+            rgb = renderer.render().copy()
+            if depth_size is None:
+                return rgb, None
+            renderer = self._renderer(*depth_size)
+            renderer.update_scene(self.data, camera=camera)
+            renderer.enable_depth_rendering()
+            try:
+                meters = renderer.render().copy()
+            finally:
+                renderer.disable_depth_rendering()
+            far = self.model.vis.map.zfar * self.model.stat.extent
+            meters[meters >= far * 0.999] = 0.0
+            return rgb, meters
 
         return self.run(draw)
 

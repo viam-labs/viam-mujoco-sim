@@ -118,7 +118,25 @@ def test_camera_properties(cell):
     properties = run(camera.get_properties())
     assert properties.intrinsic_parameters.width_px == 640
     images, _ = run(camera.get_images())
+    assert [image.name for image in images] == ["scene-cam"]
     assert images[0].data[:2] == b"\xff\xd8"  # JPEG
+    assert properties.supports_pcd
+
+
+def test_wrist_camera_returns_depth_and_point_cloud(cell):
+    cfg = config("wrist-cam", {"world": "sim-world", "depth": True, "width": 64, "height": 48})
+    cfg.frame.parent = "pick-arm"
+    cfg.frame.translation.z = 50  # mm along the tool axis
+    camera = MujocoCamera.new(cfg, {})
+    images, _ = run(camera.get_images())
+    assert [image.name for image in images] == ["wrist-cam", "depth"]
+    depth = images[1].bytes_to_depth_array()
+    assert (len(depth), len(depth[0])) == (24, 32)
+    only_depth, _ = run(camera.get_images(filter_source_names=["depth"]))
+    assert [image.name for image in only_depth] == ["depth"]
+    data, mime = run(camera.get_point_cloud())
+    assert mime == "pointcloud/pcd"
+    assert data.startswith(b"VERSION .7\nFIELDS x y z rgb")
 
 
 def test_arm_rejects_non_finite_targets(cell):
@@ -179,14 +197,23 @@ def test_kinematics_is_vendored(cell):
     assert json.loads(data)["name"] == "lite6"
 
 
-@pytest.mark.parametrize("model, attrs", [(MujocoArm, {"asset": "lite6"}), (MujocoCamera, {})])
-def test_frame_parent_must_be_world(model, attrs):
-    cfg = config("x", {"world": "sim-world", **attrs})
+def test_arm_frame_parent_must_be_world():
+    cfg = config("x", {"world": "sim-world", "asset": "lite6"})
     cfg.frame.parent = "world"
-    model.validate_config(cfg)
+    MujocoArm.validate_config(cfg)
     cfg.frame.parent = "pick-arm"
     with pytest.raises(ValueError, match="frame.parent must be"):
-        model.validate_config(cfg)
+        MujocoArm.validate_config(cfg)
+
+
+def test_camera_frame_parent_may_be_an_arm_but_not_aimed():
+    cfg = config("wrist", {"world": "sim-world"})
+    cfg.frame.parent = "pick-arm"
+    MujocoCamera.validate_config(cfg)
+    cfg = config("wrist", {"world": "sim-world", "target": [0, 0, 0]})
+    cfg.frame.parent = "pick-arm"
+    with pytest.raises(ValueError, match="target can't aim"):
+        MujocoCamera.validate_config(cfg)
 
 
 def test_gripper_frame_parent_may_be_its_arm():

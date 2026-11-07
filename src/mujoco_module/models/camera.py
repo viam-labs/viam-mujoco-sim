@@ -1,4 +1,4 @@
-"""viam-labs:mujoco-sim:camera - an RGB camera in the MuJoCo scene.
+"""viam-labs:mujoco-sim:camera - an RGB-D camera in the MuJoCo scene.
 
 Attributes:
   world (string, required) - name of the viam-labs:mujoco-sim:world component
@@ -10,10 +10,15 @@ Attributes:
   orientation_wxyz ([w,x,y,z]) - fallback orientation when no frame is set
   orientation_rpy_deg ([r,p,y]) - same, as roll/pitch/yaw; orientation_wxyz
                              wins if both are given
+  depth (bool)             - GetImages also returns a "depth" image (default false)
+  depth_width / depth_height (int) - depth image and point cloud size
+                             (default half of width / height)
 
-Place it with the standard frame (translation in mm); frame.parent must be
-"world". A frame orientation is read in Viam's camera convention: +Z forward,
-+Y down. `target`, when set, takes precedence over a frame orientation.
+Place it with the standard frame (translation in mm). frame.parent is "world",
+or a viam-labs:mujoco-sim:arm to mount the camera on that arm's end effector.
+A frame orientation is read in Viam's camera convention: +Z forward, +Y down.
+`target`, when set, takes precedence over a frame orientation; a mounted
+camera can't use it.
 """
 
 import asyncio
@@ -33,7 +38,7 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 
 from .. import FAMILY, NAMESPACE
-from ..handles import CameraHandle
+from ..handles import CameraHandle, encode_depth, encode_pcd
 from ..sim import SimManager
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -44,6 +49,7 @@ class MujocoCamera(Camera, EasyResource):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         self._handle: Optional[CameraHandle] = None
+        self._depth = False
 
     @classmethod
     def new(
@@ -58,7 +64,7 @@ class MujocoCamera(Camera, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = get_attrs(config)
-        for key in ("width", "height"):
+        for key in ("width", "height", "depth_width", "depth_height"):
             raw = attrs.get(key, 1)
             if (
                 isinstance(raw, bool)
@@ -76,13 +82,24 @@ class MujocoCamera(Camera, EasyResource):
             or not 0 < fov < 180
         ):
             raise ValueError(f"{config.name}: fov_deg must be finite and between 0 and 180")
-        return validate_sim_component(config, needs_asset=False)
+        if not isinstance(attrs.get("depth", False), bool):
+            raise ValueError(f"{config.name}: depth must be true or false")
+        mounted = config.HasField("frame") and config.frame.parent != "world"
+        if mounted and attrs.get("target") is not None:
+            raise ValueError(
+                f"{config.name}: target can't aim a camera mounted on {config.frame.parent!r}; "
+                "orient it with the frame instead"
+            )
+        return validate_sim_component(config, needs_asset=False, world_frame_only=False)
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs: Dict[str, Any] = apply_frame_to_attrs(config, get_attrs(config))
+        if config.HasField("frame") and config.frame.parent != "world":
+            attrs["parent"] = config.frame.parent
+        self._depth = bool(attrs.get("depth", False))
         self._handle = CameraHandle(SimManager.get(), self.name, attrs)
 
     async def close(self) -> None:
@@ -95,23 +112,37 @@ class MujocoCamera(Camera, EasyResource):
             raise RuntimeError(f"camera {self.name} is not attached to the sim")
         return self._handle
 
-    def _jpeg(self) -> bytes:
-        buffer = BytesIO()
-        Image.fromarray(self._h().get_rgb(), mode="RGB").save(buffer, format="JPEG", quality=90)
-        return buffer.getvalue()
+    def _images(self, sources: Optional[Sequence[str]]) -> List[NamedImage]:
+        want_color = not sources or self.name in sources
+        want_depth = self._depth and (not sources or "depth" in sources)
+        if want_depth:
+            rgb, depth = self._h().get_rgbd()
+        else:
+            rgb, depth = self._h().get_rgb(), None
+        images = []
+        if want_color:
+            buffer = BytesIO()
+            Image.fromarray(rgb, mode="RGB").save(buffer, format="JPEG", quality=90)
+            images.append(NamedImage(self.name, buffer.getvalue(), CameraMimeType.JPEG))
+        if depth is not None:
+            images.append(NamedImage("depth", encode_depth(depth), CameraMimeType.VIAM_RAW_DEPTH))
+        return images
 
-    async def get_images(self, **kwargs) -> Tuple[List[NamedImage], ResponseMetadata]:
-        data = await asyncio.to_thread(self._jpeg)
-        return [NamedImage(self.name, data, CameraMimeType.JPEG)], ResponseMetadata()
+    async def get_images(
+        self, *, filter_source_names: Optional[Sequence[str]] = None, **kwargs
+    ) -> Tuple[List[NamedImage], ResponseMetadata]:
+        images = await asyncio.to_thread(self._images, filter_source_names)
+        return images, ResponseMetadata()
 
     async def get_point_cloud(self, **kwargs) -> Tuple[bytes, str]:
-        raise NotImplementedError("point clouds are not supported")
+        points, colors = await asyncio.to_thread(self._h().point_cloud)
+        return encode_pcd(points, colors), CameraMimeType.PCD
 
     async def get_geometries(self, **kwargs):
         return []
 
     async def get_properties(self, **kwargs) -> GetPropertiesResponse:
         return GetPropertiesResponse(
-            supports_pcd=False,
+            supports_pcd=True,
             intrinsic_parameters=IntrinsicParameters(**self._h().intrinsics()),
         )
