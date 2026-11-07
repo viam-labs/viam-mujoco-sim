@@ -1,7 +1,7 @@
 import mujoco
 import pytest
 
-from mujoco_module.sim import MAX_SUBSTEPS, SLIP_THRESHOLD_S, WorldConfig
+from mujoco_module.sim import MAX_SUBSTEPS, SLIP_THRESHOLD_S, SimManager, WorldConfig
 from conftest import BLOCK
 
 
@@ -99,3 +99,48 @@ def test_failing_step_callback_is_removed(sim):
     sim.step_callbacks["boom"] = boom
     sim.advance(0.01)
     assert "boom" not in sim.step_callbacks
+
+
+def test_run_fails_fast_after_main_loop_stops():
+    import threading
+
+    manager = SimManager()
+    thread = threading.Thread(target=manager.main_loop, daemon=True)
+    thread.start()
+    manager.request_stop()
+    thread.join(timeout=5)
+    with pytest.raises(RuntimeError, match="stopped"):
+        manager.run(lambda: None, timeout=5)
+
+
+def test_rebuild_carries_state_and_inits_only_new_contributions(sim):
+    from mujoco_module.sim import Contribution
+
+    inits = []
+
+    def build(spec):
+        body = spec.worldbody.add_body(name="pendulum", pos=[1, 1, 1])
+        body.add_joint(name="swing", type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 1, 0])
+        body.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.05], mass=1.0)
+        spec.add_actuator(name="swing", target="swing",
+                          trntype=mujoco.mjtTrn.mjTRN_JOINT, gainprm=[1] + [0] * 9)
+
+    def init(model, data):
+        inits.append(1)
+        data.qpos[model.joint("swing").qposadr[0]] = 0.5
+
+    sim.set_contribution("pendulum", Contribution(build=build, init=init))
+    sim.data.ctrl[sim.model.actuator("swing").id] = 0.25
+    sim.advance(0.2)
+    swing = float(sim.data.qpos[sim.model.joint("swing").qposadr[0]])
+    before_t = sim.data.time
+    # a new prop listed FIRST shifts every qpos address
+    extra = {"name": "aaa_first", "size": 0.03, "position": [-1, -1, 0.5]}
+    sim.configure_world(WorldConfig.from_attrs({"props": [extra, BLOCK]}))
+    assert sim.data.time == before_t
+    assert sim.data.qpos[sim.model.joint("swing").qposadr[0]] == pytest.approx(swing)
+    assert sim.data.ctrl[sim.model.actuator("swing").id] == 0.25
+    sim.set_contribution("pendulum", Contribution(build=build, init=init))  # replaced
+    assert inits == [1]
+    sim.reset()
+    assert inits == [1, 1]

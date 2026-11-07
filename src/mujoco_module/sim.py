@@ -213,6 +213,7 @@ class SimManager:
         self._clock = clock
         self._tasks: queue.Queue[tuple[Callable[[], Any], Future]] = queue.Queue()
         self._stop = threading.Event()
+        self._stopped = False
         self._sim_thread_id: int | None = None
         self.cfg: WorldConfig | None = None
         self.model: mujoco.MjModel | None = None
@@ -241,6 +242,8 @@ class SimManager:
         """Run fn on the sim thread and return its result."""
         if threading.get_ident() == self._sim_thread_id:
             return fn()
+        if self._stopped:
+            raise RuntimeError("the simulator has stopped")
         future: Future = Future()
         self._tasks.put((fn, future))
         try:
@@ -257,10 +260,18 @@ class SimManager:
         try:
             while not self._stop.is_set():
                 self._drain_tasks()
-                self.tick()
-                if self.cfg is None or self.cfg.real_time:
+                stepped = self.tick()
+                if not stepped or (self.cfg is not None and self.cfg.real_time):
                     time.sleep(0.001)
         finally:
+            self._stopped = True
+            while True:
+                try:
+                    _, future = self._tasks.get_nowait()
+                except queue.Empty:
+                    break
+                if future.set_running_or_notify_cancel():
+                    future.set_exception(RuntimeError("the simulator has stopped"))
             self._close_renderers()
 
     def _drain_tasks(self) -> None:
@@ -318,8 +329,13 @@ class SimManager:
 
     def remove_contribution(self, name: str) -> None:
         def remove() -> None:
-            if self._contributions.pop(name, None) is not None and self.cfg is not None:
-                self._rebuild(fresh=set())
+            old = self._contributions.pop(name, None)
+            if old is not None and self.cfg is not None:
+                try:
+                    self._rebuild(fresh=set())
+                except BaseException:
+                    self._contributions[name] = old
+                    raise
 
         self.run(remove)
 
@@ -401,17 +417,19 @@ class SimManager:
         while self.data.time < end - 1e-9:
             self.step_once()
 
-    def tick(self) -> None:
-        """One main-loop iteration of stepping."""
+    def tick(self) -> bool:
+        """One main-loop iteration of stepping. True if it ran at least one
+        step, False if it did nothing (no world, paused, or already caught up)."""
         if self.model is None or self.data is None or not self.playing:
-            return
+            return False
         assert self.cfg is not None
+        substeps = 0
         if not self.cfg.real_time:
             for _ in range(MAX_SUBSTEPS):
                 self.step_once()
+                substeps += 1
         else:
             target = self._anchor_sim + (self._clock() - self._anchor_wall)
-            substeps = 0
             while self.data.time < target - 1e-9 and substeps < MAX_SUBSTEPS:
                 self.step_once()
                 substeps += 1
@@ -419,6 +437,7 @@ class SimManager:
                 self.slips += 1
                 self._reanchor()
         self._sample_rtf()
+        return substeps > 0
 
     def _reanchor(self) -> None:
         self._anchor_wall = self._clock()
