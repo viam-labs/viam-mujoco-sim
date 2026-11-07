@@ -11,7 +11,7 @@ from __future__ import annotations
 import itertools
 import math
 from collections.abc import Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
 from typing import Any
 
@@ -112,7 +112,11 @@ class ArmHandle:
         sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
 
     def close(self) -> None:
-        self._sim.run(lambda: self._sim.step_callbacks.pop(self._callback_key, None))
+        def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
+            self._drop_trajectory()
+
+        self._sim.run(detach)
         self._sim.remove_contribution(self.name)
 
     # -- ids -------------------------------------------------------------
@@ -140,6 +144,27 @@ class ArmHandle:
     def _on_step(self, dt: float) -> None:
         data, ids = self._now()
         trajectory = self._trajectory
+        try:
+            self._step(dt, data, ids, trajectory)
+        except Exception as exc:
+            # keep the callback alive so the arm keeps holding position
+            self._trajectory = None
+            self._target = data.ctrl[ids.ctrl].copy()
+            if trajectory is None:
+                raise
+            if not trajectory.future.done():
+                try:
+                    trajectory.future.set_exception(exc)
+                except InvalidStateError:
+                    pass
+
+    def _step(
+        self,
+        dt: float,
+        data: mujoco.MjData,
+        ids: _ArmIds,
+        trajectory: _Trajectory | None,
+    ) -> None:
         if trajectory is not None:
             t = data.time - trajectory.start_s
             final = trajectory.points[-1]
@@ -148,7 +173,10 @@ class ArmHandle:
                 data.ctrl[ids.ctrl] = self._target
                 self._trajectory = None
                 if not trajectory.future.done():
-                    trajectory.future.set_result(None)
+                    try:
+                        trajectory.future.set_result(None)
+                    except InvalidStateError:
+                        pass
             else:
                 data.ctrl[ids.ctrl] = _interpolate(trajectory.points, t)
             return
@@ -235,12 +263,22 @@ class ArmHandle:
         last point's time passes; the arm then holds that point."""
         if not points:
             raise ValueError("trajectory needs at least one point")
+        count = len(self._joint_names)
+        if any(len(point.positions) != count for point in points):
+            raise ValueError(f"every trajectory point needs {count} positions")
+        times = [point.time_s for point in points]
+        if times[0] < 0 or any(b < a for a, b in itertools.pairwise(times)):
+            raise ValueError("trajectory times must be non-negative and non-decreasing")
         future: Future = Future()
 
         def start() -> None:
             self._drop_trajectory()
-            assert self._sim.data is not None
-            self._trajectory = _Trajectory(tuple(points), self._sim.data.time, future)
+            data, ids = self._now()
+            pts = tuple(points)
+            if pts[0].time_s > 0:  # start from the commanded pose, don't extrapolate back
+                here = tuple(float(v) for v in data.ctrl[ids.ctrl])
+                pts = (JointTrajectoryPoint(0.0, here), *pts)
+            self._trajectory = _Trajectory(pts, data.time, future)
 
         self._sim.run(start)
         return future
@@ -254,8 +292,11 @@ class ArmHandle:
 
     def stop(self) -> None:
         def stop() -> None:
-            self._drop_trajectory()
-            self._hold_measured()
+            if self._drop_trajectory() is not None:
+                self._hold_measured()
+            else:  # measured qpos includes gravity sag; holding it would ratchet down
+                data, ids = self._now()
+                self._target = data.ctrl[ids.ctrl].copy()
 
         self._sim.run(stop)
 

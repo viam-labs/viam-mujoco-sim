@@ -114,3 +114,31 @@ def test_rebuild_keeps_arm_state_and_time(sim):
     assert arm.get_joint_positions() == pytest.approx(before_q)
     sim.advance(0.5)
     assert arm.get_joint_positions() == pytest.approx(target, abs=0.01)
+
+
+def test_bad_trajectory_is_rejected_up_front(sim):
+    arm = make_arm(sim)
+    with pytest.raises(ValueError):
+        arm.start_trajectory([JointTrajectoryPoint(0.0, (0.0,) * 5)])
+    with pytest.raises(ValueError):
+        arm.start_trajectory([JointTrajectoryPoint(1.0, tuple(HOME)), JointTrajectoryPoint(0.5, tuple(HOME))])
+    assert "arm:pick-arm" in sim.step_callbacks
+
+
+def test_batch_starting_after_zero_interpolates_from_command(sim):
+    arm = make_arm(sim)
+    sim.advance(0.5)
+    done = arm.start_trajectory([JointTrajectoryPoint(0.5, (0.5, 0, 1.57, 0, 1.57, 0))])
+    sim.step_once()
+    ids = arm._now()[1]
+    assert sim.data.ctrl[ids.ctrl][0] == pytest.approx(0.0, abs=0.01)  # no backwards jump
+    sim.advance(0.6)
+    assert done.done()
+
+
+def test_close_cancels_inflight_trajectory(sim):
+    arm = make_arm(sim)
+    done = arm.start_trajectory([JointTrajectoryPoint(0.0, tuple(HOME)), JointTrajectoryPoint(5.0, tuple(HOME))])
+    arm.close()
+    assert done.cancelled()
+    assert "arm:pick-arm" not in sim.step_callbacks
