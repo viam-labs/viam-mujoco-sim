@@ -3,26 +3,31 @@
   "visibility": "public",
   "url": "https://github.com/viam-labs/viam-mujoco-sim",
   "description": "Control and simulate robots in MuJoCo through Viam",
+  "markdown_link": "README.md",
   "models": [
     {
       "model": "viam-labs:mujoco-sim:world",
       "api": "rdk:component:generic",
-      "short_description": "Owns the MuJoCo scene, props and step loop"
+      "short_description": "Owns the MuJoCo scene, props and step loop",
+      "markdown_link": "README.md#model-viam-labsmujoco-simworld"
     },
     {
       "model": "viam-labs:mujoco-sim:arm",
       "api": "rdk:component:arm",
-      "short_description": "A simulated arm (Lite6)"
+      "short_description": "A simulated arm (Lite6)",
+      "markdown_link": "README.md#model-viam-labsmujoco-simarm"
     },
     {
       "model": "viam-labs:mujoco-sim:gripper",
       "api": "rdk:component:gripper",
-      "short_description": "The Lite6's integrated binary gripper"
+      "short_description": "The Lite6's integrated binary gripper",
+      "markdown_link": "README.md#model-viam-labsmujoco-simgripper"
     },
     {
       "model": "viam-labs:mujoco-sim:camera",
       "api": "rdk:component:camera",
-      "short_description": "An RGB camera in the MuJoCo scene"
+      "short_description": "An RGB camera in the MuJoCo scene",
+      "markdown_link": "README.md#model-viam-labsmujoco-simcamera"
     }
   ],
   "entrypoint": "run.sh",
@@ -30,6 +35,9 @@
   "build": {
     "build": "make module.tar.gz",
     "path": "module.tar.gz",
-    "arch": ["linux/amd64", "darwin/arm64"]
+    "arch": [
+      "linux/amd64",
+      "darwin/arm64"
+    ]
   }
 }
