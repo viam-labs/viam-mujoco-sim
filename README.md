@@ -19,6 +19,8 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6 placed by its frame, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's integrated binary gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
+| [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover you can drive; ideal motion, visual wheels. |
+| [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
 
 ## Getting started
 
@@ -39,8 +41,10 @@ world. [`examples/lite6-pick.json`](examples/lite6-pick.json) is a complete
 pick cell. Its `pick_block` starts parked out of reach at x = 2.5 m on purpose;
 `scripted_pick.py` from
 [viam-isaac-sim](https://github.com/viam-modules/viam-isaac-sim) places it with
-`set_prop_pose`. With an arm and gripper configured, the builtin motion service
-plans for the arm as it would for a real one.
+`set_prop_pose`. [`examples/rover-lidar.json`](examples/rover-lidar.json) is a
+rover cell: a rover with a LIDAR inside a walled pen. With an arm and gripper
+configured, the builtin motion service plans for the arm as it would for a real
+one.
 
 ## Model viam-labs:mujoco-sim:world
 
@@ -293,8 +297,9 @@ by making the arm its frame parent.
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
 
-The frame's `parent` is `world` or a `viam-labs:mujoco-sim:arm`. A frame
-orientation is read in Viam's camera convention: +Z forward, +Y down.
+The frame's `parent` is `world` or another mujoco-sim component: an arm's end
+effector or a base. A frame orientation is read in Viam's camera convention:
++Z forward, +Y down.
 
 ### Wrist camera
 
@@ -329,6 +334,128 @@ error saying the camera is not in the scene.
 | `GetProperties` | Intrinsics of the color image, computed from `fov_deg` and the image size. The depth image has the same vertical field of view at its own size. |
 | `GetPointCloud` | Colored binary PCD in meters, in the camera's frame. Pixels with nothing in view are left out. Works whether or not `depth` is set. |
 
+## Model viam-labs:mujoco-sim:base
+
+A Viam Rover 2, with the dimensions from Viam's rover fragment: a 381 mm wheel
+circumference and a 356 mm track. It drives exactly as commanded; the wheels
+are visual.
+
+### Configuration
+
+```json
+{
+  "name": "rover",
+  "api": "rdk:component:base",
+  "model": "viam-labs:mujoco-sim:base",
+  "frame": { "parent": "world" },
+  "attributes": {
+    "world": "sim-world",
+    "asset": "viam_rover"
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `asset` | string | Yes | | The robot. Only `"viam_rover"` is supported. |
+| `max_linear_mps` | float | No | `0.762` | Top speed in meters per second; scales `SetPower`. |
+| `max_angular_dps` | float | No | `245` | Top yaw rate in degrees per second; scales `SetPower`. |
+| `move_timeout_margin_sec` | float | No | `2` | Extra sim time `MoveStraight` and `Spin` get, beyond distance over speed, before they fail as stalled. |
+| `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
+| `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
+| `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
+
+The frame's `parent` must be `world`. +Y is forward, and the origin is at floor
+level between the wheels.
+
+### Camera on the rover
+
+A camera framed on the rover with no orientation looks along the rover's +Z,
+straight up. To look forward, rotate the camera -90 degrees about X, which turns
+its +Z (forward) to the rover's +Y and its +Y (image down) to the rover's -Z.
+This one sits 120 mm ahead of the origin and 150 mm up:
+
+```json
+{
+  "name": "rover-cam",
+  "api": "rdk:component:camera",
+  "model": "viam-labs:mujoco-sim:camera",
+  "frame": {
+    "parent": "rover",
+    "translation": { "x": 0, "y": 120, "z": 150 },
+    "orientation": {
+      "type": "quaternion",
+      "value": { "w": 0.7071068, "x": -0.7071068, "y": 0, "z": 0 }
+    }
+  },
+  "attributes": { "world": "sim-world" }
+}
+```
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `MoveStraight` | Returns when the rover has gone the distance; a zero distance returns at once, and a zero velocity is rejected. Fails as stalled after distance / speed plus `move_timeout_margin_sec` of sim time, and when stopped, superseded, reset or closed. |
+| `Spin` | Same as `MoveStraight`, for an angle: a zero angle returns at once and a zero velocity is rejected. |
+| `SetVelocity` | `linear.y` in mm/s and `angular.z` in degrees/s; other axes are ignored. Clamped to the maxima. |
+| `SetPower` | `linear.y` and `angular.z`, each in [-1, 1] of the maxima. |
+| `Stop` | Stops the rover. |
+| `IsMoving` | True while the rover is moving. |
+| `GetProperties` | 0.356 m width, 0 turning radius, 0.381 m wheel circumference. |
+| `GetGeometries` | The chassis box, 260 x 300 x 100 mm, centered 80 mm up. |
+
+## Model viam-labs:mujoco-sim:lidar
+
+A 2D LIDAR, like the rplidar module: it ray-casts a scan and serves it as a
+point cloud. It is a camera that returns only point clouds.
+
+### Configuration
+
+```json
+{
+  "name": "lidar",
+  "api": "rdk:component:camera",
+  "model": "viam-labs:mujoco-sim:lidar",
+  "frame": {
+    "parent": "rover",
+    "translation": { "x": 0, "y": 0, "z": 160 }
+  },
+  "attributes": {
+    "world": "sim-world"
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `range_min_m` | float | No | `0.15` | Nearer hits are dropped. |
+| `range_max_m` | float | No | `12` | Farther hits are dropped. |
+| `angular_resolution_deg` | float | No | `1` | Ray spacing, 0.1 to 360. Rays are spread evenly round the full circle. |
+| `position` | [x, y, z] | No | `[0, 0, 0.2]` | Placement in meters, used when no frame is set. |
+| `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
+| `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
+
+The frame's `parent` is `world`, a mujoco-sim base or an arm. Like the camera,
+it can't be framed on a gripper or another camera. The scan plane is the
+frame's XY plane, and ray 0 points along +X. A mounted LIDAR never sees the
+body it is mounted on, the rover chassis or an arm's last link, so mount it
+clear of anything else on the robot.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetPointCloud` | Binary PCD with `x y z` in meters, in the LIDAR's frame. `z` is 0. Only hits are included. |
+| `GetProperties` | `supports_pcd` is true. |
+| `GetImages` | Not supported. |
+
 ## Things to know
 
 - **Config edits reset the cell.** viam-server rebuilds a module resource on any
@@ -344,9 +471,14 @@ error saying the camera is not in the scene.
   overlap at reachable wrist angles, so those wrist-link pairs are excluded.
   The gripper and links 3–6 still collide with the base and shoulder, which
   Viam's planner can't see.
-- **Place components relative to `world`.** Arm frames must have parent
-  `world`; the gripper's frame parent is its arm, and a camera's is `world` or
-  an arm.
+- **Place components relative to `world`.** Arm and base frames must have
+  parent `world`; the gripper's frame parent is its arm, and a camera's or
+  LIDAR's is `world` or another mujoco-sim component.
+- **The rover's motion is ideal.** It drives exactly as commanded, with no
+  wheel slip or odometry drift; the wheels are visual. It can't tip over, and
+  contacts stop it.
+- **A LIDAR scan is one instant.** All rays sample the same sim step, unlike a
+  spinning sensor whose points span a rotation.
 - **Depth is ideal.** It has no noise, holes or minimum range, unlike a real
   depth sensor. On macOS, MuJoCo warns that depth accuracy is limited; at 1 m
   it is still within 1 mm.

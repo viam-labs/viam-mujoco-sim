@@ -628,7 +628,7 @@ class SimManager:
             if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera) < 0:
                 raise RuntimeError(
                     f"camera {camera!r} is not in the scene; if its frame parent is "
-                    "an arm, configure that viam-labs:mujoco-sim:arm"
+                    "another mujoco-sim component, configure that component"
                 )
             renderer = self._renderer(width, height)
             renderer.update_scene(self.data, camera=camera)

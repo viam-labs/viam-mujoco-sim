@@ -99,3 +99,16 @@ def validate_sim_component(
             "other frames isn't supported yet"
         )
     return [world], []
+
+
+def positive_number(name: str, attrs: Dict[str, Any], key: str, default: float) -> float:
+    """attrs[key] (or default) as a finite, positive float; ValueError otherwise."""
+    raw = attrs.get(key, default)
+    if (
+        isinstance(raw, bool)
+        or not isinstance(raw, (int, float))
+        or not math.isfinite(raw)
+        or raw <= 0
+    ):
+        raise ValueError(f"{name}: {key} must be a finite, positive number")
+    return float(raw)

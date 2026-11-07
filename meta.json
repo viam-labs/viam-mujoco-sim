@@ -28,6 +28,18 @@
       "api": "rdk:component:camera",
       "short_description": "An RGB-D camera on the world or an arm's end effector",
       "markdown_link": "README.md#model-viam-labsmujoco-simcamera"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:base",
+      "api": "rdk:component:base",
+      "short_description": "A simulated Viam Rover",
+      "markdown_link": "README.md#model-viam-labsmujoco-simbase"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:lidar",
+      "api": "rdk:component:camera",
+      "short_description": "A 2D LIDAR that serves point clouds",
+      "markdown_link": "README.md#model-viam-labsmujoco-simlidar"
     }
   ],
   "entrypoint": "run.sh",

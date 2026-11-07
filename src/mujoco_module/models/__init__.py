@@ -1,1 +1,1 @@
-from . import arm, camera, gripper, world  # noqa: F401  (registers the models)
+from . import arm, base, camera, gripper, lidar, world  # noqa: F401  (registers the models)

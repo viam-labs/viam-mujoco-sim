@@ -14,8 +14,9 @@ Attributes:
   depth_width / depth_height (int) - depth image and point cloud size
                              (default half of width / height)
 
-Place it with the standard frame (translation in mm). frame.parent is "world",
-or a viam-labs:mujoco-sim:arm to mount the camera on that arm's end effector.
+Place it with the standard frame (translation in mm). frame.parent is "world"
+or another mujoco-sim component: an arm, to mount the camera on its end
+effector, or a base.
 A frame orientation is read in Viam's camera convention: +Z forward, +Y down.
 `target`, when set, takes precedence over a frame orientation; a mounted
 camera can't use it.

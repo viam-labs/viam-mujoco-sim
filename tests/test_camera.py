@@ -51,7 +51,7 @@ def _camera_pose(sim, name):
 def test_wrist_camera_rides_the_end_effector(sim):
     arm = ArmHandle(sim, "pick-arm", {"asset": "lite6"})
     CameraHandle(sim, "wrist", {"parent": "pick-arm", "position": [0, 0, 0.05]})
-    end = sim.model.site("pick-arm/viam_end").id
+    end = sim.model.site("pick-arm/viam_frame").id
     position, rotation = _camera_pose(sim, "wrist")
     end_z = sim.data.site_xmat[end].reshape(3, 3)[:, 2]
     # 5 cm out along the end effector's +Z, looking along it (MuJoCo looks down -Z)
@@ -143,3 +143,10 @@ def test_renderers_are_warm_before_the_first_frame(sim):
     assert {(64, 48), (32, 24)} <= set(sim._renderers)
     ArmHandle(sim, "pick-arm", {"asset": "lite6"})  # a rebuild re-warms them
     assert {(64, 48), (32, 24)} <= set(sim._renderers)
+
+
+def test_encode_pcd_without_colors():
+    data = encode_pcd(np.array([[1.0, 2.0, 0.0], [0.5, -0.5, 0.0]], np.float32))
+    header, body = data.split(b"DATA binary\n")
+    assert b"FIELDS x y z\n" in header and b"TYPE F F F\n" in header and b"POINTS 2" in header
+    assert np.frombuffer(body, "<f4").reshape(2, 3)[1] == pytest.approx([0.5, -0.5, 0.0])

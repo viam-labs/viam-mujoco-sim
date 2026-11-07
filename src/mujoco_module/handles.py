@@ -13,7 +13,7 @@ import math
 from collections.abc import Sequence
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import mujoco
 import numpy as np
@@ -25,8 +25,32 @@ Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]  # (w, x, y, z), MuJoCo's order
 
 DEFAULT_MAX_JOINT_DEG_S = 180.0
-VIAM_END_SITE = "viam_end"
+# Each component that others can be framed on adds "{name}/viam_frame": its
+# frame in Viam's frame system (an arm's end effector, a base's origin).
+VIAM_FRAME_SITE = "viam_frame"
 DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S = 0.01
+
+BASE_ASSETS: dict[str, dict[str, Any]] = {
+    # Viam Rover 2, from Viam's public ViamRover2-2024-rpi5 fragment
+    # (wheel_circumference_mm 381, width_mm 356, motors max_rpm 120).
+    "viam_rover": {
+        "wheel_circumference_m": 0.381,
+        "width_m": 0.356,
+        "max_linear_mps": 0.762,  # 120 rpm x 0.381 m
+        "max_angular_dps": 245.0,  # 2 x 0.762 / 0.356 rad/s
+        # approximate shell: x across, y forward, z up; bottom above the floor
+        "chassis_size_m": (0.26, 0.30, 0.10),
+        "chassis_bottom_m": 0.03,
+        "mass_kg": 2.5,
+    },
+}
+BASE_JOINTS = ("x", "y", "yaw")
+BASE_TAU_S = 0.005  # velocity actuators settle on a new command in ~5 ms
+BASE_MAX_LINEAR_ACCEL = 50.0  # m/s^2, caps actuator force (no runaway push into a wall)
+BASE_MAX_YAW_ACCEL = 200.0  # rad/s^2
+BASE_MOVING_MPS = 0.001
+BASE_MOVING_RAD_S = math.radians(0.5)
+DEFAULT_BASE_MOVE_MARGIN_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +63,16 @@ class JointTrajectoryPoint:
 class _Trajectory:
     points: tuple[JointTrajectoryPoint, ...]
     start_s: float
+    future: Future
+
+
+@dataclass
+class _BaseGoal:
+    kind: Literal["straight", "spin"]  # meters along the start heading, or radians of yaw
+    target: float  # signed
+    start_xy: np.ndarray
+    start_yaw: float
+    deadline_s: float  # sim time
     future: Future
 
 
@@ -107,7 +141,7 @@ class ArmHandle:
             end_quat = np.zeros(4)
             mujoco.mju_mulQuat(end_quat, flange.quat, np.asarray(meta["flange_offset_wxyz"], float))
             flange.parent.add_site(
-                name=self._prefix + VIAM_END_SITE, pos=list(flange.pos), quat=list(end_quat)
+                name=self._prefix + VIAM_FRAME_SITE, pos=list(flange.pos), quat=list(end_quat)
             )
             for first, second in meta.get("self_collision_excluded_pairs", ()):
                 spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
@@ -360,6 +394,282 @@ class ArmHandle:
         return self._sim.run(read)
 
 
+def _fail(future: Future | None, error: BaseException) -> None:
+    if future is not None and not future.done():
+        try:
+            future.set_exception(error)
+        except InvalidStateError:
+            pass
+
+
+class BaseHandle:
+    """A differential-drive rover: a chassis on spawn-frame x/y slides and a yaw
+    hinge, driven by velocity actuators. Chassis +Y is forward, as in Viam's
+    base frame. Wheels are visual only; motion is ideal (no slip)."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        meta = BASE_ASSETS[str(attrs["asset"])]
+        self._sim = sim
+        self.name = name
+        self.meta = meta
+        self.max_linear_mps = float(attrs.get("max_linear_mps", meta["max_linear_mps"]))
+        self.max_angular_rad_s = math.radians(
+            float(attrs.get("max_angular_dps", meta["max_angular_dps"]))
+        )
+        self.move_margin_s = float(
+            attrs.get("move_timeout_margin_sec", DEFAULT_BASE_MOVE_MARGIN_S)
+        )
+        self._v = 0.0  # latched forward speed, m/s
+        self._w = 0.0  # latched yaw rate, rad/s
+        self._goal: _BaseGoal | None = None
+        self._ids: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._ids_generation = -1
+        self._callback_key = f"base:{name}"
+
+        sx, sy, sz = meta["chassis_size_m"]
+        mass = float(meta["mass_kg"])
+        self.chassis_size_m = (sx, sy, sz)
+        self.chassis_center_m = (0.0, 0.0, meta["chassis_bottom_m"] + sz / 2.0)
+        izz = mass * (sx * sx + sy * sy) / 12.0
+        wheel_radius = meta["wheel_circumference_m"] / (2.0 * math.pi)
+        position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
+        orientation = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+        center = list(self.chassis_center_m)
+
+        def build(spec: mujoco.MjSpec) -> None:
+            frame = spec.worldbody.add_frame(pos=position, quat=orientation)
+            body = frame.add_body(name=f"{name}/chassis")
+            body.explicitinertial = True
+            body.mass = mass
+            body.ipos = center
+            body.inertia = [
+                mass * (sy * sy + sz * sz) / 12.0,
+                mass * (sx * sx + sz * sz) / 12.0,
+                izz,
+            ]
+            body.add_joint(name=f"{name}/x", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[1, 0, 0])
+            body.add_joint(name=f"{name}/y", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[0, 1, 0])
+            body.add_joint(name=f"{name}/yaw", type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 0, 1])
+            body.add_geom(
+                name=f"{name}/chassis",
+                type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[sx / 2, sy / 2, sz / 2],
+                pos=center,
+                density=0,
+                rgba=[0.15, 0.15, 0.17, 1],
+            )
+            # On the chassis body so a rover-mounted lidar's body exclusion skips them.
+            for side in (-1, 1):
+                body.add_geom(
+                    name=f"{name}/wheel_{'left' if side < 0 else 'right'}",
+                    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
+                    size=[wheel_radius, 0.0125, 0],
+                    pos=[side * meta["width_m"] / 2, 0, wheel_radius],
+                    quat=[math.cos(math.pi / 4), 0, math.sin(math.pi / 4), 0],  # axle along X
+                    density=0,
+                    contype=0,
+                    conaffinity=0,
+                    rgba=[0.05, 0.05, 0.05, 1],
+                )
+            body.add_site(name=f"{name}/{VIAM_FRAME_SITE}", pos=[0, 0, 0])
+            limits = (
+                (self.max_linear_mps, mass / BASE_TAU_S, mass * BASE_MAX_LINEAR_ACCEL),
+                (self.max_linear_mps, mass / BASE_TAU_S, mass * BASE_MAX_LINEAR_ACCEL),
+                (self.max_angular_rad_s, izz / BASE_TAU_S, izz * BASE_MAX_YAW_ACCEL),
+            )
+            for joint, (speed, gain, cap) in zip(BASE_JOINTS, limits):
+                actuator = spec.add_actuator(
+                    name=f"{name}/{joint}",
+                    target=f"{name}/{joint}",
+                    trntype=mujoco.mjtTrn.mjTRN_JOINT,
+                )
+                actuator.set_to_velocity(kv=gain)
+                actuator.ctrllimited = True
+                actuator.ctrlrange = [-1.1 * speed, 1.1 * speed]
+                actuator.forcelimited = True
+                actuator.forcerange = [-cap, cap]
+
+        def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+            qpos, dof, ctrl = self._resolve(model)
+            data.qpos[qpos] = 0.0
+            data.qvel[dof] = 0.0
+            data.ctrl[ctrl] = 0.0
+            self._v = self._w = 0.0
+            self._drop_goal(RuntimeError(f"base {name!r} was reset"))
+
+        sim.set_contribution(name, Contribution(build=build, init=init))
+        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
+
+    def close(self) -> None:
+        def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
+            self._v = self._w = 0.0
+            self._drop_goal(
+                RuntimeError(f"base {self.name!r} was closed (removed or reconfigured)")
+            )
+            if self._sim.model is not None and self._sim.data is not None:
+                data, (_q, _d, ctrl) = self._now()
+                data.ctrl[ctrl] = 0.0
+
+        self._sim.run(detach)
+        self._sim.remove_contribution(self.name)
+
+    # -- ids -------------------------------------------------------------
+
+    def _resolve(self, model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        joints = [model.joint(f"{self.name}/{joint}") for joint in BASE_JOINTS]
+        return (
+            np.array([joint.qposadr[0] for joint in joints]),
+            np.array([joint.dofadr[0] for joint in joints]),
+            np.array([model.actuator(f"{self.name}/{joint}").id for joint in BASE_JOINTS]),
+        )
+
+    def _now(self) -> tuple[mujoco.MjData, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        sim = self._sim
+        assert sim.model is not None and sim.data is not None
+        if self._ids is None or self._ids_generation != sim.generation:
+            self._ids = self._resolve(sim.model)
+            self._ids_generation = sim.generation
+        return sim.data, self._ids
+
+    # -- control (sim thread) ---------------------------------------------
+
+    def _on_step(self, _dt: float) -> None:
+        data, (qpos, _dof, ctrl) = self._now()
+        x, y, yaw = (float(value) for value in data.qpos[qpos])
+        goal = self._goal
+        if goal is not None:
+            try:
+                if goal.future.done():  # cancelled by the caller
+                    self._drop_goal()
+                else:
+                    progress = self._progress(goal, x, y, yaw)
+                    if progress * math.copysign(1.0, goal.target) >= abs(goal.target):
+                        self._drop_goal()
+                        try:
+                            goal.future.set_result(None)
+                        except InvalidStateError:
+                            pass
+                    elif data.time >= goal.deadline_s:
+                        self._drop_goal(RuntimeError(self._stalled(goal, progress)))
+            except Exception as exc:
+                # halt, fail the move, and keep the callback registered
+                self._drop_goal(exc)
+        data.ctrl[ctrl] = (-self._v * math.sin(yaw), self._v * math.cos(yaw), self._w)
+
+    @staticmethod
+    def _progress(goal: _BaseGoal, x: float, y: float, yaw: float) -> float:
+        if goal.kind == "spin":
+            return yaw - goal.start_yaw  # hinge yaw is unwrapped
+        heading = np.array([-math.sin(goal.start_yaw), math.cos(goal.start_yaw)])
+        return float(np.dot(np.array([x, y]) - goal.start_xy, heading))
+
+    def _stalled(self, goal: _BaseGoal, progress: float) -> str:
+        if goal.kind == "spin":
+            done, wanted, unit = math.degrees(progress), math.degrees(goal.target), "deg"
+        else:
+            done, wanted, unit = 1000 * progress, 1000 * goal.target, "mm"
+        return (
+            f"base {self.name!r} stalled: moved {done:.0f} of {wanted:.0f} {unit} "
+            "before the timeout (blocked?)"
+        )
+
+    def _drop_goal(self, error: BaseException | None = None) -> None:
+        """Clear the goal and, only when there was one, the latched command
+        (stop, init and close zero it themselves); fail the goal's future with
+        `error` when given. Sim thread only."""
+        goal, self._goal = self._goal, None
+        if goal is not None:
+            self._v = self._w = 0.0
+            if error is not None:
+                _fail(goal.future, error)
+
+    def _replace_goal(self, reason: str) -> None:
+        self._drop_goal(RuntimeError(f"base {self.name!r} {reason}"))
+
+    # -- public API ---------------------------------------------------------
+
+    def set_velocity(self, linear_mps: float, angular_rad_s: float) -> None:
+        """Latch forward speed and yaw rate (positive = left), clamped to the maxima."""
+        if not (math.isfinite(linear_mps) and math.isfinite(angular_rad_s)):
+            raise ValueError("velocity must be finite")
+        v = float(np.clip(linear_mps, -self.max_linear_mps, self.max_linear_mps))
+        w = float(np.clip(angular_rad_s, -self.max_angular_rad_s, self.max_angular_rad_s))
+
+        def apply() -> None:
+            self._replace_goal("move was superseded by a new command")
+            self._v, self._w = v, w
+
+        self._sim.run(apply)
+
+    def stop(self) -> None:
+        def apply() -> None:
+            self._replace_goal("move was stopped")
+            self._v = self._w = 0.0
+
+        self._sim.run(apply)
+
+    def move_straight(self, distance_m: float, speed_mps: float) -> Future:
+        """Drive distance_m along the current heading. The sign of
+        distance x speed picks forward or back. The future resolves on arrival
+        and fails when the move takes longer, in sim time, than
+        distance / speed + move_timeout_margin_sec (stalled), or on stop,
+        a new command, reset or close."""
+        return self._start_goal("straight", distance_m, speed_mps, self.max_linear_mps)
+
+    def spin(self, angle_rad: float, speed_rad_s: float) -> Future:
+        """Turn in place by angle_rad (positive = left); same rules as
+        move_straight."""
+        return self._start_goal("spin", angle_rad, speed_rad_s, self.max_angular_rad_s)
+
+    def _start_goal(
+        self, kind: Literal["straight", "spin"], amount: float, speed: float, max_speed: float
+    ) -> Future:
+        if not math.isfinite(amount) or not math.isfinite(speed):
+            raise ValueError("distance, angle and velocity must be finite")
+        if speed == 0.0:
+            raise ValueError("velocity must be non-zero")
+        future: Future = Future()
+        if amount == 0.0:
+            future.set_result(None)
+            return future
+        target = abs(amount) * math.copysign(1.0, amount * speed)
+        rate = math.copysign(min(abs(speed), max_speed), target)
+
+        def start() -> None:
+            self._replace_goal("move was superseded by a new command")
+            data, (qpos, _dof, _ctrl) = self._now()
+            x, y, yaw = (float(value) for value in data.qpos[qpos])
+            self._goal = _BaseGoal(
+                kind=kind,
+                target=target,
+                start_xy=np.array([x, y]),
+                start_yaw=yaw,
+                deadline_s=data.time + abs(target) / abs(rate) + self.move_margin_s,
+                future=future,
+            )
+            if kind == "spin":
+                self._v, self._w = 0.0, rate
+            else:
+                self._v, self._w = rate, 0.0
+
+        self._sim.run(start)
+        return future
+
+    def is_moving(self) -> bool:
+        def read() -> bool:
+            data, (_qpos, dof, _ctrl) = self._now()
+            vx, vy, wz = (float(value) for value in data.qvel[dof])
+            return bool(
+                self._v != 0.0
+                or self._w != 0.0
+                or math.hypot(vx, vy) > BASE_MOVING_MPS
+                or abs(wz) > BASE_MOVING_RAD_S
+            )
+
+        return self._sim.run(read)
+
+
 class GripperHandle:
     """The Lite6 gripper already attached with its arm: a force motor on the
     left finger, the right finger mirrored by an equality constraint. Positive
@@ -495,10 +805,29 @@ def _look_at(position: Sequence[float], target: Sequence[float]) -> Quat:
 _VIAM_TO_MUJOCO_CAMERA = Quaternion(0.0, 1.0, 0.0, 0.0)
 
 
+def _mount(
+    spec: mujoco.MjSpec, parent: str | None, position: Sequence[float], quat: Sequence[float]
+) -> tuple[Any, np.ndarray, np.ndarray] | None:
+    """Where something framed on `parent` goes in the spec: (body, pos, quat).
+    The offset is relative to the parent's viam_frame site; with no parent it
+    is on the world body. None when the parent isn't in the spec (yet)."""
+    if not parent:
+        return spec.worldbody, np.asarray(position, float), np.asarray(quat, float)
+    site = spec.site(f"{parent}/{VIAM_FRAME_SITE}")
+    if site is None:
+        return None
+    pos = np.zeros(3)
+    mujoco.mju_rotVecQuat(pos, np.asarray(position, float), site.quat)
+    pos += site.pos
+    rot = np.zeros(4)
+    mujoco.mju_mulQuat(rot, site.quat, np.asarray(quat, float))
+    return site.parent, pos, rot
+
+
 class CameraHandle:
-    """A camera on the world, or, with a parent arm, on that arm's end
-    effector. A mounted camera's position and orientation are relative to
-    Viam's end-effector frame, as the frame system reads them."""
+    """A camera on the world, or, with a parent, on that component's Viam
+    frame (an arm's end effector, a base). A mounted camera's position and
+    orientation are relative to that frame, as the frame system reads them."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         self._sim = sim
@@ -522,17 +851,10 @@ class CameraHandle:
             quat = _look_at(position, (0.0, 0.0, 0.0))
 
         def build(spec: mujoco.MjSpec) -> None:
-            body, pos, rot = spec.worldbody, np.asarray(position), np.asarray(quat)
-            if self.parent:
-                end = spec.site(f"{self.parent}/{VIAM_END_SITE}")
-                if end is None:
-                    return  # arm not configured (yet); render() says so
-                body = end.parent
-                pos = np.zeros(3)
-                mujoco.mju_rotVecQuat(pos, np.asarray(position), end.quat)
-                pos += end.pos
-                rot = np.zeros(4)
-                mujoco.mju_mulQuat(rot, end.quat, np.asarray(quat))
+            mount = _mount(spec, self.parent, position, quat)
+            if mount is None:
+                return  # parent not configured (yet); render() says so
+            body, pos, rot = mount
             body.add_camera(name=name, pos=list(pos), quat=list(rot), fovy=self.fov_deg)
             spec.visual.global_.offwidth = max(
                 spec.visual.global_.offwidth, self.width, self.depth_width
@@ -590,6 +912,73 @@ class CameraHandle:
         return np.column_stack([x, y, z]).astype(np.float32), rgb[v, u]
 
 
+DEFAULT_LIDAR_RANGE_MIN_M = 0.15
+DEFAULT_LIDAR_RANGE_MAX_M = 12.0
+DEFAULT_LIDAR_RESOLUTION_DEG = 1.0
+MAX_LIDAR_RAYS = 3600
+
+
+class LidarHandle:
+    """A 2D scanning LIDAR: one ring of rays in the sensor frame's XY plane,
+    ray 0 along +X, counterclockwise about +Z. A scan samples one sim
+    instant. Mounted on the world or on a parent's viam_frame, like a camera;
+    a mounted lidar never sees its parent's body."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        self.parent: str | None = attrs.get("parent")
+        self.range_min_m = float(attrs.get("range_min_m", DEFAULT_LIDAR_RANGE_MIN_M))
+        self.range_max_m = float(attrs.get("range_max_m", DEFAULT_LIDAR_RANGE_MAX_M))
+        resolution = float(attrs.get("angular_resolution_deg", DEFAULT_LIDAR_RESOLUTION_DEG))
+        count = max(1, round(360.0 / resolution))  # evenly spaced around the full circle
+        theta = 2.0 * math.pi * np.arange(count) / count
+        self._rays = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(count)])
+        default_position = (0.0, 0.0, 0.0) if self.parent else (0.0, 0.0, 0.2)
+        position = [float(v) for v in attrs.get("position", default_position)]
+        quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+
+        def build(spec: mujoco.MjSpec) -> None:
+            mount = _mount(spec, self.parent, position, quat)
+            if mount is None:
+                return  # parent not configured (yet); scan() says so
+            body, pos, rot = mount
+            body.add_site(name=name, pos=list(pos), quat=list(rot))
+
+        sim.set_contribution(name, Contribution(build=build, late=bool(self.parent)))
+
+    def close(self) -> None:
+        self._sim.remove_contribution(self.name)
+
+    def scan(self) -> np.ndarray:
+        """Hit points in the sensor frame, meters, float32, z = 0."""
+
+        def cast() -> np.ndarray:
+            self._sim.require_world()
+            model, data = self._sim.model, self._sim.data
+            assert model is not None and data is not None
+            site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.name)
+            if site < 0:
+                raise RuntimeError(
+                    f"lidar {self.name!r} is not in the scene; configure its frame "
+                    f"parent {self.parent!r}"
+                )
+            count = len(self._rays)
+            directions = (data.site_xmat[site].reshape(3, 3) @ self._rays.T).T
+            geomid = np.zeros(count, np.int32)
+            dist = np.zeros(count)
+            exclude = (int(model.site_bodyid[site]) or -1) if self.parent else -1  # body 0 is the world: excluding it would hide every static geom
+            mujoco.mj_multiRay(
+                model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
+                None, 1, exclude, geomid, dist, None, count, self.range_max_m,
+            )
+            return dist
+
+        dist = self._sim.run(cast)
+        keep = (dist >= self.range_min_m) & (dist <= self.range_max_m)  # misses are -1
+        return (self._rays[keep] * dist[keep, None]).astype(np.float32)
+
+
 def encode_depth(depth_m: np.ndarray) -> bytes:
     """Viam's raw depth format (image/vnd.viam.dep): "DEPTHMAP", width and
     height as big-endian uint64, then big-endian uint16 millimeters."""
@@ -598,15 +987,22 @@ def encode_depth(depth_m: np.ndarray) -> bytes:
     return b"DEPTHMAP" + width.to_bytes(8, "big") + height.to_bytes(8, "big") + mm.tobytes()
 
 
-def encode_pcd(points: np.ndarray, colors: np.ndarray) -> bytes:
-    """Binary PCD in meters with packed rgb, as rdk's pointcloud reader expects."""
+def encode_pcd(points: np.ndarray, colors: np.ndarray | None = None) -> bytes:
+    """Binary PCD in meters, as rdk's pointcloud reader expects: packed rgb
+    when colors are given, plain x y z otherwise."""
     count = len(points)
+    if colors is None:
+        fields = "FIELDS x y z\nSIZE 4 4 4\nTYPE F F F\nCOUNT 1 1 1\n"
+        body = np.asarray(points, "<f4").tobytes()
+    else:
+        fields = "FIELDS x y z rgb\nSIZE 4 4 4 4\nTYPE F F F I\nCOUNT 1 1 1 1\n"
+        record = np.zeros(count, dtype=[("xyz", "<f4", 3), ("rgb", "<u4")])
+        record["xyz"] = points
+        c = colors.astype(np.uint32)
+        record["rgb"] = (c[:, 0] << 16) | (c[:, 1] << 8) | c[:, 2]
+        body = record.tobytes()
     header = (
-        "VERSION .7\nFIELDS x y z rgb\nSIZE 4 4 4 4\nTYPE F F F I\nCOUNT 1 1 1 1\n"
-        f"WIDTH {count}\nHEIGHT 1\nVIEWPOINT 0 0 0 1 0 0 0\nPOINTS {count}\nDATA binary\n"
+        f"VERSION .7\n{fields}WIDTH {count}\nHEIGHT 1\n"
+        f"VIEWPOINT 0 0 0 1 0 0 0\nPOINTS {count}\nDATA binary\n"
     )
-    record = np.zeros(count, dtype=[("xyz", "<f4", 3), ("rgb", "<u4")])
-    record["xyz"] = points
-    c = colors.astype(np.uint32)
-    record["rgb"] = (c[:, 0] << 16) | (c[:, 1] << 8) | c[:, 2]
-    return header.encode() + record.tobytes()
+    return header.encode() + body
