@@ -1,0 +1,36 @@
+[project]
+name = "viam-mujoco-sim"
+version = "0.1.0"
+description = "Control and simulate robots in MuJoCo through Viam"
+requires-python = ">=3.11"
+dependencies = [
+    "mujoco>=3.3",
+    "numpy>=1.26.0",
+    "pillow>=11.2.1",
+    "viam-sdk>=0.85.1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.17.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+# same ignores as viam-isaac-sim
+ignore = [
+    "I001",
+    "UP006",
+    "UP007",
+    "UP035",
+    "UP037",
+    "UP045",
+    "BLE001",
+    "TRY004",
+]

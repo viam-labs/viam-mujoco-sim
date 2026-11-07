@@ -1,0 +1,9 @@
+.VIAM_RELOAD_ARCHIVE.tar.gz
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.ruff_cache/
+module.tar.gz
+# see Makefile for explanation
+run.sh
