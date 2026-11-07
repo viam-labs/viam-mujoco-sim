@@ -3,7 +3,8 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: newer Ubuntu drops libosmesa6 because Mesa removed OSMesa.
+    runs-on: ubuntu-24.04
     env:
       MUJOCO_GL: osmesa
     steps:
