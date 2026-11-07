@@ -13,6 +13,7 @@ across a rebuild by joint and actuator name.
 
 from __future__ import annotations
 
+import itertools
 import math
 import queue
 import threading
@@ -46,10 +47,14 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         # tool axis. Symmetric for a parallel gripper, but GetEndPosition
         # reports in Viam's convention.
         "flange_offset_wxyz": (0.0, 0.0, 0.0, 1.0),
-        # MuJoCo collides meshes as convex hulls, which are larger than the real
-        # links and jam reachable poses. Viam's planner owns self-collision.
-        "self_collision_excluded_bodies": (
-            "link_base", "link1", "link2", "link3", "link4", "link5", "link6", "gripper_body",
+        # MuJoCo collides meshes as convex hulls, which are inflated past the
+        # real links and jam reachable poses. Only pairs whose overlap comes
+        # from that inflation are excluded. Pairs that collide for real stay on
+        # (the gripper and links 4-6 against link_base/link1), because Viam's
+        # planner can't see the gripper and this is the only check on it.
+        "self_collision_excluded_pairs": (
+            *itertools.combinations(("link3", "link4", "link5", "link6", "gripper_body"), 2),
+            ("link1", "link3"), ("link2", "link4"), ("link2", "link_base"),
         ),
     },
 }

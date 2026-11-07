@@ -100,10 +100,8 @@ class ArmHandle:
                     actuator.name = actuator.target
             frame = spec.worldbody.add_frame(pos=position, quat=orientation)
             spec.attach(child, prefix=self._prefix, frame=frame)
-            bodies = meta.get("self_collision_excluded_bodies", ())
-            for index, first in enumerate(bodies):
-                for second in bodies[index + 1 :]:
-                    spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
+            for first, second in meta.get("self_collision_excluded_pairs", ()):
+                spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             ids = self._resolve(model)

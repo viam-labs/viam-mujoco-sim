@@ -156,9 +156,19 @@ def test_arm_reaches_pose_where_link_hulls_overlap(sim):
     arm.set_joint_targets(target)
     sim.advance(8.0)
     assert arm.get_joint_positions() == pytest.approx(target, abs=math.radians(0.5))
-    root = sim.model.body_rootid[sim.model.body("pick-arm/link_base").id]
-    fingers = {sim.model.body("pick-arm/gripper_left_finger").id, sim.model.body("pick-arm/gripper_right_finger").id}
-    for contact in sim.data.contact[: sim.data.ncon]:
-        bodies = {int(sim.model.geom_bodyid[contact.geom1]), int(sim.model.geom_bodyid[contact.geom2])}
-        both_arm = all(sim.model.body_rootid[b] == root for b in bodies)
-        assert not (both_arm and not bodies & fingers), "unexpected arm self-contact"
+
+
+def test_gripper_still_collides_with_arm_base(sim):
+    """The self-collision exclusion must stay narrow: Viam's planner can't see the gripper."""
+    import mujoco
+
+    arm = make_arm(sim)
+    ids = arm._now()[1]
+    # found by random sweep within the MJCF joint ranges; gripper_body is ~98 mm into link_base
+    sim.data.qpos[ids.qpos] = [-6.082, 1.28, 0.422, -3.222, -0.427, -2.86]
+    mujoco.mj_forward(sim.model, sim.data)
+    gripper = sim.model.body("pick-arm/gripper_body").id
+    base = sim.model.body("pick-arm/link_base").id
+    pairs = [{int(sim.model.geom_bodyid[c.geom1]), int(sim.model.geom_bodyid[c.geom2])}
+             for c in sim.data.contact[: sim.data.ncon] if c.dist < -0.005]
+    assert {gripper, base} in pairs
