@@ -2,8 +2,6 @@ import pytest
 
 from mujoco_module.handles import ArmHandle, GripperHandle
 
-HOME = [0.0, 0.0, 1.57, 0.0, 1.57, 0.0]
-
 
 @pytest.fixture
 def cell(sim):
@@ -19,6 +17,8 @@ def test_open_and_close_move_the_jaw(sim, cell):
     assert gripper.jaw_m() == pytest.approx(GripperHandle.OPEN_M, abs=0.001)
     assert not gripper.is_moving()
     gripper.close_jaws()
+    sim.advance(0.01)
+    assert gripper.is_moving()
     sim.advance(0.5)
     assert gripper.jaw_m() == pytest.approx(GripperHandle.CLOSED_M, abs=0.001)
     assert not gripper.firm_grasp()  # closed on nothing
@@ -48,3 +48,18 @@ def test_grasp_holds_and_lifts_block(sim, cell):
 def test_gripper_requires_attached_arm(sim):
     with pytest.raises(RuntimeError, match="configure the arm first"):
         GripperHandle(sim, "pick-gripper", "missing-arm", grip_force_n=5.0)
+
+
+def test_gripper_survives_arm_removal_and_releases_on_close(sim, cell):
+    arm, gripper = cell
+    arm.close()
+    sim.advance(0.05)  # arm absent: the callback must not crash
+    with pytest.raises(RuntimeError, match="not in the scene"):
+        gripper.jaw_m()
+    ArmHandle(sim, "pick-arm", {"asset": "lite6"})
+    gripper.open_jaws()
+    sim.advance(0.5)
+    assert gripper.jaw_m() == pytest.approx(GripperHandle.OPEN_M, abs=0.001)
+    gripper.close()
+    actuator = sim.model.actuator("pick-arm/gripper").id
+    assert sim.data.ctrl[actuator] == 0.0

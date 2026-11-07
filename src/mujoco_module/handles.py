@@ -367,12 +367,28 @@ class GripperHandle:
         sim.run(attach)
 
     def close(self) -> None:
-        self._sim.run(lambda: self._sim.step_callbacks.pop(self._callback_key, None))
+        def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
+            model, data = self._sim.model, self._sim.data
+            if model is not None and data is not None:
+                actuator = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator)
+                if actuator >= 0:
+                    data.ctrl[actuator] = 0.0
+
+        self._sim.run(detach)
 
     def _on_step(self, _dt: float) -> None:
         model, data = self._sim.model, self._sim.data
         assert model is not None and data is not None
-        data.ctrl[model.actuator(self._actuator).id] = self._command * self._force
+        actuator = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator)
+        if actuator < 0:
+            return  # arm absent; resume when it is re-added
+        data.ctrl[actuator] = self._command * self._force
+
+    def _require_joint(self) -> None:
+        model = self._sim.model
+        if model is None or mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, self._joint) < 0:
+            raise RuntimeError(f"the arm for gripper {self.name!r} is not in the scene")
 
     def _set(self, command: float) -> None:
         def apply() -> None:
@@ -391,6 +407,7 @@ class GripperHandle:
 
     def jaw_m(self) -> float:
         def read() -> float:
+            self._require_joint()
             assert self._sim.model is not None and self._sim.data is not None
             joint = self._sim.model.joint(self._joint)
             return float(self._sim.data.qpos[joint.qposadr[0]])
@@ -399,6 +416,7 @@ class GripperHandle:
 
     def is_moving(self) -> bool:
         def read() -> bool:
+            self._require_joint()
             assert self._sim.model is not None and self._sim.data is not None
             joint = self._sim.model.joint(self._joint)
             return bool(abs(self._sim.data.qvel[joint.dofadr[0]]) > self.MOVING_M_S)
@@ -410,6 +428,7 @@ class GripperHandle:
         part of the arm."""
 
         def read() -> bool:
+            self._require_joint()
             model, data = self._sim.model, self._sim.data
             assert model is not None and data is not None
             left, right = (model.geom(tip).id for tip in self._tips)
