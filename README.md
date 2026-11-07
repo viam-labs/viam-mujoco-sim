@@ -2,7 +2,7 @@
 
 A proof-of-concept [Viam](https://www.viam.com) module that simulates robots in
 [MuJoCo](https://mujoco.org). It is a drop-in sibling of
-[`viam-labs:isaac-sim`](../viam-isaac-sim): the same component attributes, the
+[`viam-labs:isaac-sim`](https://github.com/viam-modules/viam-isaac-sim): the same component attributes, the
 same world `DoCommand`s, and the standard Viam frame for placement, so a config
 moves between engines by changing the model triplet.
 
@@ -20,9 +20,13 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | `viam-labs:mujoco-sim:camera` | `camera` | An RGB camera placed by its frame, aimed with `target`. |
 
 See the docstring at the top of each file in `src/mujoco_module/models/` for
-attributes, and `examples/lite6-pick.json` for a complete pick cell.
+attributes, and `examples/lite6-pick.json` for a complete pick cell. Its
+`pick_block` starts parked out of reach at x = 2.5 m on purpose;
+`scripted_pick.py` places it with `set_prop_pose`.
 
 ## Run it locally
+
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.11 itself), `make`, and `viam-server` for running on a machine.
 
 ```sh
 make run.sh   # the entrypoint is generated, see Makefile
@@ -30,7 +34,7 @@ make run.sh   # the entrypoint is generated, see Makefile
 
 Point a machine's config at `run.sh` as a local module (see
 `examples/lite6-pick.json`), start `viam-server`, then drive it with any Viam
-client, for example `../viam-isaac-sim/examples/scripted_pick.py`.
+client, for example `scripted_pick.py` from [viam-isaac-sim](https://github.com/viam-modules/viam-isaac-sim).
 
 ## Things to know
 
@@ -40,9 +44,11 @@ client, for example `../viam-isaac-sim/examples/scripted_pick.py`.
   that depends on it. A move in flight fails with
   `arm '<name>' was closed (removed or reconfigured)`. Leave the config alone
   during a run.
-- **Prop poses survive world edits.** Changing a prop's `position` in the world
-  config doesn't move an existing prop. Use the world's `park_props` or `reset`
-  DoCommand.
+- **Prop poses survive world edits.** For non-fixed props, changing a prop's
+  `position` in the world config doesn't move an existing prop. Use the world's
+  `park_props` or `reset` DoCommand. A `"fixed": true` prop is rebuilt at its
+  configured position, and `park_props` and `reset` refuse to move fixed props.
+- **Arm links mostly don't collide with each other.** MuJoCo's convex hulls of the Lite6 links overlap at reachable wrist angles, so wrist-link pairs are excluded and Viam's planner owns self-collision. The gripper and lower links still collide with the base.
 - **Kinematics are vendored.** `GetKinematics` serves
   `assets/ufactory_lite6/lite6_kinematics.json` (from
   viam-ufactory-xarm@73551eac). The `kinematics_url` attribute overrides it.
@@ -57,8 +63,7 @@ make test
 make lint
 ```
 
-Tests run real MuJoCo; there is no mock backend. On Linux without a display set
-`MUJOCO_GL=osmesa` (`apt install libosmesa6`).
+Tests run real MuJoCo; there is no mock backend. Tests use OSMesa on Linux (`apt install libosmesa6`); macOS uses CGL.
 
 The Lite6 model is vendored from
 [mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie)
