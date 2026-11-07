@@ -443,3 +443,68 @@ class GripperHandle:
             return bool(touching[left] & touching[right])
 
         return self._sim.run(read)
+
+
+def _look_at(position: Sequence[float], target: Sequence[float]) -> Quat:
+    """MuJoCo camera quaternion (looks along -Z, +Y up) aimed at target."""
+    forward = np.asarray(target, float) - np.asarray(position, float)
+    norm = np.linalg.norm(forward)
+    if norm == 0.0:
+        return (1.0, 0.0, 0.0, 0.0)
+    z_axis = -forward / norm
+    x_axis = np.cross((0.0, 0.0, 1.0), z_axis)
+    if np.linalg.norm(x_axis) < 1e-6:  # looking straight up or down
+        x_axis = np.cross((0.0, 1.0, 0.0), z_axis)
+    x_axis /= np.linalg.norm(x_axis)
+    y_axis = np.cross(z_axis, x_axis)
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, np.column_stack([x_axis, y_axis, z_axis]).ravel())
+    return (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3]))
+
+
+# Viam's camera frame looks along +Z with +Y down; MuJoCo's looks along -Z
+# with +Y up. A half turn about X maps one to the other.
+_VIAM_TO_MUJOCO_CAMERA = Quaternion(0.0, 1.0, 0.0, 0.0)
+
+
+class CameraHandle:
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        self.width = int(attrs.get("width", 640))
+        self.height = int(attrs.get("height", 480))
+        self.fov_deg = float(attrs.get("fov_deg", 60.0))
+        position = tuple(float(value) for value in attrs.get("position", (1.0, 1.0, 1.0)))
+        if attrs.get("target") is not None:
+            quat = _look_at(position, attrs["target"])
+        elif attrs.get("orientation_wxyz") is not None:
+            mj = Quaternion(*[float(value) for value in attrs["orientation_wxyz"]]) * _VIAM_TO_MUJOCO_CAMERA
+            quat = (mj.w, mj.i, mj.j, mj.k)
+        else:
+            quat = _look_at(position, (0.0, 0.0, 0.0))
+
+        def build(spec: mujoco.MjSpec) -> None:
+            spec.worldbody.add_camera(
+                name=name, pos=list(position), quat=list(quat), fovy=self.fov_deg
+            )
+            spec.visual.global_.offwidth = max(spec.visual.global_.offwidth, self.width)
+            spec.visual.global_.offheight = max(spec.visual.global_.offheight, self.height)
+
+        sim.set_contribution(name, Contribution(build=build))
+
+    def close(self) -> None:
+        self._sim.remove_contribution(self.name)
+
+    def get_rgb(self) -> np.ndarray:
+        return self._sim.render(self.name, self.width, self.height)
+
+    def intrinsics(self) -> dict[str, float]:
+        focal = (self.height / 2.0) / math.tan(math.radians(self.fov_deg) / 2.0)
+        return {
+            "width_px": self.width,
+            "height_px": self.height,
+            "focal_x_px": focal,
+            "focal_y_px": focal,
+            "center_x_px": self.width / 2.0,
+            "center_y_px": self.height / 2.0,
+        }
