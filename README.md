@@ -21,6 +21,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover you can drive; ideal motion, visual wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
+| [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
 
 ## Getting started
 
@@ -42,9 +43,12 @@ pick cell. Its `pick_block` starts parked out of reach at x = 2.5 m on purpose;
 `scripted_pick.py` from
 [viam-isaac-sim](https://github.com/viam-modules/viam-isaac-sim) places it with
 `set_prop_pose`. [`examples/rover-lidar.json`](examples/rover-lidar.json) is a
-rover cell: a rover with a LIDAR inside a walled pen. With an arm and gripper
-configured, the builtin motion service plans for the arm as it would for a real
-one.
+rover cell: a rover with a LIDAR inside a walled pen, and
+[`examples/rover-nav.json`](examples/rover-nav.json) adds odometry and
+nav-stack for SLAM and navigation in it (see
+[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)). With an
+arm and gripper configured, the builtin motion service plans for the arm as it
+would for a real one.
 
 ## Model viam-labs:mujoco-sim:world
 
@@ -456,6 +460,196 @@ clear of anything else on the robot.
 | `GetProperties` | `supports_pcd` is true. |
 | `GetImages` | Not supported. |
 
+## Model viam-labs:mujoco-sim:movement_sensor
+
+Wheel odometry for a mujoco-sim base, like RDK's `wheeled-odometry`. It reads
+the rover's motion from the sim and dead-reckons a pose every physics step, so
+readings don't depend on how often you poll. It is exact unless you add drift.
+
+### Configuration
+
+```json
+{
+  "name": "odometry",
+  "api": "rdk:component:movement_sensor",
+  "model": "viam-labs:mujoco-sim:movement_sensor",
+  "attributes": {
+    "world": "sim-world",
+    "base": "rover"
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `base` | string | Yes | | The mujoco-sim base it rides on. |
+| `linear_scale_error` | float | No | `0` | Reported speed is true speed × (1 + e), so `0.02` reads 2% long. Greater than -1. |
+| `heading_drift_dps` | float | No | `0` | A constant yaw-rate bias in degrees per second, like a gyro's. It accumulates while parked too. |
+
+Odometry starts at zero where the base is when the sensor starts, on a world
+`reset`, or on `reset_odometry`: +Y is the base's forward there, +X its right,
+yaw counter-clockwise. A config change restarts the sensor, so it zeroes too.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetLinearVelocity` | Body frame, m/s: `y` forward, `x` right. |
+| `GetAngularVelocity` | `z`, degrees per second, counter-clockwise. |
+| `GetOrientation` | Yaw only: orientation vector `(0, 0, 1)` with `theta` in degrees. |
+| `GetCompassHeading` | Degrees clockwise from the starting heading. |
+| `GetPosition` | Like `wheeled-odometry`: a point offset from latitude 0, longitude 0 by the odometry position (+Y north). Pass `extra: {"return_relative_pos_m": true}` for meters instead (`latitude` = y, `longitude` = x). Altitude is 0. |
+| `GetReadings` | All of the above. |
+| `GetProperties` | Everything except linear acceleration. |
+| `GetLinearAcceleration` | Not supported. |
+
+Readings error until the configured base is in the scene.
+
+### DoCommand
+
+`{"command": "reset_odometry"}` zeroes the pose.
+
+For SLAM and navigation with nav-stack, see
+[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation).
+
+## Mobile base, SLAM and navigation
+
+A simulated rover can map its world and navigate it with
+[`viam-labs:nav-stack`](https://github.com/viam-labs/nav-stack), as a real Viam
+Rover does. Viam's builtin motion service no longer plans for bases
+(`MoveOnMap` and `MoveOnGlobe` were removed from RDK in late 2025), and the
+builtin navigation service is GPS-only, so nav-stack is the path.
+[`examples/rover-nav.json`](examples/rover-nav.json) is the complete config
+these steps build.
+
+nav-stack reads three things from the sim: the LIDAR's point clouds, the
+movement sensor's velocities, and the base's `SetVelocity`. It takes the
+LIDAR's mount from the frame system and the rover's footprint from the base's
+`GetGeometries` box.
+
+### 1. Build the scene
+
+1. A world with walls and obstacles as fixed props, like the 3 m pen in the
+   example. Keep them tall enough for the LIDAR's scan plane to hit.
+2. A `viam-labs:mujoco-sim:base` framed on `world`.
+3. A `viam-labs:mujoco-sim:lidar` framed on the rover, above the chassis
+   (`translation.z` over 130 mm; the example uses 160).
+4. A `viam-labs:mujoco-sim:movement_sensor` with `base` set to the rover. Give
+   it some drift (the example uses `linear_scale_error: 0.02` and
+   `heading_drift_dps: 0.05`), or SLAM has nothing to correct.
+
+An overhead `viam-labs:mujoco-sim:camera` aimed at the pen (with `target`) is a
+handy way to watch the rover drive.
+
+### 2. Add nav-stack
+
+Add the module from the registry:
+
+```json
+{ "type": "registry", "name": "viam-labs_nav-stack", "module_id": "viam-labs:nav-stack", "version": "latest" }
+```
+
+- **Linux:** the registry build is `linux-any`. Its first-run script creates a
+  venv with `python3 -m venv`, which needs the host's `python3.X-venv` package
+  (`apt install python3.12-venv` on Ubuntu 24.04). Without it the first run
+  fails and keeps failing, and viam-server holds back every config change
+  until it succeeds. Install the package, then remove the module's partial
+  `.venv` (or the module from the config and add it back).
+  [viam-labs/nav-stack#100](https://github.com/viam-labs/nav-stack/pull/100)
+  makes the first run install the package and recover on its own.
+- **macOS:** there is no darwin build in the registry. Clone nav-stack, create
+  its venv (`uv venv .venv --python 3.11 && VIRTUAL_ENV=.venv uv pip install -r
+  requirements.txt`), and add it as a local module whose `executable_path` is
+  the checkout's `run.sh`.
+
+`latest` resolves to nav-stack's newest stable release. Its typed Navigation
+methods (such as `GetNavigationStatus`) may be newer than that release; the
+`DoCommand` interface below works on all of them.
+
+### 3. Configure SLAM and navigation
+
+```json
+"services": [
+  {
+    "name": "slam",
+    "api": "rdk:service:slam",
+    "model": "viam-labs:nav-stack:slam",
+    "attributes": {
+      "base": "rover",
+      "movement_sensor": "odometry",
+      "lidar": "lidar",
+      "movement_sensor_yaw_deg": 0,
+      "mode": "mapping",
+      "maps_dir": "/tmp/nav-maps",
+      "active_map": "rover-pen"
+    }
+  },
+  {
+    "name": "nav",
+    "api": "rdk:service:navigation",
+    "model": "viam-labs:nav-stack:navigation",
+    "attributes": { "slam_service": "slam", "base": "rover" }
+  }
+]
+```
+
+- `movement_sensor_yaw_deg: 0` is deliberate. This sensor already reports
+  base-frame velocities (+Y forward), which nav-stack reads correctly; left
+  out, nav-stack would take a yaw from the sensor's frame, if it has one, and
+  rotate them a second time.
+- `maps_dir` must be writable by viam-server; nav-stack creates it.
+- Add a `viam-labs:nav-stack:nav-camera` component (`"navigation": "nav"`) to
+  watch the map, plan and pose. It draws once nav-stack is localizing on a map;
+  while mapping it shows a blank frame.
+- nav-stack logs that the LIDAR "has no get_laser_scan; using get_point_cloud"
+  once, on its first scan. That's expected: `get_laser_scan` is a MiR-specific
+  shortcut, and point clouds are all the sim needs.
+
+### 4. Record a map
+
+With `mode: mapping`, nav-stack maps whenever the rover moves; drive it from
+the base's control card in the Viam app or from the SDK. In the example pen, one
+lap of driving out to four points and spinning a full turn at each (0.3 m/s,
+45 °/s) takes about 80 s and maps every wall and both boxes. Then save the map
+and switch to localizing on it:
+
+```python
+from viam.services.slam import SLAMClient
+
+slam = SLAMClient.from_robot(robot, "slam")
+await slam.do_command({"command": "save_map"})
+await slam.do_command({"command": "start_localizing", "map": "rover-pen"})
+```
+
+To map again from scratch, call the world's `reset` (the rover returns to its
+spawn pose and its odometry zeroes), then
+`{"command": "start_mapping", "map": "<new name>"}`. Otherwise avoid `reset`
+mid-session: nav-stack sees the teleport as a jump in the middle of its map.
+
+### 5. Navigate
+
+```python
+from viam.services.navigation import NavigationClient
+
+nav = NavigationClient.from_robot(robot, "nav")
+await nav.do_command({"command": "navigate_to_point", "x": -1.1, "y": 0.9})
+status = await nav.do_command({"command": "get_status"})  # "state": "succeeded" when done
+```
+
+- Goals are in nav-stack's map frame (meters), not MuJoCo's world frame. The
+  map's origin is where mapping started, and its +X is the rover's forward
+  there. Read the rover's map pose from `slam.get_position()` (millimetres and
+  degrees, as Viam poses are).
+- Keep goals clear of walls and props by the rover's half-width plus
+  nav-stack's `clearance_m` (0.13 + 0.2 m by default). A goal inside that band
+  can't be reached, and nav-stack keeps trying rather than failing it.
+- Heading drift is what SLAM corrects. The example's 0.05 °/s maps cleanly;
+  0.5 °/s smears the walls into rotated copies. See nav-stack's README for
+  tuning.
+
 ## Things to know
 
 - **Config edits reset the cell.** viam-server rebuilds a module resource on any
@@ -475,8 +669,8 @@ clear of anything else on the robot.
   parent `world`; the gripper's frame parent is its arm, and a camera's or
   LIDAR's is `world` or another mujoco-sim component.
 - **The rover's motion is ideal.** It drives exactly as commanded, with no
-  wheel slip or odometry drift; the wheels are visual. It can't tip over, and
-  contacts stop it.
+  wheel slip; the wheels are visual. It can't tip over, and contacts stop it.
+  The movement sensor's drift is set by attributes, not by physics.
 - **A LIDAR scan is one instant.** All rays sample the same sim step, unlike a
   spinning sensor whose points span a rotation.
 - **Depth is ideal.** It has no noise, holes or minimum range, unlike a real

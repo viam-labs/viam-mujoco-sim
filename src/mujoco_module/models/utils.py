@@ -101,14 +101,17 @@ def validate_sim_component(
     return [world], []
 
 
+def finite_number(name: str, attrs: Dict[str, Any], key: str, default: float) -> float:
+    """attrs[key] (or default) as a finite float; ValueError otherwise."""
+    raw = attrs.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw):
+        raise ValueError(f"{name}: {key} must be a finite number")
+    return float(raw)
+
+
 def positive_number(name: str, attrs: Dict[str, Any], key: str, default: float) -> float:
     """attrs[key] (or default) as a finite, positive float; ValueError otherwise."""
-    raw = attrs.get(key, default)
-    if (
-        isinstance(raw, bool)
-        or not isinstance(raw, (int, float))
-        or not math.isfinite(raw)
-        or raw <= 0
-    ):
+    value = finite_number(name, attrs, key, default)
+    if value <= 0:
         raise ValueError(f"{name}: {key} must be a finite, positive number")
-    return float(raw)
+    return value

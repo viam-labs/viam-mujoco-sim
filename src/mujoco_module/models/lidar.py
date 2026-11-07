@@ -15,7 +15,6 @@ points along +X.
 """
 
 import asyncio
-import math
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from typing_extensions import Self
@@ -38,7 +37,13 @@ from ..handles import (
     encode_pcd,
 )
 from ..sim import SimManager
-from .utils import apply_frame_to_attrs, get_attrs, positive_number, validate_sim_component
+from .utils import (
+    apply_frame_to_attrs,
+    finite_number,
+    get_attrs,
+    positive_number,
+    validate_sim_component,
+)
 
 
 class MujocoLidar(Camera, EasyResource):
@@ -61,13 +66,8 @@ class MujocoLidar(Camera, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = get_attrs(config)
-        raw_min = attrs.get("range_min_m", DEFAULT_LIDAR_RANGE_MIN_M)
-        if (
-            isinstance(raw_min, bool)
-            or not isinstance(raw_min, (int, float))
-            or not math.isfinite(raw_min)
-            or raw_min < 0
-        ):
+        raw_min = finite_number(config.name, attrs, "range_min_m", DEFAULT_LIDAR_RANGE_MIN_M)
+        if raw_min < 0:
             raise ValueError(f"{config.name}: range_min_m must be a finite number >= 0")
         range_max = positive_number(config.name, attrs, "range_max_m", DEFAULT_LIDAR_RANGE_MAX_M)
         if range_max <= raw_min:

@@ -16,6 +16,7 @@ from mujoco_module.models.base import MujocoBase
 from mujoco_module.models.camera import MujocoCamera
 from mujoco_module.models.gripper import MujocoGripper
 from mujoco_module.models.lidar import MujocoLidar
+from mujoco_module.models.movement_sensor import MujocoMovementSensor
 from mujoco_module.models.world import MujocoWorld
 from conftest import BLOCK
 
@@ -392,3 +393,99 @@ def test_lidar_serves_point_clouds_only(rover_cell):
     assert run(lidar.get_properties()).supports_pcd
     with pytest.raises(NotImplementedError):
         run(lidar.get_images())
+
+def odometry_config(**attrs):
+    return config("odometry", {"world": "sim-world", "base": "rover", **attrs})
+
+
+def test_movement_sensor_validate():
+    deps, _ = MujocoMovementSensor.validate_config(odometry_config())
+    assert deps == ["sim-world", "rover"]
+    for attrs, message in [
+        ({"base": ""}, "base"),
+        ({"base": 3}, "base"),
+        ({"linear_scale_error": -1}, "linear_scale_error"),
+        ({"linear_scale_error": float("nan")}, "linear_scale_error"),
+        ({"linear_scale_error": True}, "linear_scale_error"),
+        ({"heading_drift_dps": float("inf")}, "heading_drift_dps"),
+        ({"heading_drift_dps": "fast"}, "heading_drift_dps"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            MujocoMovementSensor.validate_config(odometry_config(**attrs))
+    with pytest.raises(ValueError, match="world"):
+        MujocoMovementSensor.validate_config(config("odometry", {"base": "rover"}))
+
+
+def test_movement_sensor_serves_odometry(rover_cell):
+    _, base = rover_cell
+    sensor = MujocoMovementSensor.new(odometry_config(), {})
+    try:
+        props = run(sensor.get_properties())
+        assert props.linear_velocity_supported and props.angular_velocity_supported
+        assert props.orientation_supported and props.position_supported
+        assert props.compass_heading_supported and not props.linear_acceleration_supported
+
+        run(base.move_straight(300, 300))
+        run(base.spin(90, 90))
+        run(base.set_velocity(Vector3(y=200), Vector3(z=0)))
+        time.sleep(0.3)
+        velocity = run(sensor.get_linear_velocity())
+        assert (velocity.x, velocity.y) == pytest.approx((0.0, 0.2), abs=0.01)
+        assert run(sensor.get_angular_velocity()).z == pytest.approx(0.0, abs=0.5)
+        run(base.stop())
+        time.sleep(0.2)
+
+        orientation = run(sensor.get_orientation())
+        assert (orientation.o_x, orientation.o_y, orientation.o_z) == (0, 0, 1)
+        assert orientation.theta == pytest.approx(90, abs=2)
+        assert run(sensor.get_compass_heading()) == pytest.approx(270, abs=2)
+
+        # rover_cell free-runs the sim (real_time false), so the sleep above drove an
+        # unknown distance; compare with the base's joints, not a fixed number.
+        # The base spawned at identity, so odometry (x, y) = joint (x, y).
+        sim = base._h()._sim
+
+        def joint(name):
+            return sim.run(lambda: float(sim.data.qpos[sim.model.joint(f"rover/{name}").qposadr[0]]))
+
+        relative, altitude = run(sensor.get_position(extra={"return_relative_pos_m": True}))
+        assert altitude == 0
+        assert relative.latitude == pytest.approx(joint("y"), abs=0.01)  # y, m
+        assert relative.longitude == pytest.approx(joint("x"), abs=0.01)
+        assert relative.longitude < -0.03  # drove toward -X after the left turn
+        geo, _ = run(sensor.get_position())
+        assert geo.latitude > 0 and geo.longitude < 0  # north-west of (0, 0)
+        assert abs(geo.latitude) < 1e-4  # metres, not degrees
+
+        readings = run(sensor.get_readings())
+        assert set(readings) == {
+            "position", "altitude", "linear_velocity", "angular_velocity",
+            "compass", "orientation",
+        }
+        assert readings["compass"] == pytest.approx(run(sensor.get_compass_heading()), abs=1e-6)
+        with pytest.raises(NotImplementedError):
+            run(sensor.get_linear_acceleration())
+        assert run(sensor.get_geometries()) == []
+
+        assert run(sensor.do_command({"command": "reset_odometry"})) == {}
+        relative, _ = run(sensor.get_position(extra={"return_relative_pos_m": True}))
+        assert (relative.latitude, relative.longitude) == pytest.approx((0, 0), abs=1e-3)
+        with pytest.raises(ValueError, match="unknown command"):
+            run(sensor.do_command({"command": "fly"}))
+    finally:
+        run(sensor.close())
+
+
+def test_rover_nav_example_validates():
+    import json
+    import pathlib
+
+    example = json.loads(
+        (pathlib.Path(__file__).parent.parent / "examples" / "rover-nav.json").read_text()
+    )
+    (sensor,) = [c for c in example["components"] if c["name"] == "odometry"]
+    deps, _ = MujocoMovementSensor.validate_config(config("odometry", sensor["attributes"]))
+    assert deps == ["sim-world", "rover"]
+    names = {c["name"] for c in example["components"]}
+    slam = next(s for s in example["services"] if s["name"] == "slam")["attributes"]
+    assert {slam["base"], slam["movement_sensor"], slam["lidar"]} <= names

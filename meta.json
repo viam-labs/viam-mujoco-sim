@@ -40,6 +40,12 @@
       "api": "rdk:component:camera",
       "short_description": "A 2D LIDAR that serves point clouds",
       "markdown_link": "README.md#model-viam-labsmujoco-simlidar"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:movement_sensor",
+      "api": "rdk:component:movement_sensor",
+      "short_description": "Wheel odometry for a mujoco-sim base, with optional drift",
+      "markdown_link": "README.md#model-viam-labsmujoco-simmovement_sensor"
     }
   ],
   "entrypoint": "run.sh",
