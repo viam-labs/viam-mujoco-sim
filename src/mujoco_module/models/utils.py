@@ -1,3 +1,8 @@
+"""Helpers shared by the component models.
+
+Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
+"""
+
 import math
 from typing import Any, Dict, Optional, Sequence, Tuple
 

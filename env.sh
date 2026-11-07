@@ -1,4 +1,5 @@
 # common setup for run.sh and first_run.sh
+# Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
 
 # keep the venv in module data so it survives hot reloads
 if [ -n "${VIAM_MODULE_DATA:-}" ]; then

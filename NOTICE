@@ -1,0 +1,13 @@
+viam-mujoco-sim
+Copyright 2026 Viam, Inc.
+
+This product includes third-party material:
+
+- assets/ufactory_lite6/ (Lite6 MJCF and meshes) from google-deepmind/mujoco_menagerie
+  at commit 98a70c569c4c1b6da467a20012f766ee1f8dc521, BSD-3-Clause,
+  Copyright (c) 2018, UFACTORY Inc. See assets/ufactory_lite6/LICENSE.
+- assets/ufactory_lite6/lite6_kinematics.json from viam-modules/viam-ufactory-xarm
+  at commit 73551eac2e919a6869bd0a0a632ab6e0843b4800, Apache-2.0, Copyright 2024 Viam.
+- src/mujoco_module/models/arm.py, src/mujoco_module/models/utils.py, src/main.py,
+  env.sh and run.nodetect.sh are adapted from viam-modules/viam-isaac-sim, Apache-2.0,
+  Copyright Viam; modified for MuJoCo.

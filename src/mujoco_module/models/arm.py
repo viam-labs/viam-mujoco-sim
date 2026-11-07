@@ -1,5 +1,7 @@
 """viam-labs:mujoco-sim:arm - a simulated arm.
 
+Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
+
 Attributes:
   world (string, required)         - name of the viam-labs:mujoco-sim:world component
   asset (string, required)         - known robot; "lite6" (with its wide gripper)

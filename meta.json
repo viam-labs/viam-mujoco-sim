@@ -1,7 +1,7 @@
 {
   "module_id": "viam-labs:mujoco-sim",
-  "visibility": "private",
-  "url": "",
+  "visibility": "public",
+  "url": "https://github.com/viam-labs/viam-mujoco-sim",
   "description": "Control and simulate robots in MuJoCo through Viam",
   "models": [
     {

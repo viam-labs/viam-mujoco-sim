@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # see Makefile for why this gets copied to run.sh
+# Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
 set -euo pipefail
 cd "$(dirname "$0")"
 

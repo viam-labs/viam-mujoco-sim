@@ -2,6 +2,7 @@
 name = "viam-mujoco-sim"
 version = "0.1.0"
 description = "Control and simulate robots in MuJoCo through Viam"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "mujoco>=3.3",

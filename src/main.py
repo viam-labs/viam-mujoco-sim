@@ -1,5 +1,7 @@
 """Module entrypoint.
 
+Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
+
 The sim thread owns MuJoCo (see sim.py), so the layout is:
   - main thread: SimManager.main_loop() - steps the simulator
   - side thread: the Viam module gRPC server
