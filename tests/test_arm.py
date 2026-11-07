@@ -10,7 +10,7 @@ from viam.spatialmath import AxisAngle
 from sva import _quat_matrix, forward_kinematics
 from conftest import BLOCK
 
-KINEMATICS = Path(__file__).parent / "lite6_kinematics.json"
+KINEMATICS = Path(__file__).parents[1] / "assets" / "ufactory_lite6" / "lite6_kinematics.json"
 HOME = [0.0, 0.0, 1.57, 0.0, 1.57, 0.0]
 
 
@@ -136,9 +136,13 @@ def test_batch_starting_after_zero_interpolates_from_command(sim):
     assert done.done()
 
 
-def test_close_cancels_inflight_trajectory(sim):
+def test_close_fails_inflight_moves(sim):
     arm = make_arm(sim)
     done = arm.start_trajectory([JointTrajectoryPoint(0.0, tuple(HOME)), JointTrajectoryPoint(5.0, tuple(HOME))])
+    wait = arm.wait_for_joint_targets([1.0] * 6, 1e-6)
     arm.close()
-    assert done.cancelled()
+    for future in (done, wait):
+        assert future.done() and not future.cancelled()
+        assert isinstance(future.exception(), RuntimeError)
+        assert "closed" in str(future.exception())
     assert "arm:pick-arm" not in sim.step_callbacks

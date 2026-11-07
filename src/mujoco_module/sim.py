@@ -31,14 +31,12 @@ from viam.logging import getLogger
 LOGGER = getLogger("viam-mujoco-sim")
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
-_UFACTORY_KINEMATICS = (
-    "https://raw.githubusercontent.com/viam-modules/viam-ufactory-xarm/main/arm"
-)
 
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "lite6": {
         "mjcf": ASSETS_DIR / "ufactory_lite6" / "lite6_gripper_wide.xml",
-        "kinematics": f"{_UFACTORY_KINEMATICS}/lite6_kinematics.json",
+        # vendored from viam-modules/viam-ufactory-xarm@73551eac (arm/lite6_kinematics.json)
+        "kinematics": (ASSETS_DIR / "ufactory_lite6" / "lite6_kinematics.json").as_uri(),
         "joint_names": tuple(f"joint{index}" for index in range(1, 7)),
         "home": (0.0, 0.0, 1.57, 0.0, 1.57, 0.0),
         "base_body": "link_base",
@@ -246,6 +244,8 @@ class SimManager:
             raise RuntimeError("the simulator has stopped")
         future: Future = Future()
         self._tasks.put((fn, future))
+        if self._stopped and future.cancel():
+            raise RuntimeError("the simulator has stopped")
         try:
             return future.result(timeout=timeout)
         except TimeoutError:

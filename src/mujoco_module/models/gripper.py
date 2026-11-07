@@ -84,13 +84,11 @@ class MujocoGripper(Gripper, EasyResource):
         _grip_force(attrs, config.name)
         return [*world, arm], []
 
+    # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs = get_attrs(config)
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
         self._sensorless = bool(attrs.get("sensorless", False))
         self._closed = False
         self._handle = GripperHandle(

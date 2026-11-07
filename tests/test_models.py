@@ -127,3 +127,53 @@ def test_arm_rejects_non_finite_targets(cell):
     _, arm, _ = cell
     with pytest.raises(ValueError, match="finite"):
         run(arm.move_to_joint_positions(JointPositions(values=[float("nan")] + [0.0] * 5)))
+
+
+@pytest.mark.parametrize(
+    "model, attrs",
+    [
+        (MujocoArm, {"asset": "lite6", "move_timeout_sec": -1}),
+        (MujocoArm, {"asset": "lite6", "robot_control_freq_hz": float("nan")}),
+        (MujocoArm, {"asset": "lite6", "path_max_step_deg": 45}),
+        (MujocoArm, {"asset": "lite6", "path_tolerance_delta_deg": True}),
+        (MujocoCamera, {"width": 640.5}),
+        (MujocoCamera, {"fov_deg": 180}),
+    ],
+)
+def test_validate_config_rejects_bad_values(model, attrs):
+    with pytest.raises(ValueError):
+        model.validate_config(config("x", {"world": "sim-world", **attrs}))
+
+
+def test_arm_moves_through_model(cell):
+    from viam.components.arm import JointPositions
+
+    _, arm, _ = cell
+    target = [10.0, -10.0, 80.0, 0.0, 80.0, 10.0]
+    run(arm.move_to_joint_positions(JointPositions(values=target)))
+    assert run(arm.get_joint_positions()).values == pytest.approx(target, abs=0.6)
+    run(arm.move_through_joint_positions([JointPositions(values=[0, 0, 90, 0, 90, 0])]))
+    assert run(arm.get_joint_positions()).values == pytest.approx([0, 0, 90, 0, 90, 0], abs=0.6)
+
+
+def test_densify_ends_on_waypoint_within_step():
+    from mujoco_module.models.arm import _densify
+
+    step = 0.05
+    out = _densify([0.0, 0.0], [[0.3, -0.1], [0.3, 0.2]], step)
+    assert out[-1] == [0.3, 0.2]
+    prev = [0.0, 0.0]
+    for point in out:
+        assert max(abs(a - b) for a, b in zip(point, prev)) <= step + 1e-12
+        prev = point
+
+
+def test_kinematics_is_vendored(cell):
+    import json
+
+    from viam.proto.common import KinematicsFileFormat
+
+    _, arm, _ = cell
+    fmt, data = run(arm.get_kinematics())
+    assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
+    assert json.loads(data)["name"] == "lite6"

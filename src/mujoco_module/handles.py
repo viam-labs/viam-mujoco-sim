@@ -83,6 +83,7 @@ class ArmHandle:
         # None until init (new arm) or the first step (replaced arm) sets it
         self._target: np.ndarray | None = None
         self._trajectory: _Trajectory | None = None
+        self._waits: dict[Future, str] = {}
         self._ids: _ArmIds | None = None
         self._ids_generation = -1
         self._callback_key = f"arm:{name}"
@@ -114,7 +115,19 @@ class ArmHandle:
     def close(self) -> None:
         def detach() -> None:
             self._sim.step_callbacks.pop(self._callback_key, None)
-            self._drop_trajectory()
+            error = RuntimeError(f"arm {self.name!r} was closed (removed or reconfigured)")
+            trajectory, self._trajectory = self._trajectory, None
+            pending = [trajectory.future] if trajectory is not None else []
+            for future, key in list(self._waits.items()):
+                self._sim.step_callbacks.pop(key, None)
+                pending.append(future)
+            self._waits.clear()
+            for future in pending:
+                if not future.done():
+                    try:
+                        future.set_exception(error)
+                    except InvalidStateError:
+                        pass
 
         self._sim.run(detach)
         self._sim.remove_contribution(self.name)
@@ -236,6 +249,7 @@ class ArmHandle:
         def check(_dt: float) -> None:
             if future.done():
                 self._sim.step_callbacks.pop(key, None)
+                self._waits.pop(future, None)
                 return
             try:
                 data, ids = self._now()
@@ -245,14 +259,17 @@ class ArmHandle:
                 )
             except BaseException as exc:
                 self._sim.step_callbacks.pop(key, None)
+                self._waits.pop(future, None)
                 future.set_exception(exc)
                 return
             if arrived:
                 self._sim.step_callbacks.pop(key, None)
+                self._waits.pop(future, None)
                 future.set_result(None)
 
         def attach() -> None:
             self._sim.step_callbacks[key] = check
+            self._waits[future] = key
             check(0.0)
 
         self._sim.run(attach)

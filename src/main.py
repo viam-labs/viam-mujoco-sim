@@ -20,6 +20,7 @@ import mujoco_module.models  # noqa: F401  (registers the models)
 from mujoco_module.sim import SimManager
 
 LOGGER = getLogger("viam-mujoco-sim.main")
+_failed = threading.Event()
 
 
 def _run_module(sim: SimManager) -> None:
@@ -32,6 +33,7 @@ def _run_module(sim: SimManager) -> None:
         loop.run_until_complete(Module.run_from_registry())
     except Exception:
         LOGGER.exception("module server exited with error")
+        _failed.set()
     finally:
         sim.request_stop()
 
@@ -48,7 +50,7 @@ def main() -> None:
     thread = threading.Thread(target=_run_module, args=(sim,), name="viam-module", daemon=True)
     thread.start()
     sim.main_loop()
-    sys.exit(0)
+    sys.exit(1 if _failed.is_set() else 0)
 
 
 if __name__ == "__main__":

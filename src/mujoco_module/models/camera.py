@@ -13,6 +13,7 @@ takes precedence over a frame orientation.
 """
 
 import asyncio
+import math
 from io import BytesIO
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -53,13 +54,27 @@ class MujocoCamera(Camera, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = get_attrs(config)
-        for key in ("width", "height", "fov_deg"):
-            if key in attrs and not float(attrs[key]) > 0:
-                raise ValueError(f"{config.name}: {key} must be positive")
-        if not 0 < float(attrs.get("fov_deg", 60)) < 180:
-            raise ValueError(f"{config.name}: fov_deg must be between 0 and 180")
+        for key in ("width", "height"):
+            raw = attrs.get(key, 1)
+            if (
+                isinstance(raw, bool)
+                or not isinstance(raw, (int, float))
+                or not math.isfinite(raw)
+                or raw != int(raw)
+                or raw <= 0
+            ):
+                raise ValueError(f"{config.name}: {key} must be a positive integer")
+        fov = attrs.get("fov_deg", 60)
+        if (
+            isinstance(fov, bool)
+            or not isinstance(fov, (int, float))
+            or not math.isfinite(fov)
+            or not 0 < fov < 180
+        ):
+            raise ValueError(f"{config.name}: fov_deg must be finite and between 0 and 180")
         return validate_sim_component(config, needs_asset=False)
 
+    # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:

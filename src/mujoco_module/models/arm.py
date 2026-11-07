@@ -89,7 +89,7 @@ def _densify(
         n = max(1, math.ceil(max_delta / max_step_rad))
         for k in range(1, n + 1):
             t = k / n
-            out.append([a + t * (b - a) for a, b in zip(prev, target)])
+            out.append(target[:] if k == n else [a + t * (b - a) for a, b in zip(prev, target)])
         prev = target
     return out
 
@@ -124,6 +124,24 @@ def _max_joint_deg_s2(
             f"{component_name}: max_joint_deg_s2 must be finite and positive"
         )
     return limit
+
+
+def _number(
+    attrs: Mapping[str, Any],
+    key: str,
+    default: float,
+    name: str,
+    low: float,
+    high: float = math.inf,
+) -> float:
+    """A finite, non-bool number in (low, high]."""
+    raw = attrs.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise ValueError(f"{name}: {key} must be numeric")
+    value = float(raw)
+    if not math.isfinite(value) or not low < value <= high:
+        raise ValueError(f"{name}: {key} must be finite and in ({low}, {high}]")
+    return value
 
 
 def _is_moving_velocity_threshold(
@@ -177,8 +195,13 @@ class MujocoArm(Arm, EasyResource):
         _is_moving_velocity_threshold(attrs, config.name)
         _max_joint_deg_s(attrs, config.name)
         _max_joint_deg_s2(attrs, config.name)
+        _number(attrs, "move_timeout_sec", 30.0, config.name, 0.0)
+        _number(attrs, "path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG, config.name, 0.0)
+        _number(attrs, "robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ, config.name, 0.0, _MAX_CONTROL_FREQ_HZ)
+        _number(attrs, "path_max_step_deg", _DEFAULT_MAX_STEP_DEG, config.name, 0.0, _MAX_MAX_STEP_DEG)
         return result
 
+    # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
@@ -209,10 +232,6 @@ class MujocoArm(Arm, EasyResource):
         max_joint_deg_s2 = _max_joint_deg_s2(attrs, config.name)
         if max_joint_deg_s2 is not None:
             attrs["max_joint_deg_s2"] = max_joint_deg_s2
-        if self._handle is not None:
-            # Stop an in-flight trajectory so its future resolves; don't close():
-            # the new handle replaces the contribution and callback under the same name.
-            self._handle.stop_trajectory()
         self._handle = ArmHandle(SimManager.get(), self.name, attrs)
 
     async def close(self) -> None:
