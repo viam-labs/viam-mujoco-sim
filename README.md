@@ -2,7 +2,7 @@
 
 A proof-of-concept [Viam](https://www.viam.com) module that simulates robots in
 [MuJoCo](https://mujoco.org). It is a drop-in sibling of
-[`viam-labs:isaac-sim`](https://github.com/viam-modules/viam-isaac-sim): the same component attributes, the
+[`viam-labs:isaac-sim`](https://github.com/viam-modules/viam-isaac-sim): the same core component attributes, the
 same world `DoCommand`s, and the standard Viam frame for placement, so a config
 moves between engines by changing the model triplet.
 
@@ -44,11 +44,15 @@ client, for example `scripted_pick.py` from [viam-isaac-sim](https://github.com/
   that depends on it. A move in flight fails with
   `arm '<name>' was closed (removed or reconfigured)`. Leave the config alone
   during a run.
-- **Prop poses survive world edits.** For non-fixed props, changing a prop's
-  `position` in the world config doesn't move an existing prop. Use the world's
-  `park_props` or `reset` DoCommand. A `"fixed": true` prop is rebuilt at its
-  configured position, and `park_props` and `reset` refuse to move fixed props.
-- **Arm links mostly don't collide with each other.** MuJoCo's convex hulls of the Lite6 links overlap at reachable wrist angles, so wrist-link pairs are excluded and Viam's planner owns self-collision. The gripper and lower links still collide with the base.
+- **Fixed props never move.** `set_prop_pose` and `park_props` reject them, and
+  `reset` leaves them where they are. Non-fixed props keep their pose across
+  world edits; use `park_props` or `reset`.
+- **Arm self-collision is partial.** MuJoCo's convex hulls of the Lite6 links
+  overlap at reachable wrist angles, so those wrist-link pairs are excluded.
+  The gripper and links 3–6 still collide with the base and shoulder, which
+  Viam's planner can't see.
+- **Place components relative to `world`.** Frames with any other parent are
+  rejected.
 - **Kinematics are vendored.** `GetKinematics` serves
   `assets/ufactory_lite6/lite6_kinematics.json` (from
   viam-ufactory-xarm@73551eac). The `kinematics_url` attribute overrides it.
@@ -68,3 +72,7 @@ Tests run real MuJoCo; there is no mock backend. Tests use OSMesa on Linux (`apt
 The Lite6 model is vendored from
 [mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie)
 (`assets/ufactory_lite6`, BSD license).
+
+## License
+
+Apache-2.0. See LICENSE and NOTICE for third-party material.
