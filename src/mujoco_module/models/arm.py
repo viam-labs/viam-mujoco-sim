@@ -442,7 +442,7 @@ class MujocoArm(Arm, EasyResource):
             else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
         )
 
-        if url.startswith("file://"):  # local files are never cached: edits must show up
+        if url.startswith("file://"):  # local files skip the disk cache: edits show up when the arm is rebuilt
             with urllib.request.urlopen(url) as resp:
                 return fmt, resp.read()
 

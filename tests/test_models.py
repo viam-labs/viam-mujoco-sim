@@ -187,3 +187,15 @@ def test_frame_parent_must_be_world(model, attrs):
     cfg.frame.parent = "pick-arm"
     with pytest.raises(ValueError, match="frame.parent must be"):
         model.validate_config(cfg)
+
+
+def test_gripper_frame_parent_may_be_its_arm():
+    cfg = config("g", {"world": "sim-world", "arm": "pick-arm"})
+    cfg.frame.parent = "pick-arm"
+    MujocoGripper.validate_config(cfg)
+
+
+def test_park_props_rejects_a_bare_string(cell):
+    world, _, _ = cell
+    with pytest.raises(ValueError):
+        run(world.do_command({"command": "park_props", "props": "cube"}))

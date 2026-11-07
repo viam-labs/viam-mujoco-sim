@@ -7,5 +7,6 @@ __pycache__/
 module.tar.gz
 # see Makefile for explanation
 run.sh
+docs/
 # MuJoCo writes warnings here, in the working directory
 MUJOCO_LOG.TXT

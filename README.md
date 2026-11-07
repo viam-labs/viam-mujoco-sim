@@ -51,8 +51,8 @@ client, for example `scripted_pick.py` from [viam-isaac-sim](https://github.com/
   overlap at reachable wrist angles, so those wrist-link pairs are excluded.
   The gripper and links 3–6 still collide with the base and shoulder, which
   Viam's planner can't see.
-- **Place components relative to `world`.** Frames with any other parent are
-  rejected.
+- **Place components relative to `world`.** Arm and camera frames must have
+  parent `world`; the gripper's frame parent is its arm.
 - **Kinematics are vendored.** `GetKinematics` serves
   `assets/ufactory_lite6/lite6_kinematics.json` (from
   viam-ufactory-xarm@73551eac). The `kinematics_url` attribute overrides it.
@@ -71,7 +71,7 @@ Tests run real MuJoCo; there is no mock backend. Tests use OSMesa on Linux (`apt
 
 The Lite6 model is vendored from
 [mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie)
-(`assets/ufactory_lite6`, BSD license).
+(`assets/ufactory_lite6`, BSD-3-Clause).
 
 ## License
 
