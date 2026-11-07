@@ -146,3 +146,19 @@ def test_close_fails_inflight_moves(sim):
         assert isinstance(future.exception(), RuntimeError)
         assert "closed" in str(future.exception())
     assert "arm:pick-arm" not in sim.step_callbacks
+
+
+def test_arm_reaches_pose_where_link_hulls_overlap(sim):
+    """Regression: Menagerie's link4/link6 convex hulls overlap here, which jammed joint 5."""
+    arm = make_arm(sim, max_joint_deg_s=30)
+    target = [-0.32019518688087617, -0.13123530856204854, 1.595436485882882,
+              -0.001766502550737528, 1.7313311471953172, -0.3204752787998066]
+    arm.set_joint_targets(target)
+    sim.advance(8.0)
+    assert arm.get_joint_positions() == pytest.approx(target, abs=math.radians(0.5))
+    root = sim.model.body_rootid[sim.model.body("pick-arm/link_base").id]
+    fingers = {sim.model.body("pick-arm/gripper_left_finger").id, sim.model.body("pick-arm/gripper_right_finger").id}
+    for contact in sim.data.contact[: sim.data.ncon]:
+        bodies = {int(sim.model.geom_bodyid[contact.geom1]), int(sim.model.geom_bodyid[contact.geom2])}
+        both_arm = all(sim.model.body_rootid[b] == root for b in bodies)
+        assert not (both_arm and not bodies & fingers), "unexpected arm self-contact"

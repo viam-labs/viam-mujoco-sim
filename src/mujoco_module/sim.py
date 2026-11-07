@@ -46,6 +46,11 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         # tool axis. Symmetric for a parallel gripper, but GetEndPosition
         # reports in Viam's convention.
         "flange_offset_wxyz": (0.0, 0.0, 0.0, 1.0),
+        # MuJoCo collides meshes as convex hulls, which are larger than the real
+        # links and jam reachable poses. Viam's planner owns self-collision.
+        "self_collision_excluded_bodies": (
+            "link_base", "link1", "link2", "link3", "link4", "link5", "link6", "gripper_body",
+        ),
     },
 }
 
