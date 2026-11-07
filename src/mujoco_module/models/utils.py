@@ -75,10 +75,12 @@ def apply_frame_to_attrs(
 
 
 def validate_sim_component(
-    config: ComponentConfig, needs_asset: bool = True
+    config: ComponentConfig, needs_asset: bool = True, world_frame_only: bool = True
 ) -> Tuple[Sequence[str], Sequence[str]]:
     """Every component names its world (so viam-server starts it first) and,
-    when it spawns something, which known asset to spawn."""
+    when it spawns something, which known asset to spawn. Components placed by
+    their frame must be framed on the world (frame_pose ignores the parent);
+    the gripper opts out because its frame parent is its arm."""
     attrs = struct_to_dict(config.attributes)
     world = attrs.get("world")
     if not world or not isinstance(world, str):
@@ -90,5 +92,10 @@ def validate_sim_component(
         raise ValueError(
             f"{config.name}: asset must be one of {sorted(KNOWN_ASSETS)}, "
             f"got {attrs.get('asset')!r}"
+        )
+    if world_frame_only and config.HasField("frame") and config.frame.parent != "world":
+        raise ValueError(
+            f'{config.name}: frame.parent must be "world"; placing relative to '
+            "other frames isn't supported yet"
         )
     return [world], []

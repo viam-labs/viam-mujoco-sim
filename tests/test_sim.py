@@ -40,6 +40,10 @@ def test_prop_config_validation():
         WorldConfig.from_attrs({"props": [{"name": "b", "dynamic_friction": -1}]})
     with pytest.raises(ValueError, match="duplicate"):
         WorldConfig.from_attrs({"props": [{"name": "b"}, {"name": "b"}]})
+    with pytest.raises(ValueError, match="fixed"):
+        WorldConfig.from_attrs({"props": [{"name": "b", "fixed": "false"}]})
+    with pytest.raises(ValueError, match="real_time"):
+        WorldConfig.from_attrs({"real_time": "false"})
     WorldConfig.from_attrs({"props": [{"name": "b", "static_friction": 0}]})
 
 

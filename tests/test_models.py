@@ -177,3 +177,13 @@ def test_kinematics_is_vendored(cell):
     fmt, data = run(arm.get_kinematics())
     assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
     assert json.loads(data)["name"] == "lite6"
+
+
+@pytest.mark.parametrize("model, attrs", [(MujocoArm, {"asset": "lite6"}), (MujocoCamera, {})])
+def test_frame_parent_must_be_world(model, attrs):
+    cfg = config("x", {"world": "sim-world", **attrs})
+    cfg.frame.parent = "world"
+    model.validate_config(cfg)
+    cfg.frame.parent = "pick-arm"
+    with pytest.raises(ValueError, match="frame.parent must be"):
+        model.validate_config(cfg)

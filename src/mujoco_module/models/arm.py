@@ -307,7 +307,7 @@ class MujocoArm(Arm, EasyResource):
             )
             raise TimeoutError(
                 f"arm {self.name} did not reach target within {self._move_timeout}s"
-                f" (stuck joints: {detail or 'position unavailable'})"
+                f" (stuck joints: {detail or 'within tolerance but still moving'})"
             )
         finally:
             self._moving_count -= 1
@@ -350,7 +350,7 @@ class MujocoArm(Arm, EasyResource):
             raise TimeoutError(
                 f"arm {self.name} did not converge on final waypoint "
                 f"{len(raw)}/{len(raw)} within {self._move_timeout}s "
-                f"(stuck joints: {detail})"
+                f"(stuck joints: {detail or 'within tolerance but still moving'})"
             )
         finally:
             self._moving_count -= 1
@@ -453,6 +453,10 @@ class MujocoArm(Arm, EasyResource):
             if ext in (".urdf", ".xml", ".xacro")
             else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
         )
+
+        if url.startswith("file://"):  # local files are never cached: edits must show up
+            with urllib.request.urlopen(url) as resp:
+                return fmt, resp.read()
 
         cache_dir = os.environ.get("VIAM_MODULE_DATA") or tempfile.gettempdir()
         cache = os.path.join(

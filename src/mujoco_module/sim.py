@@ -96,6 +96,12 @@ def _vector(value: Any, size: int, label: str) -> tuple[float, ...]:
     return tuple(_finite(item, label) for item in value)
 
 
+def _strict_bool(value: Any, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be true or false, got {value!r}")
+    return value
+
+
 def _unit_quaternion(value: Any, label: str) -> tuple[float, float, float, float]:
     quat = _vector(value, 4, label)
     norm = math.sqrt(sum(item * item for item in quat))
@@ -145,7 +151,7 @@ class PropSpec:
             ),
             mass=_positive(raw.get("mass", 0.05), f"prop {name}: mass"),
             color=_vector(raw.get("color", [0.7, 0.7, 0.7]), 3, f"prop {name}: color"),
-            fixed=bool(raw.get("fixed", False)),
+            fixed=_strict_bool(raw.get("fixed", False), f"prop {name}: fixed"),
             friction=friction,
         )
 
@@ -164,7 +170,7 @@ class WorldConfig:
             raise ValueError(f"duplicate prop names in {names}")
         return cls(
             physics_dt=_positive(attrs.get("physics_dt", 0.002), "physics_dt"),
-            real_time=bool(attrs.get("real_time", True)),
+            real_time=_strict_bool(attrs.get("real_time", True), "real_time"),
             props=props,
         )
 

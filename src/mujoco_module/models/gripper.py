@@ -72,7 +72,9 @@ class MujocoGripper(Gripper, EasyResource):
     def validate_config(
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        world, _ = validate_sim_component(config, needs_asset=False)
+        world, _ = validate_sim_component(
+            config, needs_asset=False, world_frame_only=False
+        )
         attrs = get_attrs(config)
         arm = attrs.get("arm")
         if not arm or not isinstance(arm, str):

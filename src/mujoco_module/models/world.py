@@ -77,7 +77,9 @@ class MujocoWorld(Generic, EasyResource):
             return {"ok": True}
         if cmd == "park_props":
             props = command.get("props") or []
-            return sim.park_props([str(name) for name in props])  # type: ignore[union-attr]
+            if not isinstance(props, list) or not all(isinstance(p, str) for p in props):
+                raise ValueError("park_props requires props: a list of prop names")
+            return sim.park_props(props)
         prop = str(command.get("prop", ""))
         if cmd == "get_prop_pose":
             if not prop:
