@@ -1,0 +1,80 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "pick_block",
+            "type": "cube",
+            "position": [2.5, 0, 0.02],
+            "size": 0.0313,
+            "mass": 0.03,
+            "color": [1, 0, 0],
+            "static_friction": 2.0,
+            "dynamic_friction": 2.0
+          },
+          {
+            "name": "place_pad",
+            "type": "cube",
+            "fixed": true,
+            "position": [0.32, -0.22, 0.005],
+            "size": 0.2,
+            "scale": [1, 1, 0.05],
+            "color": [0.1, 0.3, 0.9]
+          }
+        ]
+      }
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": { "parent": "world" },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "lite6",
+        "max_joint_deg_s": 30,
+        "max_joint_deg_s2": 60
+      }
+    },
+    {
+      "name": "pick-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": { "x": 0, "y": 0, "z": 81.1 }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "pick-arm",
+        "sensorless": true
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": { "x": 1200, "y": 1200, "z": 1000 }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [0.3, 0, 0.15],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ]
+}
