@@ -330,3 +330,97 @@ class ArmHandle:
             )
 
         return self._sim.run(read)
+
+
+class GripperHandle:
+    """The Lite6 gripper already attached with its arm: a force motor on the
+    left finger, the right finger mirrored by an equality constraint. Positive
+    force closes (q -> 0); negative opens (q -> -0.0081)."""
+
+    OPEN_M = -0.0081
+    CLOSED_M = 0.0
+    MOVING_M_S = 1e-3
+
+    def __init__(
+        self, sim: SimManager, name: str, arm: str, grip_force_n: float
+    ) -> None:
+        self._sim = sim
+        self.name = name
+        prefix = f"{arm}/"
+        self._actuator = prefix + "gripper"
+        self._joint = prefix + "gripper_left_finger"
+        self._tips = (prefix + "gripper_left_finger", prefix + "gripper_right_finger")
+        self._arm_base = prefix + "link_base"
+        self._force = float(grip_force_n)
+        self._command = -1.0  # +1 close, -1 open, 0 no force
+        self._callback_key = f"gripper:{name}"
+
+        def attach() -> None:
+            sim.require_world()
+            assert sim.model is not None
+            if mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator) < 0:
+                raise RuntimeError(
+                    f"arm {arm!r} has no Lite6 gripper; configure the arm first"
+                )
+            sim.step_callbacks[self._callback_key] = self._on_step
+
+        sim.run(attach)
+
+    def close(self) -> None:
+        self._sim.run(lambda: self._sim.step_callbacks.pop(self._callback_key, None))
+
+    def _on_step(self, _dt: float) -> None:
+        model, data = self._sim.model, self._sim.data
+        assert model is not None and data is not None
+        data.ctrl[model.actuator(self._actuator).id] = self._command * self._force
+
+    def _set(self, command: float) -> None:
+        def apply() -> None:
+            self._command = command
+
+        self._sim.run(apply)
+
+    def open_jaws(self) -> None:
+        self._set(-1.0)
+
+    def close_jaws(self) -> None:
+        self._set(1.0)
+
+    def stop(self) -> None:
+        self._set(0.0)
+
+    def jaw_m(self) -> float:
+        def read() -> float:
+            assert self._sim.model is not None and self._sim.data is not None
+            joint = self._sim.model.joint(self._joint)
+            return float(self._sim.data.qpos[joint.qposadr[0]])
+
+        return self._sim.run(read)
+
+    def is_moving(self) -> bool:
+        def read() -> bool:
+            assert self._sim.model is not None and self._sim.data is not None
+            joint = self._sim.model.joint(self._joint)
+            return bool(abs(self._sim.data.qvel[joint.dofadr[0]]) > self.MOVING_M_S)
+
+        return self._sim.run(read)
+
+    def firm_grasp(self) -> bool:
+        """Both fingertips touch the same body, which is neither the world nor
+        part of the arm."""
+
+        def read() -> bool:
+            model, data = self._sim.model, self._sim.data
+            assert model is not None and data is not None
+            left, right = (model.geom(tip).id for tip in self._tips)
+            arm_root = model.body_rootid[model.body(self._arm_base).id]
+            touching: dict[int, set[int]] = {left: set(), right: set()}
+            for contact in data.contact[: data.ncon]:
+                for tip, other in ((contact.geom1, contact.geom2), (contact.geom2, contact.geom1)):
+                    if tip in touching:
+                        body = int(model.geom_bodyid[other])
+                        if body != 0 and model.body_rootid[body] != arm_root:
+                            touching[tip].add(body)
+            return bool(touching[left] & touching[right])
+
+        return self._sim.run(read)
