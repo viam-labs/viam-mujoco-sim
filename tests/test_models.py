@@ -316,16 +316,61 @@ def test_camera_on_the_rover_looks_forward(rover_cell):
 @pytest.mark.parametrize(
     "attrs, message",
     [
-        ({}, "asset must be one of"),
+        ({}, r"asset must be one of \['clearpath_husky', 'viam_rover'\], got None; or set mjcf"),
         ({"asset": "jetbot"}, "asset must be one of"),
+        ({"asset": "viam_rover", "mjcf": "viam_rover/rover.xml"}, "set asset or mjcf, not both"),
+        ({"mjcf": ""}, "mjcf must be a file path"),
+        ({"mjcf": "nope.xml"}, "mjcf: file .*nope.xml not found"),
+        ({"mjcf": "clearpath_husky/LICENSE"}, r"mjcf must be an .xml \(MJCF\) or .urdf file"),
+        ({"asset": "viam_rover", "drive": "tank"}, 'drive must be "ideal" or "wheels"'),
+        ({"asset": "viam_rover", "chassis": ""}, "chassis must be a body name"),
+        ({"mjcf": "viam_rover/rover.xml", "mesh_dir": 3}, "mesh_dir must be a folder path"),
+        ({"asset": "viam_rover", "forward_axis": "x"}, r"forward_axis must be one of \['\+x', '-x', '\+y', '-y'\]"),
+        ({"asset": "viam_rover", "wheel_radius_m": 0}, "wheel_radius_m"),
+        ({"asset": "viam_rover", "wheels": ["a", "b"]}, r'wheels must be \{"left": \[joint, ...\], "right": \[joint, ...\]\}'),
+        ({"asset": "viam_rover", "wheels": {"left": ["a"]}}, "wheels must be"),
+        ({"asset": "viam_rover", "wheels": {"left": ["a", "b"], "right": ["b"]}}, "wheels joint 'b' is on both sides"),
+        ({"asset": ["x"]}, "asset must be one of"),
+        ({"asset": "viam_rover", "wheels": {"left": ["a"], "right": []}}, "wheels must be"),
         ({"asset": "viam_rover", "max_linear_mps": 0}, "max_linear_mps"),
         ({"asset": "viam_rover", "max_angular_dps": -5}, "max_angular_dps"),
+        ({"mjcf": "viam_rover/rover.xml", "max_angular_dps": "fast"}, "max_angular_dps"),
         ({"asset": "viam_rover", "move_timeout_margin_sec": "soon"}, "move_timeout_margin_sec"),
     ],
 )
 def test_base_validate_rejects_bad_values(attrs, message):
     with pytest.raises(ValueError, match=message):
         MujocoBase.validate_config(config("rover", {"world": "sim-world", **attrs}))
+
+
+def test_base_validate_accepts_a_file_and_overrides():
+    attrs = {
+        "world": "sim-world", "mjcf": "clearpath_husky/husky.xml", "drive": "wheels",
+        "chassis": "base_link", "forward_axis": "+x", "wheel_radius_m": 0.17,
+        "wheels": {"left": ["front_left_wheel"], "right": ["front_right_wheel"]},
+    }
+    assert MujocoBase.validate_config(config("husky", attrs)) == (["sim-world"], [])
+
+
+def test_a_base_from_a_file_reports_its_inferred_shape(running_sim, tmp_path):
+    from test_base import ROS_BASE
+
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    path = tmp_path / "skid.xml"
+    path.write_text(ROS_BASE)
+    attrs = {"world": "sim-world", "mjcf": str(path), "drive": "wheels"}
+    with pytest.raises(ValueError, match="set max_linear_mps and max_angular_dps"):
+        MujocoBase.new(config("skid", attrs), {})
+    base = MujocoBase.new(config("skid", {**attrs, "max_linear_mps": 1, "max_angular_dps": 90}), {})
+    properties = run(base.get_properties())
+    assert properties.width_meters == pytest.approx(0.5)
+    assert properties.wheel_circumference_meters == pytest.approx(2 * math.pi * 0.1)
+    (geometry,) = run(base.get_geometries())
+    # the 0.6 x 0.4 box along the file's x is 0.6 along the base's +Y, its centre 0.2 above the floor
+    assert (geometry.box.dims_mm.x, geometry.box.dims_mm.y, geometry.box.dims_mm.z) == pytest.approx((400, 600, 100))
+    assert (geometry.center.x, geometry.center.y, geometry.center.z) == pytest.approx((0, 0, 200))
+    assert geometry.label == "skid-chassis"
+    run(base.close())
 
 
 def test_base_frame_parent_must_be_world():
@@ -546,7 +591,7 @@ def test_rover_nav_example_validates():
 
 @pytest.mark.parametrize(
     "example",
-    ["rover-lidar.json", "rover-nav.json", "lite6-pick.json", "ur5e-pick.json", "depalletize.json"],
+    ["rover-lidar.json", "rover-nav.json", "husky-lidar.json", "lite6-pick.json", "ur5e-pick.json", "depalletize.json"],
 )
 def test_example_obstacles_validate(example):
     import json
@@ -577,6 +622,27 @@ def test_example_obstacles_validate(example):
                 parsed["geometry"]["center"] = {**g["translation"], "o_z": 1}
         component.frame.CopyFrom(ParseDict(parsed, Frame()))
         assert MujocoObstacle.validate_config(component) == ([world["name"]], [])
+
+
+def test_husky_lidar_example_validates():
+    import json
+    import pathlib
+
+    cfg = json.loads((pathlib.Path(__file__).parent.parent / "examples" / "husky-lidar.json").read_text())
+    models = {
+        "viam-labs:mujoco-sim:base": MujocoBase,
+        "viam-labs:mujoco-sim:lidar": MujocoLidar,
+        "viam-labs:mujoco-sim:movement_sensor": MujocoMovementSensor,
+    }
+    checked = []
+    for item in cfg["components"]:
+        if item["model"] in models:
+            component = config(item["name"], item["attributes"])
+            if "frame" in item:
+                component.frame.parent = item["frame"]["parent"]
+            models[item["model"]].validate_config(component)
+            checked.append(item["name"])
+    assert checked == ["husky", "lidar", "odometry"]
 
 
 def test_arm_kinematics_url_may_be_a_path(running_sim, tmp_path):

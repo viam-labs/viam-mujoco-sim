@@ -1,10 +1,11 @@
 import math
 
+import mujoco
 import numpy as np
 import pytest
 
 from mujoco_module.handles import BaseHandle, LidarHandle
-from mujoco_module.sim import WorldConfig
+from mujoco_module.sim import Contribution, WorldConfig
 
 
 def wall_ahead_x(sim, face=1.0):
@@ -82,3 +83,23 @@ def test_ray_zero_points_along_sensor_x(sim):
     points = turned.scan()
     ahead = points[np.argmin(np.abs(points[:, 0]))]  # the wall is now along sensor -Y
     assert ahead == pytest.approx([0.0, -1.0, 0.0], abs=0.01)
+
+
+def test_a_mounted_lidar_sees_past_its_parents_child_bodies(sim):
+    wall_ahead_x(sim)
+
+    def build(spec):
+        # a parent with a frame site and, along +X, a jointed child with a child of its own
+        body = spec.worldbody.add_body(name="probe", pos=[0, 0, 0.1])
+        body.add_site(name="probe/viam_frame")
+        fin = body.add_body(name="probe/fin")
+        fin.add_joint(name="probe/fin", axis=[0, 0, 1])
+        fin.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.02, 0.05, 0.05], pos=[0.3, 0, 0])
+        tip = fin.add_body(name="probe/tip", pos=[0.6, 0, 0])
+        tip.add_geom(type=mujoco.mjtGeom.mjGEOM_BOX, size=[0.02, 0.05, 0.05])
+
+    sim.set_contribution("probe", Contribution(build=build))
+    points = LidarHandle(sim, "lidar", {"parent": "probe"}).scan()
+    ahead = points[np.argmin(np.abs(points[:, 1]))]
+    assert ahead == pytest.approx([1.0, 0.0, 0.0], abs=0.01)
+    assert np.min(np.linalg.norm(points, axis=1)) > 0.9

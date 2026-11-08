@@ -25,6 +25,16 @@ This product includes third-party material:
   trimesh.load_mesh(path).simplify_quadric_decimation(face_count=5000)
   (the target is approximate; this yields 7,412 faces).
   See assets/robotiq_epick/LICENSE. assets/robotiq_epick/epick.xml is written for this module.
+- assets/clearpath_husky/assets/ (Clearpath Husky meshes) from husky/husky at commit
+  41e15d283a8d955938204e79554a875264417bb9 (husky_description/meshes), BSD-3-Clause,
+  Copyright (c) 2021, Clearpath Robotics Inc. (repo LICENSE, covering the meshes); dimensions
+  from husky.urdf.xacro, Copyright (c) 2015, Clearpath Robotics, Inc. See
+  assets/clearpath_husky/LICENSE, which has both.
+  base_link.stl and top_chassis.stl are unmodified; wheel.stl is decimated from 27,256 to
+  5,534 faces with trimesh 5.2.0 and fast-simplification 0.2.0:
+  trimesh.load_mesh(path).simplify_quadric_decimation(face_count=5000).
+  assets/clearpath_husky/husky.xml is written for this module from the same package's
+  urdf/husky.urdf.xacro (dimensions) and its expanded URDF (inertials).
 - src/mujoco_module/models/arm.py, src/mujoco_module/models/utils.py, src/main.py,
   env.sh and run.nodetect.sh are adapted from viam-modules/viam-isaac-sim, Apache-2.0,
   Copyright Viam; modified for MuJoCo.

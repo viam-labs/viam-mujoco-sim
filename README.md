@@ -19,7 +19,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF arm, placed by its frame, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
-| [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover you can drive; ideal motion, visual wheels. |
+| [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
@@ -218,8 +218,9 @@ The frame's `parent` must be `world`.
 Give the arm `mjcf` and `kinematics_url` instead of `asset`. Everything else is
 read from the two files. A robot described only by a URDF can be converted to
 MJCF offline with the experimental `make_mjcf_from_robot_description.py` from
-[ros-controls/mujoco_ros2_control](https://github.com/ros-controls/mujoco_ros2_control/blob/main/mujoco_ros2_control/docs/tools.rst),
-then pointed at with `mjcf`.
+[ros-controls/mujoco_ros2_control](https://github.com/ros-controls/mujoco_ros2_control/blob/main/mujoco_ros2_control/docs/tools.rst)
+(it runs in a ROS 2 environment), then pointed at with `mjcf`. (A base takes
+a URDF directly; see [Bring your own base](#bring-your-own-base).)
 
 - **Joints.** The first N actuated hinge or slide joints in the MJCF's body
   tree, where N is the kinematics file's joint count. They must form one chain
@@ -431,9 +432,15 @@ error saying the camera is not in the scene.
 
 ## Model viam-labs:mujoco-sim:base
 
-A Viam Rover 2, with the dimensions from Viam's rover fragment: a 381 mm wheel
-circumference and a 356 mm track. It drives exactly as commanded; the wheels
-are visual.
+A differential-drive or skid-steer base: a bundled Viam Rover 2 or Clearpath
+Husky, or your own from an MJCF or URDF file. Its chassis and driven wheels
+are read from the file. It drives either ideally, exactly as commanded with
+the wheels turning to match, or through its wheels on the floor.
+
+| Asset | What it is |
+|---|---|
+| `viam_rover` | A Viam Rover 2 with the dimensions from Viam's rover fragment: 381 mm wheel circumference, 356 mm track, two drive wheels and a rear caster. 0.762 m/s, 245 °/s. |
+| `clearpath_husky` | A Clearpath Husky A200 from Clearpath's `husky_description` (BSD): four wheels, skid-steer, 990 x 571 mm, 56.6 kg. Clearpath's control limits: 1.0 m/s, 115 °/s (2.0 rad/s), 3.0 m/s², 6.0 rad/s². |
 
 ### Configuration
 
@@ -450,21 +457,158 @@ are visual.
 }
 ```
 
+A Husky driven through its wheels:
+
+```json
+{
+  "name": "husky",
+  "api": "rdk:component:base",
+  "model": "viam-labs:mujoco-sim:base",
+  "frame": { "parent": "world" },
+  "attributes": {
+    "world": "sim-world",
+    "asset": "clearpath_husky",
+    "drive": "wheels"
+  }
+}
+```
+
+[`examples/husky-lidar.json`](examples/husky-lidar.json) puts it in a walled
+yard with a LIDAR on its top plate, odometry and an overview camera.
+
 ### Attributes
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `asset` | string | Yes | | The robot. Only `"viam_rover"` is supported. |
-| `max_linear_mps` | float | No | `0.762` | Top speed in meters per second; scales `SetPower`. |
-| `max_angular_dps` | float | No | `245` | Top yaw rate in degrees per second; scales `SetPower`. |
-| `move_timeout_margin_sec` | float | No | `2` | Extra sim time `MoveStraight` and `Spin` get, beyond distance over speed, before they fail as stalled. |
+| `asset` | string | One of `asset`, `mjcf` | | A bundled base: `"viam_rover"` or `"clearpath_husky"`. |
+| `mjcf` | string | One of `asset`, `mjcf` | | Your base's `.xml` (MJCF) or `.urdf` file: absolute, `~`, or relative to this module's `assets/`. |
+| `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | Where a URDF's meshes are: absolute, `~`, or relative to the file. `package://` paths are looked up there by file name. |
+| `drive` | string | No | `"ideal"` | `"ideal"` or `"wheels"`; see [Drive modes](#drive-modes). |
+| `chassis` | string | No | the file's one top-level body | The chassis body, as named in the file. |
+| `wheels` | object | No | inferred | The driven wheel joints, `{"left": ["joint", ...], "right": ["joint", ...]}`, as named in the file. |
+| `forward_axis` | string | No | inferred | The chassis's forward axis: `"+x"`, `"-x"`, `"+y"` or `"-y"`. |
+| `wheel_radius_m` | float | No | inferred | Wheel radius in meters. |
+| `max_linear_mps` | float | Asset's, else from the file | | Top speed in meters per second; scales `SetPower`. Required when neither the asset nor the wheels' velocity actuators give it. |
+| `max_angular_dps` | float | Asset's, else from the file | | Top yaw rate in degrees per second; scales `SetPower`. Same default. |
+| `move_timeout_margin_sec` | float | No | `2` | Sim time `MoveStraight` and `Spin` may go without getting closer before they fail as stalled. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
 
-The frame's `parent` must be `world`. +Y is forward, and the origin is at floor
-level between the wheels.
+The frame's `parent` must be `world`. The base's frame is on the floor under
+the chassis origin, +Y forward, +Z up, as in Viam's base frame, whatever axes
+the file uses: a ROS base (+X forward) is turned a quarter turn left to fit.
+Cameras, LIDARs and odometry all use this frame.
+
+### Drive modes
+
+- **`ideal`** (default). The chassis rides x and y slides and a yaw hinge,
+  driven by stiff velocity actuators, so it goes exactly where it is told and
+  can't tip, slip or fall. The file's actuators are dropped; the wheels and
+  casters collide with nothing and turn by the distance their side travelled.
+  The chassis's own geoms still collide: it pushes props and stops at walls.
+- **`wheels`**. The chassis is free, and each driven wheel has a velocity
+  actuator: the file's, or one the module adds with its torque capped at the
+  wheel's share of traction (μ × mass × g × radius / wheel count). `SetPower`
+  and `SetVelocity` turn the wheels at `(v ∓ ω × track / 2) / radius` and
+  nothing more, so a skid-steer base under-turns, as the real one does (the
+  Husky turns at about a tenth of the commanded rate). `MoveStraight` and
+  `Spin` close the loop on the measured pose: they brake on a ramp into the
+  target, `MoveStraight` holds its heading, and the yaw rate gets integral
+  feedback, so a slipping base still turns at about the commanded rate. A
+  file actuator's `ctrlrange` caps wheel speed, and so can cap how fast a
+  skid-steer spins.
+
+  The floor's friction is 1, and MuJoCo uses the larger of two touching
+  geoms' frictions unless one has a higher `priority`. To give wheels their
+  own friction, set `priority="1"` on their geoms, as the bundled bases do.
+
+In both modes a move succeeds when the base reaches or passes its target
+(measured along the starting heading, or in yaw), and fails as stalled when
+the remaining distance or angle hasn't shrunk for `move_timeout_margin_sec`
+of sim time.
+
+### How the file is read
+
+1. **Chassis.** The worldbody's one top-level body (a URDF's root link), or
+   `chassis`. Its free joint and its pose in the file are dropped: the frame
+   places it. Bodies fixed to it without joints (a URDF's fixed links) count
+   as chassis.
+2. **Driven wheels.** Hinge joints on bodies attached to the chassis whose
+   axle is horizontal. If the file has actuators on joints, only actuated
+   hinges count. A caster wheel under a swivel hangs off the swivel, so it
+   isn't driven. All axles must be parallel.
+3. **Forward.** Axles along the chassis's y mean +X forward (ROS); along x,
+   +Y forward (Viam). A base that drives the other way sets `forward_axis`.
+4. **Sides, track and radius.** A wheel is on the left when its joint is
+   left of the chassis origin; each side needs one. The track is the distance
+   between the sides' mean joint positions. The radius is the wheel body's
+   cylinder or sphere, else its mesh's furthest point from the axle; all
+   wheels must agree within 5%.
+5. **Placement.** The chassis is lifted so its lowest collision geom (wheels
+   and casters included) touches the floor.
+6. **Speeds.** From the attributes, else the asset, else the driven wheels'
+   velocity actuators' `ctrlrange` (ctrl × radius, and 2 × ctrl × radius /
+   track).
+
+The base logs its mass, wheels, sides, radius, track and forward axis when it
+is built. Configuring fails, naming the attribute that fixes it, when the
+file isn't `.xml` or `.urdf` or can't be read, a URDF mesh isn't in
+`mesh_dir`, there isn't exactly one top-level body (`chassis`), a side has no
+wheels or a `wheels` name isn't a hinge joint (`wheels`, with the hinge joints
+listed), the axles aren't parallel (`wheels`, with each axle), forward can't be
+told (`forward_axis`), a wheel's radius can't be found or the radii disagree
+(`wheel_radius_m`), a driven wheel's own actuator isn't a velocity actuator
+with `drive: wheels`, or no speed limits are given
+(`max_linear_mps`/`max_angular_dps`).
+
+### Bring your own base
+
+A ROS robot's description is usually a xacro. To use the Husky's:
+
+1. Clone [husky/husky](https://github.com/husky/husky) and `cd
+   husky_description`. Delete the six `accessories/` `xacro:include` lines
+   near the top of `urdf/husky.urdf.xacro` (they pull packages, such as
+   `lms1xx` and `realsense2_description`, that aren't in the ROS image).
+2. Expand it with the Viam CLI (it runs xacro in Docker):
+
+   ```sh
+   viam xacro convert --input-file urdf/husky.urdf.xacro --output-file husky.urdf
+   ```
+
+3. Point the base at it. Its meshes are in `meshes/` beside it, the default
+   `mesh_dir`:
+
+   ```json
+   "attributes": {
+     "world": "sim-world",
+     "mjcf": "/path/to/husky_description/husky.urdf",
+     "drive": "wheels",
+     "max_linear_mps": 1.0,
+     "max_angular_dps": 115
+   }
+   ```
+
+What to fix for realism:
+
+- **Visuals.** MuJoCo drops a URDF's visuals (and can't load DAE meshes), so
+  the base renders its collision shapes. For the real look, convert the DAE
+  visuals to OBJ or STL and add them to an MJCF.
+- **Masses.** A link with geometry and no `<inertial>` gets its mass from
+  geom density (water's), and the base logs a warning naming those links.
+  The expanded Husky's `base_link` comes out at 116 kg. Give those links
+  `<inertial>`s.
+- **Save it as MJCF to hand-tune** (friction, `priority`, masses, visuals),
+  then point `mjcf` at the `.xml`:
+
+  ```python
+  import mujoco
+  spec = mujoco.MjSpec.from_file("husky.urdf")
+  spec.compiler.fusestatic = False  # keep base_link a body
+  spec.meshdir, spec.strippath = "meshes", True
+  open("husky.xml", "w").write(spec.to_xml())
+  ```
 
 ### Camera on the rover
 
@@ -494,14 +638,14 @@ This one sits 120 mm ahead of the origin and 150 mm up:
 
 | Method | Notes |
 |---|---|
-| `MoveStraight` | Returns when the rover has gone the distance; a zero distance returns at once, and a zero velocity is rejected. Fails as stalled after distance / speed plus `move_timeout_margin_sec` of sim time, and when stopped, superseded, reset or closed. |
+| `MoveStraight` | Returns when the base has gone the distance; a zero distance returns at once, and a zero velocity is rejected. Fails as stalled (see [Drive modes](#drive-modes)), and when stopped, superseded, reset or closed. |
 | `Spin` | Same as `MoveStraight`, for an angle: a zero angle returns at once and a zero velocity is rejected. |
 | `SetVelocity` | `linear.y` in mm/s and `angular.z` in degrees/s; other axes are ignored. Clamped to the maxima. |
 | `SetPower` | `linear.y` and `angular.z`, each in [-1, 1] of the maxima. |
-| `Stop` | Stops the rover. |
-| `IsMoving` | True while the rover is moving. |
-| `GetProperties` | 0.356 m width, 0 turning radius, 0.381 m wheel circumference. |
-| `GetGeometries` | The chassis box, 260 x 300 x 100 mm, centered 80 mm up. |
+| `Stop` | Stops the base. |
+| `IsMoving` | True while the base is commanded to move or is moving. |
+| `GetProperties` | Width is the track, 0 turning radius, wheel circumference 2π × radius (Rover: 0.356 m and 0.381 m; Husky: 0.555 m and 1.037 m). |
+| `GetGeometries` | One box around the chassis's collision geoms, not the wheels or casters, in the base's frame (Rover: 260 x 300 x 100 mm, centered 80 mm up). |
 
 ## Model viam-labs:mujoco-sim:lidar
 
@@ -540,8 +684,8 @@ point cloud. It is a camera that returns only point clouds.
 The frame's `parent` is `world`, a mujoco-sim base or an arm. Like the camera,
 it can't be framed on a gripper or another camera. The scan plane is the
 frame's XY plane, and ray 0 points along +X. A mounted LIDAR never sees the
-body it is mounted on, the rover chassis or an arm's last link, so mount it
-clear of anything else on the robot.
+body it is mounted on (a base's chassis or an arm's last link) or anything
+attached below it, such as a base's wheels and casters or a gripper.
 
 ### Supported API
 
@@ -554,8 +698,9 @@ clear of anything else on the robot.
 ## Model viam-labs:mujoco-sim:movement_sensor
 
 Wheel odometry for a mujoco-sim base, like RDK's `wheeled-odometry`. It reads
-the rover's motion from the sim and dead-reckons a pose every physics step, so
-readings don't depend on how often you poll. It is exact unless you add drift.
+the base's motion (its frame's velocity) from the sim and dead-reckons a pose
+every physics step, so readings don't depend on how often you poll. It is
+exact unless you add drift, in either drive mode.
 
 ### Configuration
 
@@ -944,9 +1089,11 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
 - **Place components relative to `world`.** Arm and base frames must have
   parent `world`; the gripper's frame parent is its arm, and a camera's or
   LIDAR's is `world` or another mujoco-sim component.
-- **The rover's motion is ideal.** It drives exactly as commanded, with no
-  wheel slip; the wheels are visual. It can't tip over, and contacts stop it.
-  The movement sensor's drift is set by attributes, not by physics.
+- **Base motion is ideal unless you ask for wheels.** With the default
+  `drive: ideal` a base drives exactly as commanded, can't tip over, and
+  contacts stop it. With `drive: wheels` it slips and skids like the real
+  thing, but the movement sensor still reads its true motion: odometry drift
+  is set by attributes, not by wheel slip.
 - **A LIDAR scan is one instant.** All rays sample the same sim step, unlike a
   spinning sensor whose points span a rotation.
 - **Depth is ideal.** It has no noise, holes or minimum range, unlike a real

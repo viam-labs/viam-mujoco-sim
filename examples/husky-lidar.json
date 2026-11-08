@@ -1,0 +1,263 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {}
+    },
+    {
+      "name": "wall-n",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 3000,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 6000,
+          "y": 40,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.8,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-s",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": -3000,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 6000,
+          "y": 40,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.7,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-e",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 3000,
+          "y": 0,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40,
+          "y": 6040,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.7,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "wall-w",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -3000,
+          "y": 0,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40,
+          "y": 6040,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.8,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "box-a",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1200,
+          "y": 1400,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 600,
+          "y": 600,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.9,
+          0.3,
+          0.2
+        ]
+      }
+    },
+    {
+      "name": "box-b",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1600,
+          "y": -800,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 400,
+          "y": 1000,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.2,
+          0.4,
+          0.9
+        ]
+      }
+    },
+    {
+      "name": "box-c",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1500,
+          "y": -1500,
+          "z": 500
+        },
+        "geometry": {
+          "type": "box",
+          "x": 800,
+          "y": 400,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.9,
+          0.8,
+          0.2
+        ]
+      }
+    },
+    {
+      "name": "husky",
+      "api": "rdk:component:base",
+      "model": "viam-labs:mujoco-sim:base",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "clearpath_husky",
+        "drive": "wheels"
+      }
+    },
+    {
+      "name": "lidar",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:lidar",
+      "frame": {
+        "parent": "husky",
+        "translation": {
+          "x": 0,
+          "y": 250,
+          "z": 420
+        }
+      },
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "odometry",
+      "api": "rdk:component:movement_sensor",
+      "model": "viam-labs:mujoco-sim:movement_sensor",
+      "attributes": {
+        "world": "sim-world",
+        "base": "husky"
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 4500,
+          "y": -4500,
+          "z": 4500
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [0, 0, 0],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ]
+}

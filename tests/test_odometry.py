@@ -1,10 +1,12 @@
 import math
 
+import mujoco
 import pytest
 
 from mujoco_module.handles import BaseHandle
 from mujoco_module.odometry import OdometryHandle, odometry_geo_point
-from test_base import finish, pose
+from mujoco_module.sim import Contribution
+from test_base import finish, frame_pose, pose
 
 
 @pytest.fixture
@@ -127,3 +129,35 @@ def test_geo_point_matches_rdk_wheeled_odometry():
     lat, lng = odometry_geo_point(1000.0, 0.0)
     assert lat == pytest.approx(0.0, abs=1e-12)
     assert lng == pytest.approx(math.degrees(1 / 6371), rel=1e-9)
+
+
+def test_odometry_reads_the_bases_frame_site_not_its_joints(sim):
+    def build(spec):
+        # no x/y/yaw joints: a cart on one world-X slide, its frame's +Y along world +X
+        cart = spec.worldbody.add_body(name="cart", pos=[0, 0, 0.5])
+        cart.add_joint(name="cart/rail", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[1, 0, 0])
+        cart.add_geom(type=mujoco.mjtGeom.mjGEOM_SPHERE, size=[0.05], contype=0, conaffinity=0)
+        cart.add_site(name="cart/viam_frame", quat=[math.cos(-math.pi / 4), 0, 0, math.sin(-math.pi / 4)])
+
+    sim.set_contribution("cart", Contribution(build=build))
+    sensor = OdometryHandle(sim, "odometry", {"base": "cart"})
+    sim.data.qvel[sim.model.joint("cart/rail").dofadr[0]] = 0.4
+    sim.advance(0.5)
+    reading = sensor.read()
+    assert (reading.lateral, reading.forward, reading.yaw_rate) == pytest.approx((0.0, 0.4, 0.0), abs=1e-3)
+    assert (reading.x, reading.y, reading.yaw) == pytest.approx((0.0, 0.2, 0.0), abs=1e-3)
+
+
+def test_exact_odometry_tracks_a_wheel_driven_rover(sim):
+    rover = BaseHandle(sim, "rover", {"asset": "viam_rover", "drive": "wheels"})
+    sensor = odom(sim)
+    finish(sim, rover.move_straight(0.5, 0.2)).result()
+    finish(sim, rover.spin(math.radians(90), math.radians(90))).result()
+    rover.set_velocity(0.2, math.radians(30))
+    sim.advance(1.5)
+    rover.stop()
+    sim.advance(0.5)
+    reading = sensor.read()
+    x, y, yaw = frame_pose(sim)  # the rover spawned at the world origin, facing +Y
+    assert (reading.x, reading.y) == pytest.approx((x, y), abs=0.005)
+    assert reading.yaw == pytest.approx(yaw, abs=math.radians(0.5))

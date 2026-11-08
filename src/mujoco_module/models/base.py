@@ -1,15 +1,32 @@
-"""viam-labs:mujoco-sim:base - a simulated Viam Rover.
+"""viam-labs:mujoco-sim:base - a differential-drive or skid-steer base.
 
 Attributes:
   world (string, required)        - name of the viam-labs:mujoco-sim:world component
-  asset (string, required)        - "viam_rover"
-  max_linear_mps (float)          - top speed; scales SetPower (default 0.762)
-  max_angular_dps (float)         - top yaw rate; scales SetPower (default 245)
-  move_timeout_margin_sec (float) - extra sim time MoveStraight/Spin get before
-                                    they fail as stalled (default 2)
+  asset (string)                  - a bundled base, "viam_rover" or "clearpath_husky";
+                                    its defaults apply under the attributes set here
+  mjcf (string)                   - instead of asset: the base's .xml (MJCF) or .urdf
+                                    file, absolute, ~, or relative to assets/
+  mesh_dir (string)               - a URDF's mesh folder, absolute, ~ or relative to the file; its
+                                    package:// meshes are found there by file name
+                                    (default meshes/ beside the file if it exists,
+                                    else the file's folder)
+  drive (string)                  - "ideal" (default): exact motion on slides, the
+                                    wheels only turn; "wheels": wheel actuators drive
+                                    the base through floor friction
+  chassis (string)                - the chassis body (default: the file's one top-level body)
+  wheels ({"left": [..], "right": [..]}) - the driven wheel joints (default inferred:
+                                    horizontal hinges on bodies fixed to the chassis)
+  forward_axis (string)           - "+x", "-x", "+y" or "-y" in the chassis frame
+                                    (default from the wheel axles: along y means +x)
+  wheel_radius_m (float)          - wheel radius (default from the wheel geoms)
+  max_linear_mps (float)          - top speed; scales SetPower (default the asset's, else
+                                    from the wheels' velocity actuators' ctrlrange)
+  max_angular_dps (float)         - top yaw rate; scales SetPower (default as above)
+  move_timeout_margin_sec (float) - sim time MoveStraight/Spin may go without
+                                    progress before they fail as stalled (default 2)
 
-Place it with the standard frame; frame.parent must be "world". Chassis +Y is
-forward, as in Viam's base frame. Wheels are visual and motion is ideal.
+Place it with the standard frame; frame.parent must be "world". The frame is
+on the floor under the chassis, +Y forward, as in Viam's base frame.
 """
 
 import asyncio
@@ -25,7 +42,8 @@ from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 
-from .. import FAMILY, NAMESPACE
+from .. import FAMILY, NAMESPACE, robots
+from ..bases import FORWARD_AXES
 from ..handles import BASE_ASSETS, DEFAULT_BASE_MOVE_MARGIN_S, BaseHandle
 from ..sim import SimManager
 from .utils import apply_frame_to_attrs, get_attrs, positive_number, validate_sim_component
@@ -55,17 +73,46 @@ class MujocoBase(Base, EasyResource):
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
         attrs = get_attrs(config)
-        if attrs.get("asset") not in BASE_ASSETS:
+        name = config.name
+        asset, mjcf = attrs.get("asset"), attrs.get("mjcf")
+        if asset is not None and mjcf is not None:
+            raise ValueError(f"{name}: set asset or mjcf, not both")
+        if mjcf is None and not (isinstance(asset, str) and asset in BASE_ASSETS):
             raise ValueError(
-                f"{config.name}: asset must be one of {sorted(BASE_ASSETS)}, "
-                f"got {attrs.get('asset')!r}"
+                f"{name}: asset must be one of {sorted(BASE_ASSETS)}, got {asset!r}; "
+                "or set mjcf to your base's MJCF or URDF file"
             )
-        meta = BASE_ASSETS[attrs["asset"]]
-        positive_number(config.name, attrs, "max_linear_mps", meta["max_linear_mps"])
-        positive_number(config.name, attrs, "max_angular_dps", meta["max_angular_dps"])
-        positive_number(
-            config.name, attrs, "move_timeout_margin_sec", DEFAULT_BASE_MOVE_MARGIN_S
-        )
+        if mjcf is not None:
+            if not isinstance(mjcf, str) or not mjcf:
+                raise ValueError(f"{name}: mjcf must be a file path")
+            path = robots.resolve_path(mjcf, f"{name}: mjcf")
+            if path.suffix.lower() not in (".xml", ".urdf"):
+                raise ValueError(f"{name}: mjcf must be an .xml (MJCF) or .urdf file, got {path.name}")
+        if attrs.get("drive", "ideal") not in ("ideal", "wheels"):
+            raise ValueError(f'{name}: drive must be "ideal" or "wheels"')
+        if "chassis" in attrs and (not isinstance(attrs["chassis"], str) or not attrs["chassis"]):
+            raise ValueError(f"{name}: chassis must be a body name")
+        if "mesh_dir" in attrs and (not isinstance(attrs["mesh_dir"], str) or not attrs["mesh_dir"]):
+            raise ValueError(f"{name}: mesh_dir must be a folder path")
+        if "forward_axis" in attrs and attrs["forward_axis"] not in FORWARD_AXES:
+            raise ValueError(f"{name}: forward_axis must be one of {list(FORWARD_AXES)}")
+        wheels = attrs.get("wheels")
+        if wheels is not None and not (
+            isinstance(wheels, dict)
+            and set(wheels) == {"left", "right"}
+            and all(
+                isinstance(side, list) and side and all(isinstance(j, str) and j for j in side)
+                for side in wheels.values()
+            )
+        ):
+            raise ValueError(f'{name}: wheels must be {{"left": [joint, ...], "right": [joint, ...]}}')
+        if wheels is not None:
+            for joint in sorted(set(wheels["left"]) & set(wheels["right"])):
+                raise ValueError(f"{name}: wheels joint {joint!r} is on both sides")
+        for key in ("wheel_radius_m", "max_linear_mps", "max_angular_dps"):
+            if key in attrs:
+                positive_number(name, attrs, key, 0.0)
+        positive_number(name, attrs, "move_timeout_margin_sec", DEFAULT_BASE_MOVE_MARGIN_S)
         return validate_sim_component(config, needs_asset=False)
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
@@ -103,7 +150,7 @@ class MujocoBase(Base, EasyResource):
             await asyncio.wait_for(asyncio.wrap_future(future), timeout=backstop)
         except TimeoutError:
             raise TimeoutError(
-                f"base {self.name!r} move did not finish in time (is the sim running?)"
+                f"base {self.name!r} move did not finish within {backstop:.0f} s of wall time (is the sim running?)"
             ) from None
 
     async def move_straight(self, distance: int, velocity: float, **kwargs) -> None:
@@ -111,7 +158,7 @@ class MujocoBase(Base, EasyResource):
         speed = min(abs(velocity), handle.max_linear_mps * 1000.0)
         await self._drive(
             lambda: handle.move_straight(distance / 1000.0, velocity / 1000.0),
-            abs(distance) / speed if speed else 0.0,
+            (abs(distance) / speed if speed else 0.0) + speed / (handle._linear_accel * 1000.0),
         )
 
     async def spin(self, angle: float, velocity: float, **kwargs) -> None:
@@ -119,7 +166,7 @@ class MujocoBase(Base, EasyResource):
         speed = min(abs(velocity), math.degrees(handle.max_angular_rad_s))
         await self._drive(
             lambda: handle.spin(math.radians(angle), math.radians(velocity)),
-            abs(angle) / speed if speed else 0.0,
+            (abs(angle) / speed if speed else 0.0) + math.radians(speed) / handle._angular_accel,
         )
 
     async def set_power(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
@@ -140,21 +187,24 @@ class MujocoBase(Base, EasyResource):
         return await asyncio.to_thread(self._h().is_moving)
 
     async def get_properties(self, **kwargs) -> Base.Properties:
-        meta = self._h().meta
+        base = self._h().base
         return Base.Properties(
-            width_meters=meta["width_m"],
+            width_meters=base.track,
             turning_radius_meters=0.0,
-            wheel_circumference_meters=meta["wheel_circumference_m"],
+            wheel_circumference_meters=2 * math.pi * base.radius,
         )
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
-        handle = self._h()
-        sx, sy, sz = handle.chassis_size_m
-        cx, cy, cz = handle.chassis_center_m
+        """A box around the chassis's collision geoms (not the wheels or
+        casters), in the base's frame."""
+        box = self._h().base.box
+        if box is None:
+            return []
+        (cx, cy, cz), (sx, sy, sz) = (value * 1000 for value in box)
         return [
             Geometry(
-                center=Pose(x=cx * 1000, y=cy * 1000, z=cz * 1000, o_z=1, theta=0),
-                box=RectangularPrism(dims_mm=Vector3(x=sx * 1000, y=sy * 1000, z=sz * 1000)),
+                center=Pose(x=cx, y=cy, z=cz, o_z=1, theta=0),
+                box=RectangularPrism(dims_mm=Vector3(x=sx, y=sy, z=sz)),
                 label=f"{self.name}-chassis",
             )
         ]

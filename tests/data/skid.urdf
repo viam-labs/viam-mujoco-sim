@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<!-- A skid-steer base as a ROS package would describe it: ROS axes, base_link
+     with no inertial, two wheels on a fixed axle link, and a cargo bin whose
+     mesh is a package:// path. -->
+<robot name="skid">
+  <link name="base_link">
+    <visual>
+      <geometry><mesh filename="package://skid_description/meshes/shell.dae"/></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0.1"/>
+      <geometry><box size="0.6 0.4 0.1"/></geometry>
+    </collision>
+  </link>
+
+  <link name="front_axle_link">
+    <inertial>
+      <mass value="0.5"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+  </link>
+  <joint name="front_axle" type="fixed">
+    <parent link="base_link"/>
+    <child link="front_axle_link"/>
+    <origin xyz="0.2 0 0"/>
+  </joint>
+
+  <link name="front_left_wheel_link">
+    <inertial>
+      <mass value="1"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.003"/>
+    </inertial>
+    <collision>
+      <origin rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <joint name="front_left_wheel" type="continuous">
+    <parent link="front_axle_link"/>
+    <child link="front_left_wheel_link"/>
+    <origin xyz="0 0.25 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="front_right_wheel_link">
+    <inertial>
+      <mass value="1"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.003"/>
+    </inertial>
+    <collision>
+      <origin rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <joint name="front_right_wheel" type="continuous">
+    <parent link="front_axle_link"/>
+    <child link="front_right_wheel_link"/>
+    <origin xyz="0 -0.25 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="rear_left_wheel_link">
+    <inertial>
+      <mass value="1"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.003"/>
+    </inertial>
+    <collision>
+      <origin rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <joint name="rear_left_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="rear_left_wheel_link"/>
+    <origin xyz="-0.2 0.25 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="rear_right_wheel_link">
+    <inertial>
+      <mass value="1"/>
+      <inertia ixx="0.003" ixy="0" ixz="0" iyy="0.005" iyz="0" izz="0.003"/>
+    </inertial>
+    <collision>
+      <origin rpy="1.5708 0 0"/>
+      <geometry><cylinder radius="0.1" length="0.06"/></geometry>
+    </collision>
+  </link>
+  <joint name="rear_right_wheel" type="continuous">
+    <parent link="base_link"/>
+    <child link="rear_right_wheel_link"/>
+    <origin xyz="-0.2 -0.25 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="cargo_link">
+    <inertial>
+      <mass value="0.3"/>
+      <inertia ixx="0.001" ixy="0" ixz="0" iyy="0.001" iyz="0" izz="0.001"/>
+    </inertial>
+    <collision>
+      <geometry><mesh filename="package://skid_description/meshes/bin.stl"/></geometry>
+    </collision>
+  </link>
+  <joint name="cargo" type="fixed">
+    <parent link="base_link"/>
+    <child link="cargo_link"/>
+    <origin xyz="0 0 0.15"/>
+  </joint>
+</robot>

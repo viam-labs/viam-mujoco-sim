@@ -32,7 +32,7 @@
     {
       "model": "viam-labs:mujoco-sim:base",
       "api": "rdk:component:base",
-      "short_description": "A simulated Viam Rover",
+      "short_description": "A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base",
       "markdown_link": "README.md#model-viam-labsmujoco-simbase"
     },
     {

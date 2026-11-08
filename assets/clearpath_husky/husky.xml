@@ -1,0 +1,79 @@
+<mujoco model="clearpath_husky">
+  <!-- Clearpath Husky A200, from husky/husky@41e15d2 husky_description (BSD-3,
+       see LICENSE): base box, wheel positions and size from
+       urdf/husky.urdf.xacro, inertials from its URDF. ROS axes: +X forward.
+       base_link sits 0.13228 m above the floor (the URDF's base_footprint).
+       Meshes: base_link.stl and top_chassis.stl as published, wheel.stl
+       decimated (see NOTICE); bumpers and the user rail are primitives. -->
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+
+  <asset>
+    <material name="dark_grey" rgba="0.2 0.2 0.2 1"/>
+    <material name="yellow" rgba="0.8 0.8 0.0 1"/>
+    <material name="black" rgba="0.15 0.15 0.15 1"/>
+    <material name="light_grey" rgba="0.8 0.8 0.8 1"/>
+    <mesh name="base_link" file="base_link.stl"/>
+    <mesh name="top_chassis" file="top_chassis.stl"/>
+    <!-- the tread is 0.1778 m in radius; scaled to the 0.1651 m the URDF drives on -->
+    <mesh name="wheel" file="wheel.stl" scale="0.92857 1 0.92857"/>
+  </asset>
+
+  <default>
+    <default class="visual">
+      <geom contype="0" conaffinity="0" group="2" density="0"/>
+    </default>
+    <default class="collision">
+      <geom group="3" density="0"/>
+    </default>
+    <default class="wheel">
+      <joint axis="0 1 0"/>
+      <!-- priority over the floor, so this friction is the one that counts -->
+      <geom type="cylinder" size="0.1651 0.05715" euler="1.5708 0 0" priority="1"
+        friction="1 0.005 0.0001" group="3"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="base_link">
+      <!-- the URDF's, but centred across the track: its y of -0.085 makes a spin drive off sideways -->
+      <inertial pos="-0.00065 0 0.062" mass="46.034"
+        fullinertia="0.6022 1.7386 2.0296 -0.02364 -0.1197 -0.001544"/>
+      <geom class="visual" type="mesh" mesh="base_link" material="dark_grey"/>
+      <geom class="visual" type="mesh" mesh="top_chassis" material="yellow"/>
+      <geom class="visual" type="capsule" size="0.0127 0.2542" pos="0.48 0 0.091" euler="1.5708 0 0"
+        material="black"/>
+      <geom class="visual" type="capsule" size="0.0127 0.2542" pos="-0.48 0 0.091" euler="1.5708 0 0"
+        material="black"/>
+      <geom class="visual" type="box" size="0.2745 0.01 0.0275" pos="0 0.2 0.2185" material="black"/>
+      <geom class="visual" type="box" size="0.2745 0.01 0.0275" pos="0 -0.2 0.2185" material="black"/>
+      <geom name="base_lower" class="collision" type="box" size="0.4937 0.28545 0.061875" pos="0 0 0.061875"/>
+      <geom name="base_upper" class="collision" type="box" size="0.39496 0.28545 0.051875" pos="0 0 0.175625"/>
+      <geom name="top_plate" type="box" size="0.365 0.295 0.00315" pos="0.0812 0 0.24815" density="0"
+        material="light_grey"/>
+      <body name="front_left_wheel_link" pos="0.256 0.2775 0.03282" childclass="wheel">
+        <joint name="front_left_wheel"/>
+        <inertial pos="0 0 0" mass="2.637" diaginertia="0.02467 0.04411 0.02467"/>
+        <geom name="front_left_wheel"/>
+        <geom class="visual" type="mesh" mesh="wheel" material="black"/>
+      </body>
+      <body name="front_right_wheel_link" pos="0.256 -0.2775 0.03282" childclass="wheel">
+        <joint name="front_right_wheel"/>
+        <inertial pos="0 0 0" mass="2.637" diaginertia="0.02467 0.04411 0.02467"/>
+        <geom name="front_right_wheel"/>
+        <geom class="visual" type="mesh" mesh="wheel" material="black"/>
+      </body>
+      <body name="rear_left_wheel_link" pos="-0.256 0.2775 0.03282" childclass="wheel">
+        <joint name="rear_left_wheel"/>
+        <inertial pos="0 0 0" mass="2.637" diaginertia="0.02467 0.04411 0.02467"/>
+        <geom name="rear_left_wheel"/>
+        <geom class="visual" type="mesh" mesh="wheel" material="black"/>
+      </body>
+      <body name="rear_right_wheel_link" pos="-0.256 -0.2775 0.03282" childclass="wheel">
+        <joint name="rear_right_wheel"/>
+        <inertial pos="0 0 0" mass="2.637" diaginertia="0.02467 0.04411 0.02467"/>
+        <geom name="rear_right_wheel"/>
+        <geom class="visual" type="mesh" mesh="wheel" material="black"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

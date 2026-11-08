@@ -18,7 +18,7 @@ from typing import Any, Literal
 import mujoco
 import numpy as np
 
-from . import robots
+from . import bases, robots
 from .sim import GRIPPER_ASSETS, KNOWN_ASSETS, LOGGER, Contribution, SimManager
 from viam.spatialmath import Quaternion
 
@@ -32,18 +32,23 @@ VIAM_FRAME_SITE = "viam_frame"
 DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S = 0.01
 DEFAULT_GRIP_FORCE_N = 5.0
 
+# Bundled bases: default attributes for `asset` (config attributes win).
+# Paths are relative to assets/.
 BASE_ASSETS: dict[str, dict[str, Any]] = {
-    # Viam Rover 2, from Viam's public ViamRover2-2024-rpi5 fragment
-    # (wheel_circumference_mm 381, width_mm 356, motors max_rpm 120).
+    # written here from Viam's ViamRover2-2024-rpi5 fragment (motors max_rpm 120)
     "viam_rover": {
-        "wheel_circumference_m": 0.381,
-        "width_m": 0.356,
+        "mjcf": "viam_rover/rover.xml",
         "max_linear_mps": 0.762,  # 120 rpm x 0.381 m
         "max_angular_dps": 245.0,  # 2 x 0.762 / 0.356 rad/s
-        # approximate shell: x across, y forward, z up; bottom above the floor
-        "chassis_size_m": (0.26, 0.30, 0.10),
-        "chassis_bottom_m": 0.03,
-        "mass_kg": 2.5,
+    },
+    # written here from husky/husky@41e15d2 husky_description; speeds and
+    # acceleration limits from husky_control/config/control.yaml
+    "clearpath_husky": {
+        "mjcf": "clearpath_husky/husky.xml",
+        "max_linear_mps": 1.0,
+        "max_angular_dps": 115.0,  # 2.0 rad/s
+        "max_linear_accel_mps2": 3.0,
+        "max_angular_accel_rad_s2": 6.0,
     },
 }
 BASE_JOINTS = ("x", "y", "yaw")
@@ -52,7 +57,16 @@ BASE_MAX_LINEAR_ACCEL = 50.0  # m/s^2, caps actuator force (no runaway push into
 BASE_MAX_YAW_ACCEL = 200.0  # rad/s^2
 BASE_MOVING_MPS = 0.001
 BASE_MOVING_RAD_S = math.radians(0.5)
+BASE_PROGRESS = 1e-3  # m or rad: less is no progress (the stall check)
 DEFAULT_BASE_MOVE_MARGIN_S = 2.0
+# drive "wheels"
+GRAVITY = 9.81
+BASE_WHEEL_SPEED_ERROR = 1.0  # rad/s at which an added wheel actuator reaches its force cap (stiffer chatters)
+DEFAULT_BASE_ACCEL_MPS2 = 1.0  # braking ramp; the angular one is 2 a / track
+BASE_MIN_MPS = 0.02  # the braking ramp's least speed (or 10 % of the command)
+BASE_MIN_RAD_S = math.radians(2)
+BASE_HEADING_GAIN = 3.0  # 1/s: MoveStraight's yaw rate per radian off the start heading
+BASE_YAW_RATE_GAIN = 8.0  # 1/s: integral feedback on the measured yaw rate
 
 
 @dataclass(frozen=True)
@@ -74,8 +88,17 @@ class _BaseGoal:
     target: float  # signed
     start_xy: np.ndarray
     start_yaw: float
-    deadline_s: float  # sim time
     future: Future
+    best: float  # the least remaining distance or angle so far
+    best_s: float  # sim time when it was reached
+
+
+@dataclass(frozen=True)
+class _BaseIds:
+    site: int  # the base's viam_frame
+    ctrl: np.ndarray  # ideal: the x, y and yaw actuators; wheels: each wheel's
+    wheel_qpos: np.ndarray
+    wheel_dof: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -461,84 +484,131 @@ def _fail(future: Future | None, error: BaseException) -> None:
 
 
 class BaseHandle:
-    """A differential-drive rover: a chassis on spawn-frame x/y slides and a yaw
-    hinge, driven by velocity actuators. Chassis +Y is forward, as in Viam's
-    base frame. Wheels are visual only; motion is ideal (no slip)."""
+    """A differential-drive or skid-steer base from an MJCF or URDF file; its
+    chassis and wheels are inferred (bases.py). The viam_frame site, on the
+    floor under the chassis origin with +Y forward, is the base's frame.
+    drive "ideal": the chassis rides spawn-frame x/y slides and a yaw hinge
+    driven by velocity actuators, so motion is exact; the wheels only turn
+    to match it and collide with nothing. drive "wheels": the chassis is
+    free and velocity actuators on the wheels drive it through floor
+    friction; MoveStraight and Spin close the loop on the measured pose."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
-        meta = BASE_ASSETS[str(attrs["asset"])]
+        meta = BASE_ASSETS.get(str(attrs.get("asset")), {})
+        attrs = {**meta, **attrs}
+        label = f"base {name}"
         self._sim = sim
         self.name = name
-        self.meta = meta
-        self.max_linear_mps = float(attrs.get("max_linear_mps", meta["max_linear_mps"]))
-        self.max_angular_rad_s = math.radians(
-            float(attrs.get("max_angular_dps", meta["max_angular_dps"]))
+        self._prefix = f"{name}/"
+        self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
+        where = str(self.mjcf)
+        mesh_dir = attrs.get("mesh_dir")
+        spec = bases.load(self.mjcf, where, mesh_dir)
+        chassis = bases.take_chassis(spec, attrs.get("chassis"), where)
+        light = bases.density_links(spec) if self.mjcf.suffix.lower() == ".urdf" else []
+        if light:
+            LOGGER.warning(
+                "%s: links %s have no <inertial>; their mass comes from geom density", label, light
+            )
+        try:
+            model = spec.compile()
+        except ValueError as e:
+            raise ValueError(f"{where}: cannot load mjcf {self.mjcf}: {e}") from e
+        self.base = base = bases.infer(
+            model, where, attrs.get("wheels"), attrs.get("forward_axis"), attrs.get("wheel_radius_m")
         )
+        limits = bases.speed_limits(model, base)
+        linear = attrs.get("max_linear_mps", limits and limits[0])
+        angular = attrs.get("max_angular_dps", limits and limits[1])
+        if linear is None or angular is None:
+            raise ValueError(
+                f"{label}: set max_linear_mps and max_angular_dps; {where} has no velocity "
+                "actuators with a ctrlrange on its wheels to take them from"
+            )
+        self.max_linear_mps = float(linear)
+        self.max_angular_rad_s = math.radians(float(angular))
         self.move_margin_s = float(
             attrs.get("move_timeout_margin_sec", DEFAULT_BASE_MOVE_MARGIN_S)
         )
+        self.drive = str(attrs.get("drive", "ideal"))
+        self._linear_accel = float(meta.get("max_linear_accel_mps2", DEFAULT_BASE_ACCEL_MPS2))
+        self._angular_accel = float(
+            meta.get("max_angular_accel_rad_s2", 2 * self._linear_accel / base.track)
+        )
+        # wheels: each driven wheel's actuator, the file's or one added at build
+        own = bases.wheel_actuators(model, base, where) if self.drive == "wheels" else {}
+        self._wheel_actuators = {w.joint: own.get(w.joint, f"{w.joint}_drive") for w in base.wheels}
+        caps = {
+            w.joint: bases.traction(model, w.joint) * base.mass * GRAVITY * base.radius / len(base.wheels)
+            for w in base.wheels if w.joint not in own
+        }
+        self._integral = 0.0  # of the yaw-rate error: rad (MoveStraight), or relative (Spin), s
+        self._signs = np.array([wheel.sign for wheel in base.wheels])
+        self._sides = np.array([-1.0 if wheel.left else 1.0 for wheel in base.wheels])
         self._v = 0.0  # latched forward speed, m/s
         self._w = 0.0  # latched yaw rate, rad/s
+        self._yaw = 0.0  # unwrapped yaw of the viam frame in the spawn frame
         self._goal: _BaseGoal | None = None
-        self._ids: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self._ids: _BaseIds | None = None
         self._ids_generation = -1
         self._callback_key = f"base:{name}"
-
-        sx, sy, sz = meta["chassis_size_m"]
-        mass = float(meta["mass_kg"])
-        self.chassis_size_m = (sx, sy, sz)
-        self.chassis_center_m = (0.0, 0.0, meta["chassis_bottom_m"] + sz / 2.0)
-        izz = mass * (sx * sx + sy * sy) / 12.0
-        wheel_radius = meta["wheel_circumference_m"] / (2.0 * math.pi)
         position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
         orientation = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
-        center = list(self.chassis_center_m)
+        self._spawn = robots.transform(position, orientation)
+        LOGGER.info(
+            "%s: %.2f kg, wheels left %s right %s, radius %.4f m, track %.4f m, forward %s",
+            label, base.mass, [w.joint for w in base.wheels if w.left],
+            [w.joint for w in base.wheels if not w.left], base.radius, base.track, base.forward,
+        )
+
+        spec_cache = spec
 
         def build(spec: mujoco.MjSpec) -> None:
+            child = spec_cache.copy()  # the file isn't read again
+            if self.drive == "ideal":
+                for actuator in list(child.actuators):
+                    child.delete(actuator)
+                for body in _jointed(child.body(chassis)):  # wheels and casters
+                    for geom in body.find_all(mujoco.mjtObj.mjOBJ_GEOM):
+                        geom.contype = geom.conaffinity = 0
             frame = spec.worldbody.add_frame(pos=position, quat=orientation)
-            body = frame.add_body(name=f"{name}/chassis")
-            body.explicitinertial = True
-            body.mass = mass
-            body.ipos = center
-            body.inertia = [
-                mass * (sy * sy + sz * sz) / 12.0,
-                mass * (sx * sx + sz * sz) / 12.0,
-                izz,
-            ]
-            body.add_joint(name=f"{name}/x", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[1, 0, 0])
-            body.add_joint(name=f"{name}/y", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[0, 1, 0])
-            body.add_joint(name=f"{name}/yaw", type=mujoco.mjtJoint.mjJNT_HINGE, axis=[0, 0, 1])
-            body.add_geom(
-                name=f"{name}/chassis",
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=[sx / 2, sy / 2, sz / 2],
-                pos=center,
-                density=0,
-                rgba=[0.15, 0.15, 0.17, 1],
+            spec.attach(child, prefix=self._prefix, frame=frame)
+            body = spec.body(self._prefix + chassis)
+            half = base.yaw / 2
+            body.pos = [0.0, 0.0, base.lift]
+            body.quat = [math.cos(half), 0.0, 0.0, math.sin(half)]
+            # the base's frame: on the floor under the chassis origin, +Y forward
+            body.add_site(
+                name=self._prefix + VIAM_FRAME_SITE,
+                pos=[0.0, 0.0, -base.lift],
+                quat=[math.cos(half), 0.0, 0.0, -math.sin(half)],
             )
-            # On the chassis body so a rover-mounted lidar's body exclusion skips them.
-            for side in (-1, 1):
-                body.add_geom(
-                    name=f"{name}/wheel_{'left' if side < 0 else 'right'}",
-                    type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-                    size=[wheel_radius, 0.0125, 0],
-                    pos=[side * meta["width_m"] / 2, 0, wheel_radius],
-                    quat=[math.cos(math.pi / 4), 0, math.sin(math.pi / 4), 0],  # axle along X
-                    density=0,
-                    contype=0,
-                    conaffinity=0,
-                    rgba=[0.05, 0.05, 0.05, 1],
-                )
-            body.add_site(name=f"{name}/{VIAM_FRAME_SITE}", pos=[0, 0, 0])
+            if self.drive == "wheels":
+                body.add_freejoint(name=self._prefix + "free")
+                for joint, cap in caps.items():
+                    actuator = spec.add_actuator(
+                        name=self._prefix + self._wheel_actuators[joint],
+                        target=self._prefix + joint,
+                        trntype=mujoco.mjtTrn.mjTRN_JOINT,
+                    )
+                    actuator.set_to_velocity(kv=cap / BASE_WHEEL_SPEED_ERROR)
+                    actuator.forcelimited = True
+                    actuator.forcerange = [-cap, cap]
+                return
+            c, s = math.cos(base.yaw), math.sin(base.yaw)
+            # the spawn frame's x and y in the (turned) chassis frame
+            axes = ([c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0])
+            kinds = (mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_SLIDE, mujoco.mjtJoint.mjJNT_HINGE)
             limits = (
-                (self.max_linear_mps, mass / BASE_TAU_S, mass * BASE_MAX_LINEAR_ACCEL),
-                (self.max_linear_mps, mass / BASE_TAU_S, mass * BASE_MAX_LINEAR_ACCEL),
-                (self.max_angular_rad_s, izz / BASE_TAU_S, izz * BASE_MAX_YAW_ACCEL),
+                (self.max_linear_mps, base.mass / BASE_TAU_S, base.mass * BASE_MAX_LINEAR_ACCEL),
+                (self.max_linear_mps, base.mass / BASE_TAU_S, base.mass * BASE_MAX_LINEAR_ACCEL),
+                (self.max_angular_rad_s, base.izz / BASE_TAU_S, base.izz * BASE_MAX_YAW_ACCEL),
             )
-            for joint, (speed, gain, cap) in zip(BASE_JOINTS, limits):
+            for joint, axis, kind, (speed, gain, cap) in zip(BASE_JOINTS, axes, kinds, limits):
+                body.add_joint(name=self._prefix + joint, type=kind, axis=axis)
                 actuator = spec.add_actuator(
-                    name=f"{name}/{joint}",
-                    target=f"{name}/{joint}",
+                    name=self._prefix + joint,
+                    target=self._prefix + joint,
                     trntype=mujoco.mjtTrn.mjTRN_JOINT,
                 )
                 actuator.set_to_velocity(kv=gain)
@@ -548,11 +618,8 @@ class BaseHandle:
                 actuator.forcerange = [-cap, cap]
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-            qpos, dof, ctrl = self._resolve(model)
-            data.qpos[qpos] = 0.0
-            data.qvel[dof] = 0.0
-            data.ctrl[ctrl] = 0.0
-            self._v = self._w = 0.0
+            data.ctrl[self._resolve(model).ctrl] = 0.0
+            self._v = self._w = self._yaw = self._integral = 0.0
             self._drop_goal(RuntimeError(f"base {name!r} was reset"))
 
         sim.set_contribution(name, Contribution(build=build, init=init))
@@ -566,23 +633,28 @@ class BaseHandle:
                 RuntimeError(f"base {self.name!r} was closed (removed or reconfigured)")
             )
             if self._sim.model is not None and self._sim.data is not None:
-                data, (_q, _d, ctrl) = self._now()
-                data.ctrl[ctrl] = 0.0
+                data, ids = self._now()
+                data.ctrl[ids.ctrl] = 0.0
 
         self._sim.run(detach)
         self._sim.remove_contribution(self.name)
 
     # -- ids -------------------------------------------------------------
 
-    def _resolve(self, model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        joints = [model.joint(f"{self.name}/{joint}") for joint in BASE_JOINTS]
-        return (
-            np.array([joint.qposadr[0] for joint in joints]),
-            np.array([joint.dofadr[0] for joint in joints]),
-            np.array([model.actuator(f"{self.name}/{joint}").id for joint in BASE_JOINTS]),
+    def _resolve(self, model: mujoco.MjModel) -> _BaseIds:
+        wheels = [model.joint(self._prefix + wheel.joint) for wheel in self.base.wheels]
+        if self.drive == "wheels":
+            actuators = [self._wheel_actuators[wheel.joint] for wheel in self.base.wheels]
+        else:
+            actuators = list(BASE_JOINTS)
+        return _BaseIds(
+            site=model.site(self._prefix + VIAM_FRAME_SITE).id,
+            ctrl=np.array([model.actuator(self._prefix + name).id for name in actuators]),
+            wheel_qpos=np.array([joint.qposadr[0] for joint in wheels]),
+            wheel_dof=np.array([joint.dofadr[0] for joint in wheels]),
         )
 
-    def _now(self) -> tuple[mujoco.MjData, tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    def _now(self) -> tuple[mujoco.MjData, _BaseIds]:
         sim = self._sim
         assert sim.model is not None and sim.data is not None
         if self._ids is None or self._ids_generation != sim.generation:
@@ -590,35 +662,87 @@ class BaseHandle:
             self._ids_generation = sim.generation
         return sim.data, self._ids
 
+    def _pose(self, data: mujoco.MjData, ids: _BaseIds) -> tuple[float, float, float]:
+        """The viam frame's x, y and yaw in the spawn frame; yaw is unwrapped
+        from the previous call, so goals see continuous angles."""
+        rotation = self._spawn[:3, :3]
+        x, y, _ = rotation.T @ (data.site_xpos[ids.site] - self._spawn[:3, 3])
+        forward = rotation.T @ data.site_xmat[ids.site].reshape(3, 3)[:, 1]
+        yaw = math.atan2(-forward[0], forward[1])
+        self._yaw += math.remainder(yaw - self._yaw, 2 * math.pi)
+        return float(x), float(y), self._yaw
+
+    def _velocity(self, data: mujoco.MjData, ids: _BaseIds) -> np.ndarray:
+        """(angular, linear) velocity of the viam frame in its own axes."""
+        velocity = np.zeros(6)
+        mujoco.mj_objectVelocity(self._sim.model, data, mujoco.mjtObj.mjOBJ_SITE, ids.site, velocity, 1)
+        return velocity
+
     # -- control (sim thread) ---------------------------------------------
 
-    def _on_step(self, _dt: float) -> None:
-        data, (qpos, _dof, ctrl) = self._now()
-        x, y, yaw = (float(value) for value in data.qpos[qpos])
+    def _on_step(self, dt: float) -> None:
+        data, ids = self._now()
+        x, y, yaw = self._pose(data, ids)
+        velocity = self._velocity(data, ids)
         goal = self._goal
+        remaining = 0.0
         if goal is not None:
             try:
                 if goal.future.done():  # cancelled by the caller
                     self._drop_goal()
                 else:
                     progress = self._progress(goal, x, y, yaw)
-                    if progress * math.copysign(1.0, goal.target) >= abs(goal.target):
+                    remaining = abs(goal.target) - progress * math.copysign(1.0, goal.target)
+                    if remaining <= 0.0:
                         self._drop_goal()
                         try:
                             goal.future.set_result(None)
                         except InvalidStateError:
                             pass
-                    elif data.time >= goal.deadline_s:
+                    elif remaining < goal.best - BASE_PROGRESS:
+                        goal.best, goal.best_s = remaining, data.time
+                    elif data.time - goal.best_s >= self.move_margin_s:
                         self._drop_goal(RuntimeError(self._stalled(goal, progress)))
             except Exception as exc:
                 # halt, fail the move, and keep the callback registered
                 self._drop_goal(exc)
-        data.ctrl[ctrl] = (-self._v * math.sin(yaw), self._v * math.cos(yaw), self._w)
+        if self.drive == "wheels":
+            v, w = self._wheel_command(remaining, yaw, float(velocity[2]), dt)
+            sides = v + self._sides * w * self.base.track / 2
+            data.ctrl[ids.ctrl] = self._signs * sides / self.base.radius
+            return
+        data.ctrl[ids.ctrl] = (-self._v * math.sin(yaw), self._v * math.cos(yaw), self._w)
+        # turn the wheels by the distance each side travelled
+        speeds = velocity[4] + self._sides * velocity[2] * self.base.track / 2
+        data.qpos[ids.wheel_qpos] += self._signs * speeds * dt / self.base.radius
+        data.qvel[ids.wheel_dof] = 0.0
+
+    def _wheel_command(self, remaining: float, yaw: float, yaw_rate: float, dt: float) -> tuple[float, float]:
+        """(forward speed, yaw rate) for the wheels. Open loop without a goal
+        (a skid-steer under-turns, as the real one does). A goal brakes on a
+        ramp to its target, MoveStraight holds the start heading, and the yaw
+        rate gets integral feedback so a slipping base still turns."""
+        goal = self._goal
+        if goal is None:
+            return self._v, self._w
+        spin = goal.kind == "spin"
+        rate = self._w if spin else self._v
+        accel = self._angular_accel if spin else self._linear_accel
+        least = min(abs(rate), max(0.1 * abs(rate), BASE_MIN_RAD_S if spin else BASE_MIN_MPS))
+        speed = math.copysign(max(least, min(abs(rate), math.sqrt(2 * accel * remaining))), rate)
+        if spin:
+            # integral feedback as a factor on the ramp: it learns how much the
+            # base under-turns, and brakes with the ramp instead of winding up
+            self._integral += (1.0 - yaw_rate / speed) * dt
+            return 0.0, speed * max(0.0, 1.0 + BASE_YAW_RATE_GAIN * self._integral)
+        w = BASE_HEADING_GAIN * (goal.start_yaw - yaw)
+        self._integral += (w - yaw_rate) * dt
+        return speed, w + BASE_YAW_RATE_GAIN * self._integral
 
     @staticmethod
     def _progress(goal: _BaseGoal, x: float, y: float, yaw: float) -> float:
         if goal.kind == "spin":
-            return yaw - goal.start_yaw  # hinge yaw is unwrapped
+            return yaw - goal.start_yaw
         heading = np.array([-math.sin(goal.start_yaw), math.cos(goal.start_yaw)])
         return float(np.dot(np.array([x, y]) - goal.start_xy, heading))
 
@@ -628,8 +752,8 @@ class BaseHandle:
         else:
             done, wanted, unit = 1000 * progress, 1000 * goal.target, "mm"
         return (
-            f"base {self.name!r} stalled: moved {done:.0f} of {wanted:.0f} {unit} "
-            "before the timeout (blocked?)"
+            f"base {self.name!r} stalled: moved {done:.0f} of {wanted:.0f} {unit}, then made no "
+            f"progress for {self.move_margin_s:g} s (blocked?)"
         )
 
     def _drop_goal(self, error: BaseException | None = None) -> None:
@@ -670,9 +794,9 @@ class BaseHandle:
     def move_straight(self, distance_m: float, speed_mps: float) -> Future:
         """Drive distance_m along the current heading. The sign of
         distance x speed picks forward or back. The future resolves on arrival
-        and fails when the move takes longer, in sim time, than
-        distance / speed + move_timeout_margin_sec (stalled), or on stop,
-        a new command, reset or close."""
+        and fails when the remaining distance hasn't shrunk for
+        move_timeout_margin_sec of sim time (stalled), or on stop, a new
+        command, reset or close."""
         return self._start_goal("straight", distance_m, speed_mps, self.max_linear_mps)
 
     def spin(self, angle_rad: float, speed_rad_s: float) -> Future:
@@ -696,16 +820,18 @@ class BaseHandle:
 
         def start() -> None:
             self._replace_goal("move was superseded by a new command")
-            data, (qpos, _dof, _ctrl) = self._now()
-            x, y, yaw = (float(value) for value in data.qpos[qpos])
+            data, ids = self._now()
+            x, y, yaw = self._pose(data, ids)
             self._goal = _BaseGoal(
                 kind=kind,
                 target=target,
                 start_xy=np.array([x, y]),
                 start_yaw=yaw,
-                deadline_s=data.time + abs(target) / abs(rate) + self.move_margin_s,
                 future=future,
+                best=abs(target),
+                best_s=data.time,
             )
+            self._integral = 0.0
             if kind == "spin":
                 self._v, self._w = 0.0, rate
             else:
@@ -716,16 +842,25 @@ class BaseHandle:
 
     def is_moving(self) -> bool:
         def read() -> bool:
-            data, (_qpos, dof, _ctrl) = self._now()
-            vx, vy, wz = (float(value) for value in data.qvel[dof])
+            data, ids = self._now()
+            velocity = self._velocity(data, ids)
             return bool(
                 self._v != 0.0
                 or self._w != 0.0
-                or math.hypot(vx, vy) > BASE_MOVING_MPS
-                or abs(wz) > BASE_MOVING_RAD_S
+                or math.hypot(velocity[3], velocity[4]) > BASE_MOVING_MPS
+                or abs(velocity[2]) > BASE_MOVING_RAD_S
             )
 
         return self._sim.run(read)
+
+
+def _jointed(body: Any) -> list[Any]:
+    """The jointed bodies nearest below `body` (each with its subtree): a
+    base's wheels and casters."""
+    found = []
+    for child in body.bodies:
+        found += [child] if child.joints else _jointed(child)
+    return found
 
 
 class GripperHandle:
@@ -1112,13 +1247,15 @@ DEFAULT_LIDAR_RANGE_MIN_M = 0.15
 DEFAULT_LIDAR_RANGE_MAX_M = 12.0
 DEFAULT_LIDAR_RESOLUTION_DEG = 1.0
 MAX_LIDAR_RAYS = 3600
+LIDAR_RECAST_STEP_M = 1e-4  # a re-cast starts this far past the hit it skips
 
 
 class LidarHandle:
     """A 2D scanning LIDAR: one ring of rays in the sensor frame's XY plane,
     ray 0 along +X, counterclockwise about +Z. A scan samples one sim
     instant. Mounted on the world or on a parent's viam_frame, like a camera;
-    a mounted lidar never sees its parent's body."""
+    a mounted lidar never sees its parent's body or the bodies below it (a
+    base's wheels and casters)."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         self._sim = sim
@@ -1168,6 +1305,22 @@ class LidarHandle:
                 model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
                 None, 1, exclude, geomid, dist, None, count, self.range_max_m,
             )
+            if self.parent:
+                # mj_multiRay excludes one body; re-cast past hits on the rest of the parent's subtree
+                own = set(robots.subtree(model, int(model.site_bodyid[site])))
+                origin = data.site_xpos[site]
+                found = np.zeros(1, np.int32)
+                for ray in np.flatnonzero(geomid >= 0):
+                    total, geom = float(dist[ray]), int(geomid[ray])
+                    while geom >= 0 and model.geom_bodyid[geom] in own and total <= self.range_max_m:
+                        total += LIDAR_RECAST_STEP_M
+                        step = mujoco.mj_ray(
+                            model, data, origin + total * directions[ray], directions[ray],
+                            None, 1, int(model.geom_bodyid[geom]), found,
+                        )
+                        geom = int(found[0])
+                        total = total + step if geom >= 0 else -1.0
+                    dist[ray] = total
             return dist
 
         dist = self._sim.run(cast)

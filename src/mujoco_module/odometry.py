@@ -1,7 +1,8 @@
 """Wheel odometry for a viam-labs:mujoco-sim:base.
 
-Truth comes from the base's joints (spawn-frame x/y slides and a yaw hinge,
-see BaseHandle). Optional, deterministic drift is applied, and the drifted
+Truth is the velocity of the base's viam_frame site in its own axes, so it
+works whatever joints carry the base (see BaseHandle). Optional,
+deterministic drift is applied, and the drifted
 velocities are dead-reckoned on the sim thread every physics step, so readings
 don't depend on how often a client polls.
 
@@ -13,7 +14,10 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
-from .handles import BASE_JOINTS
+import mujoco
+import numpy as np
+
+from .handles import VIAM_FRAME_SITE
 from .sim import Contribution, SimManager
 
 # kellydunn/golang-geo's radius, which RDK's wheeled-odometry uses.
@@ -49,7 +53,7 @@ class OdometryHandle:
         self._scale = 1.0 + float(attrs.get("linear_scale_error", 0.0))
         self._bias = math.radians(float(attrs.get("heading_drift_dps", 0.0)))
         self._zero()
-        self._ids: tuple[tuple[int, ...], tuple[int, ...]] | None = None
+        self._site: int | None = None
         self._ids_generation = -1
         self._callback_key = f"odom:{name}"
         # No geometry: the contribution is only for init, the reset hook (costs a rebuild on add/close).
@@ -85,34 +89,26 @@ class OdometryHandle:
         self._x = self._y = self._yaw = 0.0
         self._lateral = self._forward = self._yaw_rate = 0.0
 
-    def _ids_now(self) -> tuple[tuple[int, ...], tuple[int, ...]] | None:
+    def _site_now(self) -> int | None:
         model = self._sim.model
         if model is None:
             return None
         if self._ids_generation != self._sim.generation:
             self._ids_generation = self._sim.generation
-            try:
-                joints = [model.joint(f"{self.base}/{joint}") for joint in BASE_JOINTS]
-            except KeyError:
-                self._ids = None
-            else:
-                self._ids = (
-                    tuple(int(j.qposadr[0]) for j in joints),
-                    tuple(int(j.dofadr[0]) for j in joints),
-                )
-        return self._ids
+            site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{self.base}/{VIAM_FRAME_SITE}")
+            self._site = site if site >= 0 else None
+        return self._site
 
     def _truth(self) -> tuple[float, float, float] | None:
         """True (lateral, forward, yaw rate) of the base, body frame."""
-        ids = self._ids_now()
-        if ids is None or self._sim.data is None:
+        site = self._site_now()
+        if site is None or self._sim.data is None:
             return None
-        qpos, dof = ids
-        data = self._sim.data
-        yaw = float(data.qpos[qpos[2]])
-        xdot, ydot, wdot = (float(data.qvel[i]) for i in dof)
-        c, s = math.cos(yaw), math.sin(yaw)
-        return xdot * c + ydot * s, -xdot * s + ydot * c, wdot
+        velocity = np.zeros(6)  # angular, then linear
+        mujoco.mj_objectVelocity(
+            self._sim.model, self._sim.data, mujoco.mjtObj.mjOBJ_SITE, site, velocity, 1
+        )
+        return float(velocity[3]), float(velocity[4]), float(velocity[2])
 
     def _on_step(self, dt: float) -> None:
         truth = self._truth()

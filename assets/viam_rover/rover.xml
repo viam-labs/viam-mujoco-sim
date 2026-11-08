@@ -1,0 +1,42 @@
+<mujoco model="viam_rover">
+  <!-- Viam Rover 2, from Viam's public ViamRover2-2024-rpi5 fragment
+       (wheel_circumference_mm 381, width_mm 356). Viam axes: +Y forward, so
+       the drive axles are along X. The chassis origin is on the floor, under
+       the shell's centre. -->
+  <compiler angle="degree" autolimits="true"/>
+
+  <asset>
+    <material name="shell" rgba="0.15 0.15 0.17 1"/>
+    <material name="tire" rgba="0.05 0.05 0.05 1"/>
+  </asset>
+
+  <worldbody>
+    <body name="chassis">
+      <!-- 2.5 kg, the centre of mass 5 cm behind the axle so the caster carries its share -->
+      <inertial pos="0 -0.05 0.08" mass="2.5" diaginertia="0.020833 0.016167 0.032833"/>
+      <geom name="shell" type="box" size="0.13 0.15 0.05" pos="0 0 0.08" material="shell"/>
+      <!-- radius 0.381 m / 2 pi, track 0.356 m -->
+      <body name="left_wheel" pos="-0.178 0 0.06063803">
+        <joint name="left_wheel" axis="1 0 0"/>
+        <geom name="left_wheel" type="cylinder" size="0.06063803 0.0125" euler="0 90 0" mass="0.1"
+          priority="1" friction="1 0.005 0.0001" material="tire"/>
+      </body>
+      <body name="right_wheel" pos="0.178 0 0.06063803">
+        <joint name="right_wheel" axis="1 0 0"/>
+        <geom name="right_wheel" type="cylinder" size="0.06063803 0.0125" euler="0 90 0" mass="0.1"
+          priority="1" friction="1 0.005 0.0001" material="tire"/>
+      </body>
+      <!-- a passive rear caster: a swivel under the shell and a trailing wheel -->
+      <body name="caster_swivel" pos="0 -0.11 0.03">
+        <joint name="caster_swivel" axis="0 0 1" damping="0.0005"/>
+        <geom name="caster_fork" type="box" size="0.01 0.012 0.008" pos="0 -0.006 -0.008" mass="0.02"
+          contype="0" conaffinity="0" material="shell"/>
+        <body name="caster_wheel" pos="0 -0.012 -0.0175">
+          <joint name="caster_wheel" axis="1 0 0" damping="0.0001"/>
+          <geom name="caster_wheel" type="sphere" size="0.0125" mass="0.02" priority="1"
+            friction="0.1 0.005 0.0001" material="tire"/>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
