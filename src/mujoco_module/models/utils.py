@@ -3,14 +3,16 @@
 Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
 """
 
+import json
 import math
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 from viam.proto.app.robot import ComponentConfig
+from viam.proto.common import Geometry
 from viam.spatialmath import AxisAngle, EulerAngles, OrientationVector, Quaternion
 from viam.utils import struct_to_dict
 
-from ..sim import KNOWN_ASSETS
+from ..sim import KNOWN_ASSETS, LOGGER, SimManager, StaticShape
 
 Vec3 = Tuple[float, float, float]
 Quat = Tuple[float, float, float, float]  # (w, x, y, z), MuJoCo's order
@@ -126,3 +128,35 @@ def positive_number(name: str, attrs: Dict[str, Any], key: str, default: float) 
     if value <= 0:
         raise ValueError(f"{name}: {key} must be a finite, positive number")
     return value
+
+
+def frame_box(geometry: Geometry) -> Dict[str, Any]:
+    """A box geometry as frame.geometry config (mm)."""
+    d, c = geometry.box.dims_mm, geometry.center
+    return {
+        "type": "box", "x": round(d.x, 1), "y": round(d.y, 1), "z": round(d.z, 1),
+        "translation": {"x": round(c.x, 1), "y": round(c.y, 1), "z": round(c.z, 1)},
+    }
+
+
+def publish_shapes(
+    config: ComponentConfig, body: str, geometries: Sequence[Geometry], color: Sequence[float]
+) -> None:
+    """Hand a motor's or sensor's shapes to the world state store, for the 3D
+    scene: RDK only asks arms, bases, cameras, gantries, generics and grippers
+    for theirs. The planner sees only the frame geometry, so log one to paste
+    (geometries[0], in the component's frame) when the frame has none."""
+    sim = SimManager.get()
+    shape = StaticShape(body, tuple(geometries), tuple(color))
+    sim.run(lambda: sim.static_shapes.__setitem__(config.name, shape))
+    if not config.frame.HasField("geometry"):
+        LOGGER.warning(
+            '%s: RDK never asks a motor or sensor for its shape, so the motion planner can\'t see it. '
+            'Add this to its "frame": "geometry": %s',
+            config.name, json.dumps(frame_box(geometries[0])),
+        )
+
+
+def unpublish_shapes(name: str) -> None:
+    sim = SimManager.get()
+    sim.run(lambda: sim.static_shapes.pop(name, None))

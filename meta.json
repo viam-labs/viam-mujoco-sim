@@ -56,8 +56,32 @@
     {
       "model": "viam-labs:mujoco-sim:world_state",
       "api": "rdk:service:world_state_store",
-      "short_description": "Streams movable props to the 3D scene viewer",
+      "short_description": "Streams movable props and parcels to the 3D scene viewer",
       "markdown_link": "README.md#model-viam-labsmujoco-simworld_state"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:conveyor",
+      "api": "rdk:component:motor",
+      "short_description": "A belt conveyor that carries parcels by friction",
+      "markdown_link": "README.md#model-viam-labsmujoco-simconveyor"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:spawner",
+      "api": "rdk:component:sensor",
+      "short_description": "Feeds box parcels of random classes onto a conveyor; box-detect compatible",
+      "markdown_link": "README.md#model-viam-labsmujoco-simspawner"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:photo_eye",
+      "api": "rdk:component:sensor",
+      "short_description": "A through-beam photo-eye that counts what passes",
+      "markdown_link": "README.md#model-viam-labsmujoco-simphoto_eye"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:scale",
+      "api": "rdk:component:sensor",
+      "short_description": "A platform scale",
+      "markdown_link": "README.md#model-viam-labsmujoco-simscale"
     }
   ],
   "entrypoint": "run.sh",

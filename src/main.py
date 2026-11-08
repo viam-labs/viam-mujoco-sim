@@ -17,12 +17,24 @@ import threading
 
 from viam.logging import getLogger
 from viam.module.module import Module
+from viam.resource.registry import Registry
 
 import mujoco_module.models  # noqa: F401  (registers the models)
+from mujoco_module.models import world
 from mujoco_module.sim import SimManager
 
 LOGGER = getLogger("viam-mujoco-sim.main")
 _failed = threading.Event()
+
+
+async def _serve() -> None:
+    """Module.run_from_registry, keeping the module: the world's
+    import_geometry looks components up through its parent connection."""
+    module = Module.from_args()
+    for key in Registry.REGISTERED_RESOURCE_CREATORS():
+        module.add_model_from_registry(*key.split("/"))  # pyright: ignore [reportArgumentType]
+    world.MODULE = module
+    await module.start()
 
 
 def _run_module(sim: SimManager) -> None:
@@ -32,7 +44,7 @@ def _run_module(sim: SimManager) -> None:
     loop.add_signal_handler = lambda *args, **kwargs: None  # type: ignore[method-assign]
     asyncio.set_event_loop(loop)
     try:
-        loop.run_until_complete(Module.run_from_registry())
+        loop.run_until_complete(_serve())
     except Exception:
         LOGGER.exception("module server exited with error")
         _failed.set()

@@ -22,7 +22,12 @@
       <geom name="body" type="cylinder" size="0.044 0.0525" pos="0 0 0.0525" group="3"/>
       <geom name="stem" type="cylinder" size="0.006 0.015" pos="0 0 0.11" material="rubber"/>
       <body name="cup" pos="0 0 0.1275">
-        <geom name="cup" type="cylinder" size="0.0225 0.0025" mass="0.01" margin="0.002"
+        <!-- margin = gap: the adhesion acts on contacts up to 2 mm out, but the
+             contact pushes back only on touch. With gap 0 a held load hangs at
+             the margin's edge, a fraction of a degree of tilt takes the far
+             side's contacts and their share of the pull, and a 2.5 kg parcel
+             peels onto one rim contact and swings. -->
+        <geom name="cup" type="cylinder" size="0.0225 0.0025" mass="0.01" margin="0.002" gap="0.002"
           material="rubber"/>
         <site name="pinch" pos="0 0 0.0025"/>
       </body>

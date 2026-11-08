@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import itertools
 import math
+import random
+from collections import deque
 from collections.abc import Sequence
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
@@ -19,7 +21,18 @@ import mujoco
 import numpy as np
 
 from . import bases, robots
-from .sim import GRIPPER_ASSETS, KNOWN_ASSETS, LOGGER, Contribution, SimManager
+from .sim import (
+    BELT_CONAFFINITY,
+    FREE_CONTYPE,
+    GRIPPER_ASSETS,
+    KNOWN_ASSETS,
+    LOGGER,
+    PROP_CONTACT_PRIORITY,
+    PROP_SOLREF,
+    Contribution,
+    DynamicProp,
+    SimManager,
+)
 from viam.spatialmath import Quaternion
 
 Vec3 = tuple[float, float, float]
@@ -1281,6 +1294,28 @@ DEFAULT_LIDAR_RANGE_MAX_M = 12.0
 DEFAULT_LIDAR_RESOLUTION_DEG = 1.0
 MAX_LIDAR_RAYS = 3600
 LIDAR_RECAST_STEP_M = 1e-4  # a re-cast starts this far past the hit it skips
+# Geom group 5 holds what no sensor should see (parked parcels); renderers
+# hide groups 3 to 5 by default, and rays get this mask.
+HIDDEN_GROUP = 5
+RAY_GROUPS = np.array([1, 1, 1, 1, 1, 0], np.uint8)
+
+
+def _cast_past(
+    model: mujoco.MjModel, data: mujoco.MjData, origin: np.ndarray, direction: np.ndarray,
+    own: set[int], geom: int, total: float, limit: float,
+) -> float:
+    """A ray that hit `geom` at `total` m, continued past every hit on the
+    `own` bodies: the first other hit's distance, or -1."""
+    found = np.zeros(1, np.int32)
+    while geom >= 0 and model.geom_bodyid[geom] in own and total <= limit:
+        total += LIDAR_RECAST_STEP_M
+        step = mujoco.mj_ray(
+            model, data, origin + total * direction, direction,
+            RAY_GROUPS, 1, int(model.geom_bodyid[geom]), found,
+        )
+        geom = int(found[0])
+        total = total + step if geom >= 0 else -1.0
+    return total
 
 
 class LidarHandle:
@@ -1336,29 +1371,886 @@ class LidarHandle:
             exclude = (int(model.site_bodyid[site]) or -1) if self.parent else -1  # body 0 is the world: excluding it would hide every static geom
             mujoco.mj_multiRay(
                 model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
-                None, 1, exclude, geomid, dist, None, count, self.range_max_m,
+                RAY_GROUPS, 1, exclude, geomid, dist, None, count, self.range_max_m,
             )
             if self.parent:
                 # mj_multiRay excludes one body; re-cast past hits on the rest of the parent's subtree
                 own = set(robots.subtree(model, int(model.site_bodyid[site])))
                 origin = data.site_xpos[site]
-                found = np.zeros(1, np.int32)
                 for ray in np.flatnonzero(geomid >= 0):
-                    total, geom = float(dist[ray]), int(geomid[ray])
-                    while geom >= 0 and model.geom_bodyid[geom] in own and total <= self.range_max_m:
-                        total += LIDAR_RECAST_STEP_M
-                        step = mujoco.mj_ray(
-                            model, data, origin + total * directions[ray], directions[ray],
-                            None, 1, int(model.geom_bodyid[geom]), found,
-                        )
-                        geom = int(found[0])
-                        total = total + step if geom >= 0 else -1.0
-                    dist[ray] = total
+                    dist[ray] = _cast_past(
+                        model, data, origin, directions[ray], own, int(geomid[ray]), float(dist[ray]),
+                        self.range_max_m,
+                    )
             return dist
 
         dist = self._sim.run(cast)
         keep = (dist >= self.range_min_m) & (dist <= self.range_max_m)  # misses are -1
         return (self._rays[keep] * dist[keep, None]).astype(np.float32)
+
+
+CONVEYOR_PERIOD_M = 0.05  # the belt shifts back by this much; it overhangs each end by up to this
+CONVEYOR_ACCEL_MPS2 = 2.0  # speed changes ramp at this rate, so parcels aren't flung
+CONVEYOR_MIN_MPS = 0.01  # GoFor's braking ramp's least speed
+CONVEYOR_MOVING_MPS = 1e-3
+CONVEYOR_BELT_KG = 2.0
+CONVEYOR_KV = 2000.0  # N per m/s: the belt settles in ~1 ms and droops 5 % under a 3.5 kg pile held still
+CONVEYOR_FORCE_N = 500.0
+CONVEYOR_BELT_M = 0.01  # thickness
+CONVEYOR_BED_M = 0.04  # the frame box under the belt
+CONVEYOR_RAIL_M = 0.02  # side-rail thickness
+CONVEYOR_LEG_M = 0.04  # leg width
+
+
+@dataclass
+class _ConveyorGoal:
+    end: float  # belt travel, m, at which the move ends
+    direction: float  # +1 or -1
+    future: Future
+
+
+@dataclass(frozen=True)
+class _ConveyorIds:
+    qpos: int
+    dof: int
+    ctrl: int
+
+
+class ConveyorHandle:
+    """A belt conveyor. The fixed frame body (bed, legs, rails) sits at the
+    frame, the centre of the belt's top surface; the belt is a thin box on a
+    slide joint along +Y, one period longer than the conveyor, driven by a
+    velocity actuator. Whenever the slide passes a period it shifts back by
+    one (no velocity change), so the belt always covers the conveyor and
+    parcels ride on friction. The belt collides only with free bodies (see
+    sim.FREE_CONTYPE)."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        prefix = f"{name}/"
+        self.length = float(attrs["length_m"])
+        self.width = float(attrs["width_m"])
+        self.diameter = float(attrs.get("roller_diameter_m", 0.05))
+        self.max_speed = float(attrs.get("max_speed_mps", 0.5))
+        self.rails = float(attrs.get("rails_m", 0.04))
+        friction = float(attrs.get("friction", 1.0))
+        self.color = color = [float(c) for c in attrs.get("color", (0.25, 0.27, 0.3))]
+        position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
+        quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+        self.height = position[2]  # legs reach world z = 0 (for a level conveyor)
+        self._target = 0.0  # commanded belt speed, m/s
+        self._speed = 0.0  # the command ramped at CONVEYOR_ACCEL_MPS2
+        self._wraps = 0.0  # travel taken out of the slide by the shifts, m
+        self._zero = 0.0  # travel at position zero, m
+        self._goal: _ConveyorGoal | None = None
+        self._ids: _ConveyorIds | None = None
+        self._ids_generation = -1
+        self._callback_key = f"conveyor:{name}"
+        half_l, half_w, period = self.length / 2, self.width / 2, CONVEYOR_PERIOD_M
+
+        def build(spec: mujoco.MjSpec) -> None:
+            box = mujoco.mjtGeom.mjGEOM_BOX
+            frame = spec.worldbody.add_body(name=prefix + "frame", pos=position, quat=quat)
+            frame.add_site(name=prefix + VIAM_FRAME_SITE)
+            rgba = [*color, 1.0]
+            under = CONVEYOR_BELT_M + CONVEYOR_BED_M
+            frame.add_geom(
+                name=prefix + "bed", type=box, size=[half_w, half_l, CONVEYOR_BED_M / 2],
+                pos=[0, 0, -CONVEYOR_BELT_M - CONVEYOR_BED_M / 2], rgba=rgba,
+            )
+            leg = self.height - under
+            if leg > 0:
+                inset = CONVEYOR_LEG_M / 2
+                for i, (sx, sy) in enumerate(((-1, -1), (1, -1), (-1, 1), (1, 1))):
+                    frame.add_geom(
+                        name=f"{prefix}leg_{i}", type=box, size=[inset, inset, leg / 2],
+                        pos=[sx * (half_w - inset), sy * (half_l - inset), -under - leg / 2], rgba=rgba,
+                    )
+            if self.rails > 0:
+                tall = self.rails + CONVEYOR_BELT_M
+                for i, side in enumerate((-1, 1)):
+                    frame.add_geom(
+                        name=f"{prefix}rail_{i}", type=box,
+                        size=[CONVEYOR_RAIL_M / 2, half_l, tall / 2],
+                        pos=[side * (half_w + CONVEYOR_RAIL_M / 2), 0, self.rails - tall / 2], rgba=rgba,
+                    )
+            belt = frame.add_body(name=prefix + "belt")
+            belt.add_joint(name=prefix + "belt", type=mujoco.mjtJoint.mjJNT_SLIDE, axis=[0, 1, 0])
+            # at slide q in [0, period) the belt spans [-L/2 - period + q, L/2 + q]
+            belt.add_geom(
+                name=prefix + "belt", type=box,
+                size=[half_w, half_l + period / 2, CONVEYOR_BELT_M / 2],
+                pos=[0, -period / 2, -CONVEYOR_BELT_M / 2],
+                mass=CONVEYOR_BELT_KG, rgba=[0.1, 0.1, 0.1, 1.0],
+                friction=[friction, 0.005, 0.0001], priority=PROP_CONTACT_PRIORITY + 1,
+                contype=0, conaffinity=BELT_CONAFFINITY,
+            )
+            actuator = spec.add_actuator(
+                name=prefix + "belt", target=prefix + "belt", trntype=mujoco.mjtTrn.mjTRN_JOINT
+            )
+            actuator.set_to_velocity(kv=CONVEYOR_KV)
+            actuator.forcelimited = True
+            actuator.forcerange = [-CONVEYOR_FORCE_N, CONVEYOR_FORCE_N]
+
+        def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+            data.ctrl[self._resolve(model).ctrl] = 0.0
+            self._target = self._speed = self._wraps = self._zero = 0.0
+            self._drop_goal(RuntimeError(f"conveyor {name!r} was reset"))
+
+        sim.set_contribution(name, Contribution(build=build, init=init))
+
+        def register() -> None:
+            sim.step_callbacks[self._callback_key] = self._on_step
+            sim.conveyors[name] = self
+
+        sim.run(register)
+
+    def close(self) -> None:
+        def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
+            if self._sim.conveyors.get(self.name) is self:
+                del self._sim.conveyors[self.name]
+            self._drop_goal(RuntimeError(f"conveyor {self.name!r} was closed (removed or reconfigured)"))
+
+        self._sim.run(detach)
+        self._sim.remove_contribution(self.name)
+
+    def _resolve(self, model: mujoco.MjModel) -> _ConveyorIds:
+        joint = model.joint(f"{self.name}/belt")
+        return _ConveyorIds(
+            qpos=int(joint.qposadr[0]), dof=int(joint.dofadr[0]), ctrl=model.actuator(f"{self.name}/belt").id
+        )
+
+    def _now(self) -> tuple[mujoco.MjData, _ConveyorIds]:
+        sim = self._sim
+        assert sim.model is not None and sim.data is not None
+        if self._ids is None or self._ids_generation != sim.generation:
+            self._ids = self._resolve(sim.model)
+            self._ids_generation = sim.generation
+        return sim.data, self._ids
+
+    def _travel(self, data: mujoco.MjData, ids: _ConveyorIds) -> float:
+        return self._wraps + float(data.qpos[ids.qpos])
+
+    def _on_step(self, dt: float) -> None:
+        data, ids = self._now()
+        q = data.qpos[ids.qpos]
+        if q > CONVEYOR_PERIOD_M:
+            data.qpos[ids.qpos] -= CONVEYOR_PERIOD_M
+            self._wraps += CONVEYOR_PERIOD_M
+        elif q < 0.0:
+            data.qpos[ids.qpos] += CONVEYOR_PERIOD_M
+            self._wraps -= CONVEYOR_PERIOD_M
+        target = self._target
+        goal = self._goal
+        if goal is not None:
+            remaining = (goal.end - self._travel(data, ids)) * goal.direction
+            if goal.future.done():  # cancelled by the caller
+                self._drop_goal()
+                target = 0.0
+            elif remaining <= 0.0:
+                self._drop_goal()
+                target = self._speed = 0.0
+                try:
+                    goal.future.set_result(None)
+                except InvalidStateError:
+                    pass
+            else:
+                braking = max(CONVEYOR_MIN_MPS, math.sqrt(2 * CONVEYOR_ACCEL_MPS2 * remaining))
+                target = goal.direction * min(abs(target), braking)
+        step = CONVEYOR_ACCEL_MPS2 * dt
+        self._speed += float(np.clip(target - self._speed, -step, step))
+        data.ctrl[ids.ctrl] = self._speed
+
+    def _drop_goal(self, error: BaseException | None = None) -> None:
+        """Clear the goal and, when there was one, the speed command. Sim thread only."""
+        goal, self._goal = self._goal, None
+        if goal is not None:
+            self._target = 0.0
+            if error is not None:
+                _fail(goal.future, error)
+
+    # -- public API ---------------------------------------------------------
+
+    def rpm_to_mps(self, rpm: float) -> float:
+        return rpm * math.pi * self.diameter / 60.0
+
+    def set_speed(self, mps: float) -> None:
+        """Run the belt at mps (clamped to max_speed_mps) until told otherwise."""
+        if not math.isfinite(mps):
+            raise ValueError("speed must be finite")
+        speed = float(np.clip(mps, -self.max_speed, self.max_speed))
+
+        def apply() -> None:
+            self._drop_goal(RuntimeError(f"conveyor {self.name!r} move was superseded by a new command"))
+            self._target = speed
+
+        self._sim.run(apply)
+
+    def stop(self) -> None:
+        def apply() -> None:
+            self._drop_goal(RuntimeError(f"conveyor {self.name!r} move was stopped"))
+            self._target = 0.0
+
+        self._sim.run(apply)
+
+    def go_for(self, rpm: float, revolutions: float) -> Future:
+        """Run until the belt has travelled `revolutions` roller turns, then
+        stop. The sign of rpm x revolutions picks the direction. The future
+        resolves on arrival and fails on stop, a new command, reset or close."""
+        if not math.isfinite(rpm) or not math.isfinite(revolutions):
+            raise ValueError("rpm and revolutions must be finite")
+        if rpm == 0.0:
+            raise ValueError("rpm must be non-zero")
+        future: Future = Future()
+        if revolutions == 0.0:
+            future.set_result(None)
+            return future
+        direction = math.copysign(1.0, rpm * revolutions)
+        speed = min(abs(self.rpm_to_mps(rpm)), self.max_speed)
+        distance = abs(revolutions) * math.pi * self.diameter
+
+        def start() -> None:
+            self._drop_goal(RuntimeError(f"conveyor {self.name!r} move was superseded by a new command"))
+            data, ids = self._now()
+            self._goal = _ConveyorGoal(self._travel(data, ids) + direction * distance, direction, future)
+            self._target = direction * speed
+
+        self._sim.run(start)
+        return future
+
+    def position(self) -> float:
+        """Belt travel since the last reset_zero_position, in roller revolutions."""
+
+        def read() -> float:
+            data, ids = self._now()
+            return (self._travel(data, ids) - self._zero) / (math.pi * self.diameter)
+
+        return self._sim.run(read)
+
+    def reset_zero_position(self, offset: float) -> None:
+        """As RDK's encoded motors: the position reads -offset afterwards."""
+        if not math.isfinite(offset):
+            raise ValueError("offset must be finite")
+
+        def apply() -> None:
+            data, ids = self._now()
+            self._zero = self._travel(data, ids) + offset * math.pi * self.diameter
+
+        self._sim.run(apply)
+
+    def power(self) -> float:
+        """The commanded speed as a fraction of max_speed_mps."""
+        return self._sim.run(lambda: self._target / self.max_speed)
+
+    def is_moving(self) -> bool:
+        def read() -> bool:
+            data, ids = self._now()
+            return bool(self._target != 0.0 or abs(data.qvel[ids.dof]) > CONVEYOR_MOVING_MPS)
+
+        return self._sim.run(read)
+
+
+class PhotoEyeHandle:
+    """A through-beam photo-eye: one ray per step from its frame along +X,
+    mounted like the lidar (on the world or a parent's viam_frame, never
+    seeing the parent's subtree). Counts rising edges of `blocked`."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        self.parent: str | None = attrs.get("parent")
+        self.range_m = float(attrs.get("range_m", 2.0))
+        self.blocked = False
+        self.distance_m = self.range_m
+        self.count = 0
+        self._site = -1
+        self._own: set[int] = set()
+        self._generation = -1
+        self._callback_key = f"photo_eye:{name}"
+        position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
+        quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+
+        def build(spec: mujoco.MjSpec) -> None:
+            mount = _mount(spec, self.parent, position, quat)
+            if mount is None:
+                return  # parent not configured (yet); readings() says so
+            body, pos, rot = mount
+            body.add_site(name=name, pos=list(pos), quat=list(rot))
+
+        def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+            self.blocked, self.distance_m, self.count = False, self.range_m, 0
+
+        sim.set_contribution(name, Contribution(build=build, init=init, late=bool(self.parent)))
+        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
+
+    def close(self) -> None:
+        self._sim.run(lambda: self._sim.step_callbacks.pop(self._callback_key, None))
+        self._sim.remove_contribution(self.name)
+
+    def _resolve(self) -> None:
+        """The beam's site and its parent's bodies, once per model."""
+        model = self._sim.model
+        assert model is not None
+        if self._generation != self._sim.generation:
+            self._generation = self._sim.generation
+            self._site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.name)
+            parent = int(model.site_bodyid[self._site]) if self._site >= 0 and self.parent else 0
+            self._own = set(robots.subtree(model, parent)) if parent else set()
+
+    def _on_step(self, _dt: float) -> None:
+        model, data = self._sim.model, self._sim.data
+        assert model is not None and data is not None
+        self._resolve()
+        if self._site < 0:
+            return
+        origin = data.site_xpos[self._site].copy()
+        direction = data.site_xmat[self._site].reshape(3, 3)[:, 0].copy()
+        found = np.zeros(1, np.int32)
+        exclude = int(model.site_bodyid[self._site]) if self._own else -1
+        dist = mujoco.mj_ray(model, data, origin, direction, RAY_GROUPS, 1, exclude, found)
+        if self._own:
+            dist = _cast_past(model, data, origin, direction, self._own, int(found[0]), dist, self.range_m)
+        blocked = 0.0 <= dist <= self.range_m
+        if blocked and not self.blocked:
+            self.count += 1
+        self.blocked = blocked
+        self.distance_m = float(dist) if blocked else self.range_m
+
+    def readings(self) -> dict[str, Any]:
+        def read() -> dict[str, Any]:
+            self._sim.require_world()
+            self._resolve()
+            if self._site < 0:
+                why = f"configure its frame parent {self.parent!r}" if self.parent else "the world has not rebuilt yet"
+                raise RuntimeError(f"photo-eye {self.name!r} is not in the scene; {why}")
+            return {"blocked": self.blocked, "distance_m": self.distance_m, "count": self.count}
+
+        return self._sim.run(read)
+
+    def reset_count(self) -> None:
+        self._sim.run(lambda: setattr(self, "count", 0))
+
+
+SCALE_TAU_S = 0.1  # low-pass filter time constant
+SCALE_STABLE_S = 0.3
+SCALE_STABLE_KG = 0.005
+
+
+class ScaleHandle:
+    """A fixed platform box whose frame is the centre of its top face. Each
+    step it weighs the normal contact forces on the platform (static geoms
+    never touch it), low-pass filtered; stable when the filtered weight has
+    moved less than 5 g over the last 0.3 s."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        self.size = [float(v) for v in attrs["size_m"]]
+        self.color = color = [float(c) for c in attrs.get("color", (0.6, 0.6, 0.62))]
+        position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
+        quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+        self.weight_kg = 0.0  # filtered
+        self.tare_kg = 0.0
+        self.stable = False
+        self._history: deque[tuple[float, float]] = deque()
+        self._geom = -1
+        self._generation = -1
+        self._callback_key = f"scale:{name}"
+        self._geom_name = f"{name}/platform"
+
+        def build(spec: mujoco.MjSpec) -> None:
+            body = spec.worldbody.add_body(name=self._geom_name, pos=position, quat=quat)
+            body.add_geom(
+                name=self._geom_name, type=mujoco.mjtGeom.mjGEOM_BOX,
+                size=[v / 2 for v in self.size], pos=[0, 0, -self.size[2] / 2], rgba=[*color, 1.0],
+            )
+
+        def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+            self.weight_kg, self.stable = 0.0, False
+            self._history.clear()
+
+        sim.set_contribution(name, Contribution(build=build, init=init))
+        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
+
+    def close(self) -> None:
+        self._sim.run(lambda: self._sim.step_callbacks.pop(self._callback_key, None))
+        self._sim.remove_contribution(self.name)
+
+    def _on_step(self, dt: float) -> None:
+        model, data = self._sim.model, self._sim.data
+        assert model is not None and data is not None
+        if self._generation != self._sim.generation:
+            self._generation = self._sim.generation
+            self._geom = model.geom(self._geom_name).id
+        force = np.zeros(6)
+        load = 0.0
+        for i in range(data.ncon):
+            contact = data.contact[i]
+            if self._geom not in (contact.geom1, contact.geom2):
+                continue
+            mujoco.mj_contactForce(model, data, i, force)
+            # the normal (frame row 0) points from geom1 to geom2; force[0] pushes them apart
+            push = force[0] * contact.frame[2]
+            load += push if contact.geom1 == self._geom else -push
+        self.weight_kg += dt / SCALE_TAU_S * (load / GRAVITY - self.weight_kg)
+        now = float(data.time)
+        self._history.append((now, self.weight_kg))
+        while self._history[0][0] < now - SCALE_STABLE_S - 1e-9:
+            self._history.popleft()
+        values = [value for _, value in self._history]
+        self.stable = bool(  # numpy's bool serializes as 1
+            now - self._history[0][0] >= SCALE_STABLE_S - 1e-6 and max(values) - min(values) < SCALE_STABLE_KG
+        )
+
+    def readings(self) -> dict[str, Any]:
+        # to 0.1 g: the filter decays to denormals (1e-322) on an empty platform; + 0.0 drops a -0.0
+        return self._sim.run(lambda: {
+            "weight_kg": round(float(self.weight_kg - self.tare_kg), 4) + 0.0, "stable": self.stable,
+        })
+
+    def tare(self) -> float:
+        def apply() -> float:
+            self.tare_kg = self.weight_kg
+            return self.tare_kg
+
+        return self._sim.run(apply)
+
+
+PARK_POSITION = (0.0, 0.0, -2.0)  # parked parcels wait here, collisions off, out of sight
+PARKED_HALF_M = (0.05, 0.05, 0.05)
+PARKED_KG = 0.1
+DESPAWN_BELOW_M = -0.5
+INFEED_GAP_M = 0.01  # between the belt's -Y end and the infeed spot
+MAX_SPAWN_YAW_RAD = math.radians(10)
+
+
+@dataclass(frozen=True)
+class Parcel:
+    cls: str
+    half: tuple[float, float, float]  # m
+    mass: float
+    color: tuple[float, float, float]
+    friction: float
+
+
+@dataclass(frozen=True)
+class ParcelClass:
+    name: str
+    weight: float
+    size: tuple[tuple[float, float], ...]  # (low, high) full size per axis, m
+    mass: tuple[float, float]
+    color: tuple[tuple[float, ...], tuple[float, ...]]  # (min, max) rgb
+    friction: float
+
+
+def _numbers(raw: Any, count: int, label: str) -> tuple[float, ...]:
+    if not (
+        isinstance(raw, list)
+        and len(raw) == count
+        and all(isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v) for v in raw)
+    ):
+        raise ValueError(f"{label} must be a list of {count} numbers")
+    return tuple(float(v) for v in raw)
+
+
+def _span(raw: Any, label: str) -> tuple[float, float]:
+    low, high = _numbers(raw, 2, label)
+    if not 0 < low <= high:
+        raise ValueError(f"{label} must be [low, high] with 0 < low <= high")
+    return low, high
+
+
+def parcel_classes(label: str, raw: Any) -> tuple[ParcelClass, ...]:
+    """A spawner's classes attribute; ValueError if invalid."""
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{label}: classes must be a list of at least one parcel class")
+    classes = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+            raise ValueError(f"{label}: every class needs a name")
+        where = f"{label}: class {item['name']}"
+        size = item.get("size_m")
+        if isinstance(size, list) and len(size) == 3 and all(isinstance(axis, list) for axis in size):
+            spans = tuple(_span(axis, f"{where}: size_m") for axis in size)
+        else:
+            spans = (_span(size, f"{where}: size_m"),) * 3
+        color = item.get("color", [0.6, 0.45, 0.3])
+        if isinstance(color, dict):
+            low, high = (_numbers(color.get(key), 3, f"{where}: color {key}") for key in ("min", "max"))
+        else:
+            low = high = _numbers(color, 3, f"{where}: color")
+        (weight,) = _numbers([item.get("weight", 1)], 1, f"{where}: weight")
+        (friction,) = _numbers([item.get("friction", 1)], 1, f"{where}: friction")
+        if weight <= 0 or friction < 0:
+            raise ValueError(f"{where}: weight must be positive and friction >= 0")
+        classes.append(ParcelClass(
+            item["name"], weight, spans, _span(item.get("mass_kg"), f"{where}: mass_kg"), (low, high), friction
+        ))
+    return tuple(classes)
+
+
+def despawn_boxes(label: str, raw: Any) -> tuple[tuple[np.ndarray, np.ndarray], ...]:
+    """A spawner's despawn attribute as (center, half size) pairs, world m."""
+    if not isinstance(raw, list):
+        raise ValueError(f"{label}: despawn must be a list of boxes")
+    boxes = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError(f'{label}: a despawn box is {{"center": [x, y, z], "size": [x, y, z]}}')
+        center = _numbers(item.get("center"), 3, f"{label}: despawn center")
+        size = _numbers(item.get("size"), 3, f"{label}: despawn size")
+        if min(size) <= 0:
+            raise ValueError(f"{label}: despawn size must be positive")
+        boxes.append((np.array(center), np.array(size) / 2))
+    return tuple(boxes)
+
+
+_PARCEL_SERIALS = itertools.count(1)  # process-wide: world_state keys parcels on name and serial
+
+
+@dataclass(frozen=True)
+class _PoolIds:
+    geom: np.ndarray
+    body: np.ndarray
+    qpos: np.ndarray
+    dof: np.ndarray
+
+
+class SpawnerHandle:
+    """A pool of free box bodies, {name}/parcel_{i}. A parked parcel waits
+    below the floor with collisions off, in the hidden geom group, frozen
+    each step. Spawning resizes one in place (no rebuild): its size, bounds,
+    collision masks, mass, inertia and colour, then mj_setConst. A rebuild
+    keeps live parcels (build writes their shape into the spec; state carry
+    restores their pose); reset parks them all and restarts the timer and
+    the random stream. Every interval_s of sim time a parcel of a random
+    class spawns at rest on the conveyor's infeed spot, unless one is
+    there already; a live parcel that enters a despawn box or falls below
+    z = -0.5 m returns to the pool."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        label = f"spawner {name}"
+        self.conveyor = str(attrs["conveyor"])
+        self.classes = parcel_classes(label, attrs.get("classes"))
+        self.interval_s = float(attrs.get("interval_s", 4.0))
+        self.pool_size = int(attrs.get("pool_size", 12))
+        self._seed = attrs.get("seed")
+        self._start_paused = bool(attrs.get("start_paused", False))
+        self._despawn = despawn_boxes(label, attrs.get("despawn", []))
+        # the infeed spot holds the largest parcel: its footprint's half diagonal
+        self._spot_radius = max(math.hypot(c.size[0][1], c.size[1][1]) / 2 for c in self.classes)
+        self._live: dict[int, Parcel] = {}
+        self._misfits: set[str] = set()  # classes refused (and logged) for not fitting the conveyor
+        self._ids: _PoolIds | None = None
+        self._ids_generation = -1
+        self._callback_key = f"spawner:{name}"
+        self._restart()
+
+        def build(spec: mujoco.MjSpec) -> None:
+            for i in range(self.pool_size):
+                body_name = self.body_name(i)
+                body = spec.worldbody.add_body(name=body_name, pos=list(PARK_POSITION))
+                body.add_freejoint(name=body_name)
+                parcel = self._live.get(i)
+                body.add_geom(
+                    name=body_name, type=mujoco.mjtGeom.mjGEOM_BOX, priority=PROP_CONTACT_PRIORITY,
+                    solref=list(PROP_SOLREF), **self._geom_fields(parcel),
+                )
+
+        def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+            self._park(model, data, range(self.pool_size))
+            self._restart()
+
+        sim.set_contribution(name, Contribution(build=build, init=init))
+        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
+
+    def _restart(self) -> None:
+        self._random = random.Random(self._seed)
+        self.paused = self._start_paused
+        self._next_s = 0.0  # the first parcel comes at once
+        self.spawned = 0
+        self.pool_exhausted = False
+        self._pending: tuple[Parcel, float] | None = None  # drawn, waiting for the infeed
+
+    def close(self) -> None:
+        def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
+            for i in self._live:
+                self._sim.dynamic_props.pop(self.body_name(i), None)
+            self._live.clear()
+
+        self._sim.run(detach)
+        self._sim.remove_contribution(self.name)
+
+    def body_name(self, i: int) -> str:
+        return f"{self.name}/parcel_{i}"
+
+    @staticmethod
+    def _geom_fields(parcel: Parcel | None) -> dict[str, Any]:
+        if parcel is None:
+            return {
+                "size": list(PARKED_HALF_M), "mass": PARKED_KG, "contype": 0, "conaffinity": 0,
+                "group": HIDDEN_GROUP, "rgba": [0.5, 0.5, 0.5, 1.0],
+            }
+        return {
+            "size": list(parcel.half), "mass": parcel.mass, "contype": FREE_CONTYPE, "conaffinity": 1,
+            "group": 0, "rgba": [*parcel.color, 1.0], "friction": [parcel.friction, 0.005, 0.0001],
+        }
+
+    def _resolve(self, model: mujoco.MjModel) -> _PoolIds:
+        joints = [model.joint(self.body_name(i)) for i in range(self.pool_size)]
+        return _PoolIds(
+            geom=np.array([model.geom(self.body_name(i)).id for i in range(self.pool_size)]),
+            body=np.array([model.body(self.body_name(i)).id for i in range(self.pool_size)]),
+            qpos=np.array([joint.qposadr[0] for joint in joints]),
+            dof=np.array([joint.dofadr[0] for joint in joints]),
+        )
+
+    def _now(self) -> _PoolIds:
+        sim = self._sim
+        assert sim.model is not None
+        if self._ids is None or self._ids_generation != sim.generation:
+            self._ids = self._resolve(sim.model)
+            self._ids_generation = sim.generation
+        return self._ids
+
+    def _set_fields(self, model: mujoco.MjModel, ids: _PoolIds, i: int, parcel: Parcel | None) -> None:
+        """What compiling the spec with this parcel would give, in place."""
+        fields = self._geom_fields(parcel)
+        geom, body = ids.geom[i], ids.body[i]
+        half = np.asarray(fields["size"])
+        model.geom_size[geom] = half
+        model.geom_rbound[geom] = np.linalg.norm(half)
+        model.geom_aabb[geom] = [0.0, 0.0, 0.0, *half]
+        # the compiled body masks are what the broad phase checks
+        model.geom_contype[geom] = model.body_contype[body] = fields["contype"]
+        model.geom_conaffinity[geom] = model.body_conaffinity[body] = fields["conaffinity"]
+        model.geom_group[geom] = fields["group"]
+        model.geom_rgba[geom] = fields["rgba"]
+        if parcel is not None:
+            model.geom_friction[geom, 0] = parcel.friction
+        mass = fields["mass"]
+        hx, hy, hz = half
+        model.body_mass[body] = mass
+        model.body_inertia[body] = mass / 3 * np.array([hy * hy + hz * hz, hx * hx + hz * hz, hx * hx + hy * hy])
+
+    @staticmethod
+    def _settle(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+        """mj_setConst after changing masses (without it a 3 kg parcel goes
+        unstable); it resets every qpos to qpos0, so keep them. It also
+        recomputes bvh_aabb, which collisions read: load-bearing for a
+        resized parcel's contacts, not just its mass."""
+        qpos = data.qpos.copy()
+        mujoco.mj_setConst(model, data)
+        data.qpos[:] = qpos
+        mujoco.mj_forward(model, data)
+
+    def _park(self, model: mujoco.MjModel, data: mujoco.MjData, indices: Sequence[int]) -> None:
+        ids = self._resolve(model) if model is not self._sim.model else self._now()
+        for i in indices:
+            self._live.pop(i, None)
+            self._sim.dynamic_props.pop(self.body_name(i), None)
+            self._set_fields(model, ids, i, None)
+            data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*PARK_POSITION, 1.0, 0.0, 0.0, 0.0]
+            data.qvel[ids.dof[i] : ids.dof[i] + 6] = 0.0
+        self._settle(model, data)
+
+    def _on_step(self, dt: float) -> None:
+        sim = self._sim
+        assert sim.model is not None and sim.data is not None
+        ids = self._now()
+        for i in range(self.pool_size):
+            if i not in self._live:
+                sim.data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*PARK_POSITION, 1.0, 0.0, 0.0, 0.0]
+                sim.data.qvel[ids.dof[i] : ids.dof[i] + 6] = 0.0
+        gone = [i for i in self._live if self._despawned(sim.data.xpos[ids.body[i]])]
+        if gone:
+            self._park(sim.model, sim.data, gone)
+        if self.paused or self.conveyor not in sim.conveyors:
+            return
+        self._next_s -= dt
+        if self._next_s <= 0.0 and self._spawn_next(force=False)[1] != "infeed occupied":
+            self._next_s = self.interval_s  # spawned, or skipped for want of a free parcel
+
+    def _despawned(self, position: np.ndarray) -> bool:
+        return position[2] < DESPAWN_BELOW_M or any(
+            np.all(np.abs(position - center) <= half) for center, half in self._despawn
+        )
+
+    def _draw(self) -> tuple[Parcel, float]:
+        """A random parcel and its yaw."""
+        rng = self._random
+        cls = rng.choices(self.classes, weights=[c.weight for c in self.classes])[0]
+        half = tuple(rng.uniform(low, high) / 2 for low, high in cls.size)
+        mass = rng.uniform(*cls.mass)
+        color = tuple(rng.uniform(low, high) for low, high in zip(*cls.color))
+        yaw = rng.uniform(-MAX_SPAWN_YAW_RAD, MAX_SPAWN_YAW_RAD)
+        return Parcel(cls.name, half, mass, color, cls.friction), yaw
+
+    def _infeed(self) -> tuple[np.ndarray, np.ndarray, float]:
+        """The conveyor frame's world position and rotation, and the infeed
+        spot's y in that frame."""
+        sim = self._sim
+        conveyor = sim.conveyors.get(self.conveyor)
+        if conveyor is None:
+            raise RuntimeError(f"spawner {self.name!r}: conveyor {self.conveyor!r} is not in the scene")
+        assert sim.data is not None
+        site = sim.data.site(f"{self.conveyor}/{VIAM_FRAME_SITE}")
+        spot_y = -conveyor.length / 2 + INFEED_GAP_M + self._spot_radius
+        return site.xpos.copy(), site.xmat.reshape(3, 3).copy(), spot_y
+
+    def _on_infeed(self, radius: float) -> int | None:
+        """A live parcel on the belt whose footprint overlaps a footprint of
+        `radius` (a half diagonal) on the infeed spot."""
+        assert self._sim.data is not None
+        origin, rotation, spot_y = self._infeed()
+        ids = self._now()
+        for i, parcel in self._live.items():
+            x, y, z = rotation.T @ (self._sim.data.xpos[ids.body[i]] - origin)
+            if z > 0.0 and math.hypot(x, y - spot_y) < radius + math.hypot(parcel.half[0], parcel.half[1]):
+                return i
+        return None
+
+    def _fits(self, cls_name: str) -> bool:
+        """Whether a class's largest parcel fits between the conveyor's rails
+        and on its belt from the infeed spot; logs once per class if not."""
+        conveyor = self._sim.conveyors[self.conveyor]
+        cls = next(c for c in self.classes if c.name == cls_name)
+        (_, size_x), (_, size_y), _ = cls.size
+        _, _, spot_y = self._infeed()
+        if size_x < conveyor.width and spot_y + math.hypot(size_x, size_y) / 2 <= conveyor.length / 2:
+            return True
+        if cls_name not in self._misfits:
+            self._misfits.add(cls_name)
+            LOGGER.error(
+                "spawner %r: class %r (up to %g x %g m) does not fit conveyor %r (%g m wide, %g m long);"
+                " not spawning it",
+                self.name, cls_name, size_x, size_y, self.conveyor, conveyor.width, conveyor.length,
+            )
+        return False
+
+    def _spawn_next(self, force: bool) -> tuple[str | None, str]:
+        """Spawn the next parcel on the infeed spot: (its name, "") or (None,
+        why not). force skips the occupancy check."""
+        if len(self._live) == self.pool_size:
+            self.pool_exhausted = True
+            return None, "pool exhausted"
+        if self._pending is None:
+            self._pending = self._draw()
+        parcel, yaw = self._pending
+        if not self._fits(parcel.cls):
+            self._pending = None
+            return None, f"class {parcel.cls} does not fit the conveyor"
+        if not force and self._on_infeed(math.hypot(parcel.half[0], parcel.half[1])) is not None:
+            return None, "infeed occupied"
+        origin, rotation, spot_y = self._infeed()
+        position = origin + rotation @ [0.0, spot_y, parcel.half[2] + 0.0005]
+        frame, quat = np.zeros(4), np.zeros(4)
+        mujoco.mju_mat2Quat(frame, rotation.ravel())
+        mujoco.mju_mulQuat(quat, frame, np.array([math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2)]))
+        name = self._spawn(parcel, position, quat)
+        self._pending = None
+        self.spawned += 1
+        self.pool_exhausted = False
+        return name, ""
+
+    # -- sim thread -----------------------------------------------------------
+
+    def _spawn(self, parcel: Parcel, position: Sequence[float], quat: Sequence[float]) -> str | None:
+        """Put a free pool parcel at rest at the pose; its body name, or None
+        when every parcel is live."""
+        sim = self._sim
+        assert sim.model is not None and sim.data is not None
+        free = [i for i in range(self.pool_size) if i not in self._live]
+        if not free:
+            return None
+        i, ids = free[0], self._now()
+        self._live[i] = parcel
+        serial = next(_PARCEL_SERIALS)
+        self._set_fields(sim.model, ids, i, parcel)
+        sim.data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*position, *quat]
+        sim.data.qvel[ids.dof[i] : ids.dof[i] + 6] = 0.0
+        self._settle(sim.model, sim.data)
+        sim.dynamic_props[self.body_name(i)] = DynamicProp(serial, parcel.half, parcel.color)
+        return self.body_name(i)
+
+    # -- public API -------------------------------------------------------------
+
+    def spawn_at(self, parcel: Parcel, position: Sequence[float], quat: Sequence[float]) -> str | None:
+        return self._sim.run(lambda: self._spawn(parcel, position, quat))
+
+    def spawn_now(self, force: bool = False) -> tuple[str | None, str]:
+        """Spawn the next parcel now, whatever the timer says."""
+        return self._sim.run(lambda: self._spawn_next(force))
+
+    def set_paused(self, paused: bool) -> None:
+        self._sim.run(lambda: setattr(self, "paused", paused))
+
+    def take(self) -> bool:
+        """Despawn the parcel on the infeed spot, if there is one."""
+
+        def apply() -> bool:
+            i = self._on_infeed(self._spot_radius)
+            if i is not None:
+                self._park(self._sim.model, self._sim.data, [i])
+            return i is not None
+
+        return self._sim.run(apply)
+
+    def readings(self) -> dict[str, Any]:
+        def read() -> dict[str, Any]:
+            self._sim.require_world()
+            present = self.conveyor in self._sim.conveyors and self._on_infeed(self._spot_radius) is not None
+            return {
+                "spawned": self.spawned,
+                "active": len(self._live),
+                "paused": self.paused,
+                "pool_exhausted": self.pool_exhausted,
+                "seconds_until_next": max(0.0, self._next_s),
+                # viam:workcell-components box-detect's names
+                "enabled": not self.paused,
+                "box_present": present,
+                "interval_seconds": self.interval_s,
+            }
+
+        return self._sim.run(read)
+
+    def parcels(self) -> list[dict[str, Any]]:
+        """Every live parcel: name, class, world pose, full size (m) and mass."""
+
+        def read() -> list[dict[str, Any]]:
+            assert self._sim.data is not None
+            out = []
+            for i, parcel in sorted(self._live.items()):
+                body = self._sim.data.body(self.body_name(i))
+                out.append({
+                    "name": self.body_name(i),
+                    "class": parcel.cls,
+                    "pose": {
+                        "position": [float(v) for v in body.xpos],
+                        "orientation_wxyz": [float(v) for v in body.xquat],
+                    },
+                    "size": [2 * v for v in parcel.half],
+                    "mass_kg": parcel.mass,
+                })
+            return out
+
+        return self._sim.run(read)
+
+    def clear(self) -> int:
+        """Park every live parcel; how many there were."""
+
+        def apply() -> int:
+            count = len(self._live)
+            if count:
+                self._park(self._sim.model, self._sim.data, list(self._live))
+            return count
+
+        return self._sim.run(apply)
 
 
 def encode_depth(depth_m: np.ndarray) -> bytes:

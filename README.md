@@ -23,7 +23,11 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
-| [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props to the Viam app's 3D scene viewer. |
+| [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props, parcels, and the conveyor and scale shapes to the Viam app's 3D scene viewer. |
+| [`viam-labs:mujoco-sim:conveyor`](#model-viam-labsmujoco-simconveyor) | `motor` | A belt conveyor that carries parcels by friction. |
+| [`viam-labs:mujoco-sim:spawner`](#model-viam-labsmujoco-simspawner) | `sensor` | Feeds box parcels of random classes onto a conveyor; `box-detect` compatible. |
+| [`viam-labs:mujoco-sim:photo_eye`](#model-viam-labsmujoco-simphoto_eye) | `sensor` | A through-beam photo-eye that counts what passes. |
+| [`viam-labs:mujoco-sim:scale`](#model-viam-labsmujoco-simscale) | `sensor` | A platform scale. |
 
 ## Getting started
 
@@ -51,7 +55,9 @@ rover cell: a rover with a LIDAR inside a walled pen, and
 nav-stack for SLAM and navigation in it (see
 [Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)).
 [`examples/depalletize.json`](examples/depalletize.json) is a suction
-de-palletizing cell (see [De-palletizing](#de-palletizing)). With an
+de-palletizing cell (see [De-palletizing](#de-palletizing)), and
+[`examples/parcel-sort.json`](examples/parcel-sort.json) a parcel-sorting cell
+with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)). With an
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
@@ -90,6 +96,7 @@ viam-server starts it first. Sim time is paced to wall time by default.
 | `physics_dt` | float | No | `0.002` | Physics step in seconds. |
 | `real_time` | bool | No | `true` | Pace sim time to wall time. `false` steps as fast as possible. |
 | `props` | list | No | `[]` | Movable objects in the scene; see below. |
+| `import_geometry` | list | No | `[]` | Names of components, of any module, whose geometry becomes fixed and physical; see [Importing geometry from other modules](#importing-geometry-from-other-modules). |
 
 Each prop:
 
@@ -120,6 +127,7 @@ Props are invisible to Viam's motion planner. For fixed scene geometry the plann
 | `set_prop_pose` | `prop`, `position`, `orientation_wxyz` | `{prop, position, orientation_wxyz}`; zeroes the prop's velocity. |
 | `get_prop_pose` | `prop` | `{prop, pose: {position, orientation_wxyz}}` |
 | `park_props` | `props`: list of names | `{poses: {name: {position, orientation_wxyz}}}`; returns props to their spawn poses. |
+| `reimport` | | `{imported, from_frame, missing}`: runs `import_geometry` again, replacing the last import. `from_frame` names the imported components whose geometry came from their frame config rather than `GetGeometries`. |
 
 `real_time_factor` is sim seconds per wall second over the last two seconds.
 `slips` counts how often the sim fell more than 100 ms behind wall time and
@@ -129,6 +137,75 @@ re-anchored. `warnings` holds MuJoCo's warning counts, such as
 ```json
 {"command": "set_prop_pose", "prop": "pick_block", "position": [0.3, 0.05, 0.02], "orientation_wxyz": [1, 0, 0, 0]}
 ```
+
+### Importing geometry from other modules
+
+`import_geometry` lists components, of any module, whose geometry becomes fixed
+and physical in the scene, so props and parcels rest on a
+[`viam:workcell-components`](https://app.viam.com/module/viam/workcell-components)
+pallet or bounce off a [`viam:obstacle-pack`](https://app.viam.com/module/viam/obstacle-pack)
+obstacle:
+
+```json
+"attributes": { "import_geometry": ["pallet", "fence"] }
+```
+
+After the world starts, it asks viam-server for each component's geometries
+(`GetGeometries`) and its pose in the frame system, and adds every box, sphere
+and capsule as a fixed geom named `import/<component>/<label or index>`.
+They are not dependencies: viam-server would otherwise rebuild the world, and
+reset the sim, whenever one of them changed. A component that isn't there yet
+(or a lost connection) is retried every 2 s for 60 s, then logged as an error.
+mujoco-sim's own components (already in the scene) are skipped. Run `reimport`
+after editing an imported component.
+
+When a component doesn't implement `GetGeometries`, or returns no box, sphere
+or capsule, the import falls back to the `geometry` in that component's
+`frame` config, read from the machine's frame system and placed through the
+frame's parent and pose, the same as the motion planner does. So the sim
+matches what the motion planner sees. Many `viam:workcell-components` models
+(`pallet`, `floor-decal`, ...) don't implement `GetGeometries`, and RDK never
+asks a motor or sensor for its geometries either, so give those a frame
+`geometry`:
+
+```json
+{
+  "name": "pallet",
+  "api": "rdk:component:generic",
+  "model": "viam:workcell-components:pallet",
+  "attributes": {},
+  "frame": {
+    "parent": "world",
+    "translation": { "x": 900, "y": 0, "z": 0 },
+    "geometry": {
+      "type": "box",
+      "x": 1200, "y": 800, "z": 144,
+      "translation": { "x": 0, "y": 0, "z": 72 }
+    }
+  }
+}
+```
+
+The geometry's `translation` is its centre in the component's frame: here the
+box sits on the floor. A component with neither (no geometries, no frame
+geometry) is logged once, right away, as a warning and skipped, with no retry:
+
+```
+import_geometry: pallet has no box, sphere or capsule geometry, from GetGeometries or its frame; skipped. Add a box, sphere or capsule geometry to its frame if it should be an obstacle
+```
+
+Which `viam:workcell-components` and `viam:obstacle-pack` parts become physical:
+
+| Part | Imported |
+|---|---|
+| `workcell-components` `pallet`, `floor-decal` and other models without `GetGeometries` | Only with a frame `geometry` (otherwise a warning). |
+| `workcell-components` models that report geometries | Yes. |
+| `obstacle-pack` `obstacle` | Yes. |
+| `obstacle-pack` `obstacle-from-mesh` | No: meshes aren't imported (warning). Use a mujoco-sim [obstacle](#model-viam-labsmujoco-simobstacle) with the mesh instead. |
+| Anything whose shape is only in its `frame.geometry` config | Yes, from the frame. |
+
+The import is a snapshot: moving a component later doesn't move its geoms
+until `reimport`.
 
 ## Model viam-labs:mujoco-sim:arm
 
@@ -835,10 +912,14 @@ flange:
 
 ## Model viam-labs:mujoco-sim:world_state
 
-A world state store that publishes every movable (non-fixed) prop with its
-live pose and shape, so props show up and move in the Viam app's 3D scene
-viewer. Obstacles, arms and bases already appear through the frame system. The
-world state store doesn't feed the motion service.
+A world state store that publishes every movable (non-fixed) prop and every
+live [spawner](#model-viam-labsmujoco-simspawner) parcel with its live pose
+and shape, so they show up and move in the Viam app's 3D scene viewer. It also
+publishes the exact shapes of every [conveyor](#model-viam-labsmujoco-simconveyor)
+(body and rails) and [scale](#model-viam-labsmujoco-simscale) platform: RDK
+never asks a motor or sensor for its geometries, so they can't reach the viewer
+through the frame system. Obstacles, arms and bases already appear through the
+frame system. The world state store doesn't feed the motion service.
 
 ### Configuration
 
@@ -861,11 +942,262 @@ world state store doesn't feed the motion service.
 
 | Method | Notes |
 |---|---|
-| `ListUUIDs` | One per movable prop, stable across restarts. |
-| `GetTransform` | The prop's pose in `world` (mm, degrees), its shape and `metadata.color` (0–255). |
-| `StreamTransformChanges` | An ADDED event per prop, then UPDATED events for props that moved more than 1 mm or 0.5°, checked every 0.1 s. |
+| `ListUUIDs` | One per movable prop and per conveyor or scale box, stable across restarts, and one per live parcel, new on every spawn. |
+| `GetTransform` | The pose in `world` (mm, degrees) of the prop, the parcel or the conveyor or scale box's centre, its shape and `metadata.color` (0–255). |
+| `StreamTransformChanges` | An ADDED event per prop and parcel, then, checked every 0.1 s, UPDATED events for those that moved more than 1 mm or 0.5°, ADDED for new parcels, conveyors and scales, and REMOVED for parcels back in their pool and conveyors and scales closed or removed. |
 
 Cylinder props are sent as meshes, since the geometry API has no cylinder.
+
+## Model viam-labs:mujoco-sim:conveyor
+
+A belt conveyor, served as a motor. Parcels ride on the belt by friction, so
+they speed up, slip, pile up against an obstacle and collide as they would on a
+real belt.
+
+### Configuration
+
+```json
+{
+  "name": "belt",
+  "api": "rdk:component:motor",
+  "model": "viam-labs:mujoco-sim:conveyor",
+  "frame": {
+    "parent": "world",
+    "translation": { "x": 600, "y": 0, "z": 450 },
+    "geometry": { "type": "box", "x": 400, "y": 2000, "z": 450, "translation": { "x": 0, "y": 0, "z": -225 } }
+  },
+  "attributes": { "world": "sim-world", "length_m": 2.0, "width_m": 0.4 }
+}
+```
+
+The frame is required, with parent `world`: it is the centre of the belt's top
+surface, so `translation.z` is the belt's height. +Y is the direction of travel
+at positive power. The infeed is the belt's −Y end and the outfeed its +Y end.
+Legs reach down to the floor.
+
+Give the frame a `geometry` box, or Viam's motion planner can't see the
+conveyor: RDK (checked on v1.15) asks only arms, bases, cameras, gantries,
+generics and grippers for their geometries, never a motor, so the conveyor's
+`GetGeometries` is never called. The box runs from the floor to the belt's
+top: `width_m` × `length_m` × the frame's `z`, in mm, centred `z`/2 below the
+frame. Leave the rails out of it: a box up to the rail tops would enclose the
+parcels on the belt, and every lift would start in collision. When the frame
+has no geometry the module logs the one to paste. The Viam app's 3D scene
+shows the exact shapes, rails included, through the
+[world state store](#model-viam-labsmujoco-simworld_state).
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `length_m` | float | Yes | | Belt length, along +Y. |
+| `width_m` | float | Yes | | Belt width. |
+| `roller_diameter_m` | float | No | `0.05` | Converts RPM to belt speed: RPM × π × diameter / 60 m/s. |
+| `max_speed_mps` | float | No | `0.5` | Belt speed at power 1, and the cap for `SetRPM` and `GoFor`. |
+| `friction` | float | No | `1.0` | The belt's sliding friction; it wins over the parcels'. |
+| `rails_m` | float | No | `0.04` | Side-rail height above the belt; `0` for none. |
+| `color` | [r, g, b] | No | `[0.25, 0.27, 0.3]` | The frame's colour, 0 to 1. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `SetPower` | Belt speed = power × `max_speed_mps`, until told otherwise. |
+| `SetRPM` | Runs at that speed until told otherwise. |
+| `GoFor` | Runs until the belt has travelled that many roller revolutions (π × diameter each), then stops; returns when done. The sign of RPM × revolutions picks the direction. |
+| `GoTo` | `GoFor` the difference from the current position. |
+| `GetPosition` | Belt travel in roller revolutions since the last `ResetZeroPosition`. |
+| `ResetZeroPosition` | As RDK's encoded motors: the position reads −offset afterwards. |
+| `Stop`, `IsPowered`, `IsMoving`, `GetProperties` | `IsPowered` reports the commanded speed as a fraction of `max_speed_mps`; `position_reporting` is true. |
+| `GetGeometries` | A box from the floor to the belt's top, and a box per rail, in the conveyor's frame. viam-server never calls it on a motor; the world state store publishes these boxes. |
+
+Speed changes ramp at 2 m/s², so parcels aren't flung. `Stop`, a new command, a
+world `reset` or a reconfigure ends a `GoFor`/`GoTo` with an error. A world
+`reset` stops the belt and zeroes its position.
+
+The belt is a thin box on a slide joint, 5 cm longer than the conveyor; each
+time it passes 5 cm it shifts back by 5 cm, so it can run forever. It overhangs
+each end by up to 5 cm, outside the planner's box. It touches only props and
+parcels: static geometry can't stall it, and arms meet the frame under it instead. A parcel held still on
+a moving belt (against a stop, say) stays within about 0.6 mm, and a held pile
+slows the belt slightly.
+
+## Model viam-labs:mujoco-sim:spawner
+
+Feeds box parcels onto a conveyor, served as a sensor. It also answers
+[`viam:workcell-components`](https://app.viam.com/module/viam/workcell-components)
+`box-detect`'s readings and commands, so code written for that infeed runs here.
+
+### Configuration
+
+```json
+{
+  "name": "feed",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:spawner",
+  "attributes": {
+    "world": "sim-world",
+    "conveyor": "belt",
+    "interval_s": 5,
+    "classes": [
+      { "name": "small", "weight": 2, "size_m": [0.1, 0.15], "mass_kg": [0.4, 0.8] },
+      {
+        "name": "large",
+        "size_m": [[0.22, 0.3], [0.18, 0.24], [0.14, 0.2]],
+        "mass_kg": [2.5, 3.0],
+        "color": { "min": [0.55, 0.4, 0.25], "max": [0.8, 0.62, 0.42] }
+      }
+    ],
+    "despawn": [{ "center": [0.6, 1.5, 0.25], "size": [1.0, 1.0, 0.5] }]
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `conveyor` | string | Yes | | The `viam-labs:mujoco-sim:conveyor` it feeds. |
+| `classes` | list | Yes | | Parcel classes, at least one; see below. |
+| `interval_s` | float | No | `4` | Sim seconds between parcels. |
+| `pool_size` | int | No | `12` | The most parcels live at once. |
+| `seed` | int | No | random | The same seed gives the same parcels, again after a world `reset`. |
+| `start_paused` | bool | No | `false` | Wait for `resume`. |
+| `despawn` | list | No | `[]` | Boxes in world coordinates, `{"center": [x, y, z], "size": [x, y, z]}` in meters, such as a chute past the outfeed. A parcel whose centre enters one returns to the pool, as does one that falls below z = −0.5 m. |
+
+Each class:
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `name` | string | Yes | | Reported as the parcel's `class`. |
+| `weight` | float | No | `1` | Relative chance of this class. |
+| `size_m` | [low, high] or [[low, high] × 3] | Yes | | Box size in meters: one range for every side, or one per axis (x across the belt, y along it, z up). |
+| `mass_kg` | [low, high] | Yes | | Mass range. |
+| `color` | [r, g, b] or `{"min": [r, g, b], "max": [r, g, b]}` | No | `[0.6, 0.45, 0.3]` | A colour, or a range per channel. |
+| `friction` | float | No | `1` | Sliding friction. |
+
+Every `interval_s` of sim time (unless paused) the spawner picks a class by
+weight, draws the parcel's size, mass and colour from its ranges, and puts it at
+rest on the conveyor's infeed spot: at the −Y end, centred across the belt,
+turned up to 10°. While a parcel is on the spot the spawn waits. A class whose
+largest parcel is as wide as the belt (between the rails) or runs past the
+belt's far end from the spot is never spawned: the spawner logs an error naming
+the class and both sizes, once, and skips it. With every
+parcel of the pool live (on the belt, in a bin, on the scale or in the gripper)
+the spawn is skipped and `pool_exhausted` is true. Spawning doesn't rebuild the
+scene: the pool's bodies are built once, parked below the floor, out of sight
+of cameras and rays, and resized in place. A parked parcel never collides.
+
+Live parcels keep their pose, size and mass across config edits of other
+components. Reconfiguring the world, the conveyor or the spawner rebuilds the
+spawner, which returns them all to the pool. A world `reset` does too, and restarts the timer and the random stream.
+Parcels appear in the [world state store](#model-viam-labsmujoco-simworld_state).
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | `spawned` (since the last reset), `active` (live parcels), `paused`, `pool_exhausted`, `seconds_until_next`; and `box-detect`'s `enabled` (not paused), `box_present` (a parcel on the infeed spot) and `interval_seconds`. |
+
+### DoCommand
+
+| Command | Returns |
+|---|---|
+| `{"command": "spawn"}` | `{"spawned": name}` now, whatever the timer says; or `{"spawned": null, "reason": "infeed occupied" \| "pool exhausted" \| "class <name> does not fit the conveyor"}`. `"force": true` spawns onto an occupied spot. |
+| `{"command": "pause"}` / `{"command": "resume"}` | `{"paused": bool}` |
+| `{"command": "clear"}` | `{"cleared": n}`: every live parcel back to the pool. |
+| `{"command": "get_parcels"}` | `{"parcels": [{name, class, pose: {position, orientation_wxyz}, size, mass_kg}]}`: world pose in meters, full size in meters. |
+| `{"take": true}` | `{"taken": bool}`: `box-detect`'s; the parcel on the infeed spot returns to the pool. |
+| `{"reset": true}` | `box-detect`'s; spawns one now, as `spawn`. |
+
+## Model viam-labs:mujoco-sim:photo_eye
+
+A through-beam photo-eye, served as a sensor: one ray per physics step, so it
+counts every parcel that passes.
+
+### Configuration
+
+```json
+{
+  "name": "eye",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:photo_eye",
+  "frame": {
+    "parent": "belt",
+    "translation": { "x": -250, "y": -400, "z": 30 }
+  },
+  "attributes": { "world": "sim-world", "range_m": 0.5 }
+}
+```
+
+The beam starts at the frame's origin and runs along its +X. The frame's
+`parent` is `world` or another mujoco-sim component, and the eye never sees its
+parent or anything attached below it. To look across a conveyor, frame it on the
+conveyor, as above: the beam then passes through the belt's rails and the belt.
+An eye framed on the world would see the rail.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `range_m` | float | No | `2` | Beam length. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | `blocked` (something within range), `distance_m` (to the hit, or `range_m`), `count` (times the beam became blocked since configure or reset). |
+| `DoCommand` | `{"command": "reset"}` zeroes `count`; so does a world `reset`. |
+
+## Model viam-labs:mujoco-sim:scale
+
+A platform scale, served as a sensor. It weighs what presses on the platform:
+the normal contact forces, filtered.
+
+### Configuration
+
+```json
+{
+  "name": "scale",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:scale",
+  "frame": {
+    "parent": "world",
+    "translation": { "x": 0, "y": 550, "z": 450 },
+    "geometry": { "type": "box", "x": 350, "y": 350, "z": 450, "translation": { "x": 0, "y": 0, "z": -225 } }
+  },
+  "attributes": { "world": "sim-world", "size_m": [0.35, 0.35, 0.45] }
+}
+```
+
+The frame, parent `world`, is the centre of the platform's top face; the
+platform is a box of `size_m` below it.
+
+Give the frame that box as its `geometry` (`size_m` in mm, centred half its
+height below the frame), or Viam's motion planner can't see the scale: RDK
+never asks a sensor for its geometries, so the scale's `GetGeometries` is never
+called. When the frame has no geometry the module logs the one to paste. The
+Viam app's 3D scene shows the platform through the
+[world state store](#model-viam-labsmujoco-simworld_state).
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `size_m` | [x, y, z] | Yes | | The platform box, meters. |
+| `color` | [r, g, b] | No | `[0.6, 0.6, 0.62]` | 0 to 1. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | `weight_kg` (minus the tare) and `stable` (the weight moved less than 5 g over the last 0.3 s). The weight is filtered with a 0.1 s time constant, so a parcel reads stable about a second after it lands. |
+| `DoCommand` | `{"command": "tare"}` sets the tare to the current weight and returns `{"tare_kg"}`. A world `reset` restarts the filter and keeps the tare. |
+| `GetGeometries` | The platform box. viam-server never calls it on a sensor; the world state store publishes it. |
 
 ## Bring your own robot
 
@@ -1004,6 +1336,42 @@ The box hangs below the tool point, just clear of the gripper's own planner
 box, and is a few millimetres shorter than the carton so it doesn't touch the
 surface the carton sat on. Use the same pattern for any object a gripper
 carries.
+
+## Parcel sorting
+
+[`examples/parcel-sort.json`](examples/parcel-sort.json) is a sorting cell: a
+UR5e with a Robotiq ePick on a 400 mm pedestal; a 2 m conveyor along +Y in
+front of it; a spawner feeding small (0.4–0.8 kg), medium (1.2–1.8 kg) and
+large (2.5–3 kg) parcels, whose sizes overlap and whose colours share one
+range, so neither tells them apart; a photo-eye across the belt; a scale beside
+it; and a light and a heavy bin (the bundled bin mesh, scaled up). Parcels that
+reach the outfeed drop into a despawn chute.
+
+The `belt` and `scale` frames carry `geometry` boxes, so the motion planner
+keeps the arm off them: the belt's runs from the floor to the belt's top (not
+the rail tops, which would enclose the parcels riding on it), the scale's
+covers its platform. RDK never asks a motor or sensor for its shape, so without
+these boxes the planner would route straight through both. The `world-state`
+service shows their exact shapes, the belt's rails included, in the 3D scene.
+
+[`examples/parcel_sort.py`](examples/parcel_sort.py) sorts them:
+
+```sh
+uv run python examples/parcel_sort.py <machine address> <api key id> <api key> [parcels]
+```
+
+For each parcel (10 by default) it runs the belt until the photo-eye's `count`
+goes up, stops it, and finds the leading parcel with the spawner's
+`get_parcels`. It picks the parcel by suction, sets it on the scale, waits for
+`stable`, reads `weight_kg`, picks it again and drops it in the light (under
+1 kg) or heavy bin. Binned parcels never despawn, so it lets go over the
+quarter of the bin with the lowest pile, high enough to clear it. Every move
+plans around the other parcels on the belt and in the bin, passed to the
+motion service as obstacles, and carries a held parcel as a transform on the
+gripper, sized from `get_parcels`, as in [De-palletizing](#de-palletizing).
+Moves that carry a parcel add an `OrientationConstraint` (5°), so the cup
+stays pointing down along the whole path, not only at its ends. At the end it reads `get_parcels` again and
+reports any parcel that isn't in its right bin.
 
 ## Mobile base, SLAM and navigation
 
@@ -1150,6 +1518,9 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
   that depends on it. A move in flight fails with
   `arm '<name>' was closed (removed or reconfigured)`. Leave the config alone
   during a run.
+- **Parcels and props are invisible to the planner.** Pass the ones that matter
+  to `motion.move` as `WorldState` obstacles, read with `get_parcels` or
+  `get_prop_pose`, as `parcel_sort.py` and `depalletize.py` do.
 - **Fixed props and obstacles never move.** `set_prop_pose` and `park_props`
   reject them, and `reset` leaves them where they are. Non-fixed props keep
   their pose across world edits; use `park_props` or `reset`.

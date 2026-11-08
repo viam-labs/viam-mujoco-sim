@@ -26,6 +26,7 @@ from typing import Any
 import mujoco
 import numpy as np
 from viam.logging import getLogger
+from viam.proto.common import Geometry
 
 from .meshes import MeshSource, Piece, add_pieces, parse_mesh
 from .shapes import GEOM_TYPES, mj_size, prop_shape
@@ -71,6 +72,12 @@ RTF_WINDOW_S = 2.0
 # prop's into a soft contact and the jaws sink ~9 mm into a block.
 PROP_CONTACT_PRIORITY = 1
 PROP_SOLREF = (0.004, 1.0)
+# Collision bits. Every geom collides on bit 1, MuJoCo's default. A conveyor
+# belt takes only bit 2, which free bodies (movable props, parcels) add, so
+# the belt never touches the static geoms around it: they are welded to the
+# world, so no parent filter keeps them apart, and a touching one stalls it.
+FREE_CONTYPE = 3
+BELT_CONAFFINITY = 2
 
 _FREE = int(mujoco.mjtJoint.mjJNT_FREE)
 _BALL = int(mujoco.mjtJoint.mjJNT_BALL)
@@ -195,6 +202,27 @@ class WorldConfig:
         )
 
 
+@dataclass(frozen=True)
+class DynamicProp:
+    """A box a component adds and removes without a rebuild (a spawner's
+    parcel), for the world state store. serial is new on every spawn."""
+
+    serial: int
+    half_size: tuple[float, float, float]
+    color: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class StaticShape:
+    """A component's fixed shapes, for the world state store: RDK never asks a
+    motor or sensor for its geometries, so the 3D scene can't get them from
+    the frame system. geometries are in mm, in body's frame."""
+
+    body: str
+    geometries: tuple[Geometry, ...]
+    color: tuple[float, ...]
+
+
 @dataclass
 class Contribution:
     """What one component adds to the scene. build edits a fresh spec on every
@@ -263,6 +291,9 @@ class SimManager:
         self._contributions: dict[str, Contribution] = {}
         self.step_callbacks: dict[str, Callable[[float], None]] = {}
         self.arms: dict[str, Any] = {}  # ArmHandle by component name, for its gripper
+        self.conveyors: dict[str, Any] = {}  # ConveyorHandle by component name, for its spawner
+        self.dynamic_props: dict[str, DynamicProp] = {}  # live ones, by body name
+        self.static_shapes: dict[str, StaticShape] = {}  # by component name
         self.playing = True
         self.slips = 0
         self._anchor_wall = 0.0
@@ -378,6 +409,10 @@ class SimManager:
 
         self.run(apply)
 
+    def contributes(self, name: str) -> bool:
+        """Whether a component of this module named `name` is in the scene."""
+        return name in self._contributions
+
     def remove_contribution(self, name: str) -> None:
         def remove() -> None:
             old = self._contributions.pop(name, None)
@@ -421,6 +456,8 @@ class SimManager:
                 "priority": PROP_CONTACT_PRIORITY,
                 "solref": list(PROP_SOLREF),
             }
+            if not prop.fixed:
+                contact["contype"] = FREE_CONTYPE
             if prop.mesh is not None:
                 add_pieces(spec, body, prop.name, self.prop_pieces[prop.name], mass=prop.mass, **contact)
                 continue
