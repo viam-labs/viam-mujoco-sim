@@ -50,7 +50,7 @@
     {
       "model": "viam-labs:mujoco-sim:obstacle",
       "api": "rdk:component:generic",
-      "short_description": "A fixed box, sphere or capsule the motion planner also sees",
+      "short_description": "Fixed geometry (box, sphere, capsule or mesh) shared by MuJoCo and the motion planner",
       "markdown_link": "README.md#model-viam-labsmujoco-simobstacle"
     },
     {

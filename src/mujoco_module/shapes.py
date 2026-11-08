@@ -71,7 +71,7 @@ def geometry_shape(geometry: Geometry) -> Shape:
             return "sphere", (radius / 1000.0,)
         return "capsule", (radius / 1000.0, (length - 2 * radius) / 2000.0)
     if which == "mesh":
-        raise ValueError("mesh obstacles aren't supported yet; use a box, sphere or capsule")
+        raise ValueError("a mesh frame.geometry isn't supported; set the mesh attribute instead")
     raise ValueError("set frame.geometry to a box, sphere or capsule")
 
 

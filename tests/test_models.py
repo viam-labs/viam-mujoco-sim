@@ -508,18 +508,16 @@ def test_example_obstacles_validate(example):
     for item in obstacles:
         component = config(item["name"], item["attributes"])
         frame = item["frame"]
-        g = frame["geometry"]
-        shapes = {
-            "box": {"box": {"dims_mm": {"x": g.get("x"), "y": g.get("y"), "z": g.get("z")}}},
-            "sphere": {"sphere": {"radius_mm": g.get("r")}},
-            "capsule": {"capsule": {"radius_mm": g.get("r"), "length_mm": g.get("l")}},
-        }
-        geometry = dict(shapes[g["type"]])
-        if "translation" in g:
-            geometry["center"] = {**g["translation"], "o_z": 1}
-        component.frame.CopyFrom(ParseDict({
-            "parent": frame["parent"],
-            "translation": frame["translation"],
-            "geometry": geometry,
-        }, Frame()))
+        parsed = {"parent": frame["parent"], "translation": frame["translation"]}
+        if "geometry" in frame:  # mesh obstacles have none
+            g = frame["geometry"]
+            shapes = {
+                "box": {"box": {"dims_mm": {"x": g.get("x"), "y": g.get("y"), "z": g.get("z")}}},
+                "sphere": {"sphere": {"radius_mm": g.get("r")}},
+                "capsule": {"capsule": {"radius_mm": g.get("r"), "length_mm": g.get("l")}},
+            }
+            parsed["geometry"] = dict(shapes[g["type"]])
+            if "translation" in g:
+                parsed["geometry"]["center"] = {**g["translation"], "o_z": 1}
+        component.frame.CopyFrom(ParseDict(parsed, Frame()))
         assert MujocoObstacle.validate_config(component) == ([world["name"]], [])

@@ -9,6 +9,7 @@ from viam.utils import dict_to_struct
 from mujoco_module.handles import BaseHandle
 from mujoco_module.models.obstacle import MujocoObstacle, obstacle_contribution
 from test_base import finish, pose
+from test_meshes import box_piece
 
 
 def config(geometry=None, parent="world", attrs=None, translation=(0, 0, 0), yaw_deg=None, frame=True):
@@ -81,11 +82,16 @@ def test_rover_stalls_against_an_obstacle_and_reset_leaves_it(sim):
 @pytest.mark.parametrize("cfg,message", [
     (config(BOX, frame=False), "frame"),
     (config(BOX, parent="pick-arm"), "frame.parent must be"),
-    (config(None), "set frame.geometry to a box, sphere or capsule"),
-    (config(Geometry(mesh=Mesh(content_type="stl", mesh=b"x"))), "mesh obstacles aren't supported yet"),
+    (config(None), "set frame.geometry to a box, sphere or capsule, or set mesh"),
+    (config(Geometry(mesh=Mesh(content_type="stl", mesh=b"x"))), "set the mesh attribute instead"),
     (config(Geometry(box=RectangularPrism(dims_mm=Vector3(x=0, y=1, z=1)))), "must be positive"),
     (config(BOX, attrs={"color": [1, 0]}), "color"),
     (config(BOX, attrs={"static_friction": -1}), "static_friction"),
+    (config(BOX, attrs={"mesh": "/a.stl"}), "not both"),
+    (config(BOX, attrs={"scale": 2}), "only apply with mesh"),
+    (config(None, attrs={"mesh": "/a.step"}), r"\.stl, \.obj or \.ply"),
+    (config(None, attrs={"mesh": "/a.stl", "threshold": 0}), "threshold"),
+    (config(None, attrs={"mesh": "/a.stl", "scale": -1}), "scale"),
 ])
 def test_validate_rejects(cfg, message):
     with pytest.raises(ValueError, match=message):
@@ -107,3 +113,46 @@ def test_validate_and_geometries(running_sim):
         asyncio.run(obstacle.close())
     assert running_sim.run(lambda: mujoco.mj_name2id(
         running_sim.model, mujoco.mjtObj.mjOBJ_GEOM, "table/obstacle")) == -1
+
+
+def test_mesh_obstacle_builds_one_geom_per_piece_at_the_frame(sim):
+    pieces = [box_piece((0.1, 0.1, 0.1)), box_piece((0.1, 0.1, 0.1), (0.2, 0, 0))]
+    cfg = config(None, attrs={"mesh": "/unused.stl"}, translation=(400, 0, 300), yaw_deg=90)
+    sim.set_contribution("table", obstacle_contribution(cfg, pieces))
+    assert sim.model.geom("table/obstacle/0").type[0] == mujoco.mjtGeom.mjGEOM_MESH
+    assert sim.model.body("table/obstacle").jntnum[0] == 0
+    # piece 1 sits 0.2 m along the frame's X, which is world +Y after the yaw
+    assert sim.data.geom("table/obstacle/1").xpos == pytest.approx([0.4, 0.2, 0.3], abs=1e-6)
+
+
+def test_a_box_dropped_into_a_u_obstacle_rests_inside_it(sim, u_pieces):
+    cfg = config(None, attrs={"mesh": "/unused.stl"}, translation=(0, 0, 0))
+    sim.set_contribution("table", obstacle_contribution(cfg, u_pieces))
+    sim.set_prop_pose("pick_block", [0, 0, 0.2], [1, 0, 0, 0])
+    sim.advance(1.5)
+    # inside: on the 5 mm floor (block half height ~16 mm), well below the 80 mm rim;
+    # a single hull would leave it resting on top at ~96 mm
+    assert sim.data.body("pick_block").xpos[2] < 0.05
+
+
+def test_mesh_obstacle_geometries_are_its_pieces(running_sim, u_pieces, monkeypatch):
+    from mujoco_module.models import obstacle as obstacle_module
+    from mujoco_module.models.world import MujocoWorld
+
+    monkeypatch.setattr(obstacle_module, "load_pieces", lambda label, mesh: u_pieces)
+    MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({"real_time": False})), {})
+    cfg = config(None, attrs={"mesh": "/unused.stl"}, translation=(400, 0, 0))
+    assert MujocoObstacle.validate_config(cfg) == (["sim-world"], [])
+    obstacle = MujocoObstacle.new(cfg, {})
+    try:
+        geometries = asyncio.run(obstacle.get_geometries())
+        assert len(geometries) >= 2
+        assert [g.label for g in geometries] == [f"piece{i}" for i in range(len(geometries))]
+        assert all(g.mesh.content_type == "ply" for g in geometries)
+        assert geometries[0].mesh.mesh.startswith(b"ply\nformat ascii 1.0\n")
+        count = running_sim.run(lambda: sum(
+            running_sim.model.geom(i).name.startswith("table/obstacle/")
+            for i in range(running_sim.model.ngeom)))
+        assert count == len(geometries)
+    finally:
+        asyncio.run(obstacle.close())

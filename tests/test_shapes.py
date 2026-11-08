@@ -42,7 +42,7 @@ def test_geometry_shape_converts_viam_geometry_mm_to_mujoco_m():
 
 @pytest.mark.parametrize("geometry,message", [
     (Geometry(), "set frame.geometry to a box, sphere or capsule"),
-    (Geometry(mesh=Mesh(content_type="stl", mesh=b"x")), "mesh obstacles aren't supported yet"),
+    (Geometry(mesh=Mesh(content_type="stl", mesh=b"x")), "set the mesh attribute instead"),
     (Geometry(box=RectangularPrism(dims_mm=Vector3(x=1, y=0, z=1))), "must be positive"),
     (Geometry(sphere=Sphere(radius_mm=float("nan"))), "must be positive"),
     (Geometry(capsule=Capsule(radius_mm=50, length_mm=60)), "at least twice its radius"),

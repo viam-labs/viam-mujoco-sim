@@ -30,6 +30,7 @@ from viam.spatialmath import Quaternion
 from viam.utils import dict_to_struct, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
+from ..meshes import Piece, mesh_geometry
 from ..shapes import viewer_geometry
 from ..sim import PropSpec, SimManager
 
@@ -38,7 +39,9 @@ MOVE_MM = 1.0
 TURN_DEG = 0.5
 
 # (prop, pose in mm and degrees, quaternion (w, x, y, z))
-_Snapshot = list[tuple[PropSpec, Pose, tuple[float, float, float, float]]]
+_Snapshot = list[
+    tuple[PropSpec, Pose, tuple[float, float, float, float], list[Piece] | None]
+]
 
 
 _State = tuple[Pose, tuple[float, float, float, float]]
@@ -103,29 +106,34 @@ class MujocoWorldState(WorldStateStore, EasyResource):
                 body = sim.data.body(prop.name)
                 quat = tuple(float(v) for v in body.xquat)
                 x, y, z = (float(v) * 1000.0 for v in body.xpos)
-                out.append((prop, Quaternion(*quat).to_pose(x, y, z), quat))
+                pieces = sim.prop_pieces[prop.name] if prop.mesh is not None else None
+                out.append((prop, Quaternion(*quat).to_pose(x, y, z), quat, pieces))
             return out
 
         return sim.run(read)
 
-    def _transform(self, prop: PropSpec, pose: Pose) -> Transform:
+    def _transform(self, prop: PropSpec, pose: Pose, pieces: list[Piece] | None) -> Transform:
         r, g, b = (round(c * 255) for c in prop.color)
         return Transform(
             reference_frame=prop.name,
             pose_in_observer_frame=PoseInFrame(reference_frame="world", pose=pose),
-            physical_object=viewer_geometry(prop.shape, prop.geom_size, prop.name),
+            physical_object=(
+                mesh_geometry(pieces, prop.name)
+                if pieces is not None
+                else viewer_geometry(prop.shape, prop.geom_size, prop.name)
+            ),
             uuid=self._uuid(prop.name),
             metadata=dict_to_struct({"color": {"r": r, "g": g, "b": b}}),
         )
 
     async def list_uuids(self, **kwargs: Any) -> list[bytes]:
         snapshot = await asyncio.to_thread(self._snapshot)
-        return [self._uuid(prop.name) for prop, _, _ in snapshot]
+        return [self._uuid(prop.name) for prop, *_ in snapshot]
 
     async def get_transform(self, uuid: bytes, **kwargs: Any) -> Transform:
-        for prop, pose, _ in await asyncio.to_thread(self._snapshot):
+        for prop, pose, _, pieces in await asyncio.to_thread(self._snapshot):
             if self._uuid(prop.name) == uuid:
-                return self._transform(prop, pose)
+                return self._transform(prop, pose, pieces)
         raise ValueError(f"unknown transform uuid {uuid!r}")
 
     async def stream_transform_changes(
@@ -137,17 +145,17 @@ class MujocoWorldState(WorldStateStore, EasyResource):
         # server sends an empty one first; do the same or the first ADDED is lost.
         yield StreamTransformChangesResponse()
         last: dict[str, _State] = {}
-        for prop, pose, quat in await asyncio.to_thread(self._snapshot):
+        for prop, pose, quat, pieces in await asyncio.to_thread(self._snapshot):
             last[prop.name] = (pose, quat)
             yield StreamTransformChangesResponse(
                 change_type=TransformChangeType.TRANSFORM_CHANGE_TYPE_ADDED,
-                transform=self._transform(prop, pose),
+                transform=self._transform(prop, pose, pieces),
             )
         while not self._closed:
             await asyncio.sleep(UPDATE_PERIOD_S)
             if self._closed:
                 return
-            for prop, pose, quat in await asyncio.to_thread(self._snapshot):
+            for prop, pose, quat, pieces in await asyncio.to_thread(self._snapshot):
                 unseen = prop.name not in last
                 if not unseen and not _moved(last[prop.name], (pose, quat)):
                     continue
@@ -155,7 +163,7 @@ class MujocoWorldState(WorldStateStore, EasyResource):
                 if unseen:
                     yield StreamTransformChangesResponse(
                         change_type=TransformChangeType.TRANSFORM_CHANGE_TYPE_ADDED,
-                        transform=self._transform(prop, pose),
+                        transform=self._transform(prop, pose, pieces),
                     )
                     continue
                 yield StreamTransformChangesResponse(

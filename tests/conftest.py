@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 if sys.platform != "darwin":
     os.environ.setdefault("MUJOCO_GL", "osmesa")
 
+from mujoco_module.meshes import load_pieces, parse_mesh
 from mujoco_module.sim import SimManager, WorldConfig
 
 BLOCK = {
@@ -56,3 +57,11 @@ def running_sim(monkeypatch: pytest.MonkeyPatch) -> SimManager:
     yield manager
     manager.request_stop()
     thread.join(timeout=5)
+
+
+@pytest.fixture(scope="session")
+def u_pieces(tmp_path_factory):
+    """The bundled bin decomposed once for the session (CoACD takes seconds)."""
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("VIAM_MODULE_DATA", str(tmp_path_factory.mktemp("cache")))
+        return load_pieces("bin", parse_mesh("bin", "meshes/bin.stl"))

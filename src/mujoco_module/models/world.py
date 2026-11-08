@@ -4,10 +4,13 @@ Attributes:
   physics_dt (float)  - physics step in seconds (default 0.002)
   real_time (bool)    - pace sim time to wall time (default true)
   props (list)        - movable objects: {name, type: "cube" | "sphere" |
-                        "cylinder" | "capsule", size, scale, position,
+                        "cylinder" | "capsule" | "mesh", size, scale, position,
                         orientation_wxyz, mass, color, fixed, static_friction,
                         dynamic_friction (accepted, ignored)}. Each shape fills
-                        a box of size x scale.
+                        a box of size x scale. A mesh prop takes mesh (path,
+                        assets-relative path or https URL), scale and
+                        threshold, like the obstacle's; it's split into
+                        convex pieces.
 
 DoCommand: status, play, pause, reset, set_prop_pose, get_prop_pose,
 park_props. Shapes match the viam-labs:isaac-sim world.
@@ -26,6 +29,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
+from ..meshes import load_pieces
 from ..sim import SimManager, WorldConfig
 
 
@@ -51,7 +55,13 @@ class MujocoWorld(Generic, EasyResource):
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         cfg = WorldConfig.from_attrs(struct_to_dict(config.attributes))
-        SimManager.get().configure_world(cfg)
+        # slow the first time per mesh (CoACD), cached afterwards
+        pieces = {
+            prop.name: load_pieces(f"prop {prop.name}", prop.mesh)
+            for prop in cfg.props
+            if prop.mesh is not None
+        }
+        SimManager.get().configure_world(cfg, pieces)
 
     async def do_command(
         self,

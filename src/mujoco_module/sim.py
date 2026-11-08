@@ -22,18 +22,17 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 import mujoco
 import numpy as np
 from viam.logging import getLogger
 
+from .meshes import ASSETS_DIR, MeshSource, Piece, add_pieces, parse_mesh
 from .shapes import GEOM_TYPES, mj_size, prop_shape
 
 LOGGER = getLogger("viam-mujoco-sim")
 
-ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "lite6": {
@@ -126,6 +125,7 @@ class PropSpec:
     color: tuple[float, ...]
     fixed: bool
     friction: float
+    mesh: MeshSource | None = None  # set for type "mesh"; shape is "mesh", geom_size ()
 
     @classmethod
     def parse(cls, raw: Any) -> "PropSpec":
@@ -135,10 +135,23 @@ class PropSpec:
             raise ValueError(f"every prop needs a name: {raw!r}")
         name = str(raw["name"])
         size = _positive(raw.get("size", 0.05), f"prop {name}: size")
-        scale = _vector(raw.get("scale", [1, 1, 1]), 3, f"prop {name}: scale")
-        if any(item <= 0.0 for item in scale):
-            raise ValueError(f"prop {name}: scale must be positive")
-        shape, geom_size = prop_shape(name, str(raw.get("type", "cube")), size, scale)
+        kind = str(raw.get("type", "cube"))
+        mesh = None
+        if kind == "mesh":
+            if "mesh" not in raw:
+                raise ValueError(f"prop {name}: a mesh prop needs mesh, a file path or https URL")
+            mesh = parse_mesh(
+                f"prop {name}", raw["mesh"], raw.get("scale", 1), raw.get("threshold", 0.05)
+            )
+            shape, geom_size = "mesh", ()
+        else:
+            for key in ("mesh", "threshold"):
+                if key in raw:
+                    raise ValueError(f'prop {name}: {key} only applies to type "mesh"')
+            scale = _vector(raw.get("scale", [1, 1, 1]), 3, f"prop {name}: scale")
+            if any(item <= 0.0 for item in scale):
+                raise ValueError(f"prop {name}: scale must be positive")
+            shape, geom_size = prop_shape(name, kind, size, scale)
         friction = _finite(raw.get("static_friction", 1.0), f"prop {name}: static_friction")
         if friction < 0.0:
             raise ValueError(f"prop {name}: static_friction must be non-negative")
@@ -158,6 +171,7 @@ class PropSpec:
             color=_vector(raw.get("color", [0.7, 0.7, 0.7]), 3, f"prop {name}: color"),
             fixed=_strict_bool(raw.get("fixed", False), f"prop {name}: fixed"),
             friction=friction,
+            mesh=mesh,
         )
 
 
@@ -241,6 +255,7 @@ class SimManager:
         self._stopped = False
         self._sim_thread_id: int | None = None
         self.cfg: WorldConfig | None = None
+        self.prop_pieces: dict[str, list[Piece]] = {}
         self.model: mujoco.MjModel | None = None
         self.data: mujoco.MjData | None = None
         self.generation = 0
@@ -324,14 +339,22 @@ class SimManager:
                 '"world" attribute'
             )
 
-    def configure_world(self, cfg: WorldConfig) -> None:
+    def configure_world(
+        self, cfg: WorldConfig, pieces: Mapping[str, list[Piece]] | None = None
+    ) -> None:
+        """pieces: each mesh prop's convex pieces (meshes.load_pieces), by prop name."""
+        pieces = dict(pieces or {})
+        missing = [p.name for p in cfg.props if p.mesh is not None and p.name not in pieces]
+        if missing:
+            raise ValueError(f"mesh pieces not loaded for props {missing}")
+
         def configure() -> None:
-            old = self.cfg
-            self.cfg = cfg
+            old, old_pieces = self.cfg, self.prop_pieces
+            self.cfg, self.prop_pieces = cfg, pieces
             try:
                 self._rebuild(fresh=set())
             except BaseException:
-                self.cfg = old
+                self.cfg, self.prop_pieces = old, old_pieces
                 raise
 
         self.run(configure)
@@ -390,15 +413,21 @@ class SimManager:
             )
             if not prop.fixed:
                 body.add_freejoint(name=prop.name)
+            contact = {
+                "rgba": [*prop.color, 1.0],
+                "friction": [prop.friction, 0.005, 0.0001],
+                "priority": PROP_CONTACT_PRIORITY,
+                "solref": list(PROP_SOLREF),
+            }
+            if prop.mesh is not None:
+                add_pieces(spec, body, prop.name, self.prop_pieces[prop.name], mass=prop.mass, **contact)
+                continue
             body.add_geom(
                 name=prop.name,
                 type=GEOM_TYPES[prop.shape],
                 size=mj_size((prop.shape, prop.geom_size)),
                 mass=prop.mass,
-                rgba=[*prop.color, 1.0],
-                friction=[prop.friction, 0.005, 0.0001],
-                priority=PROP_CONTACT_PRIORITY,
-                solref=list(PROP_SOLREF),
+                **contact,
             )
         for contribution in sorted(self._contributions.values(), key=lambda c: c.late):
             contribution.build(spec)

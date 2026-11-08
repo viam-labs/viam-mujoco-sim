@@ -118,3 +118,22 @@ def test_resting_props_send_no_updates(store):
             await asyncio.wait_for(anext(stream), 0.5)
 
     asyncio.run(run())
+
+
+def test_mesh_prop_is_one_merged_ply(running_sim, tmp_path, monkeypatch):
+    import trimesh
+
+    monkeypatch.setenv("VIAM_MODULE_DATA", str(tmp_path / "data"))
+    trimesh.creation.box((0.05, 0.05, 0.05)).export(tmp_path / "w.stl")
+    MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({
+        "real_time": False,
+        "props": [{"name": "w", "type": "mesh", "mesh": str(tmp_path / "w.stl"), "position": [0, 0, 0.1]}],
+    })), {})
+    service = MujocoWorldState.new(
+        ComponentConfig(name="world-state", attributes=dict_to_struct({"world": "sim-world"})), {}
+    )
+    assert asyncio.run(service.list_uuids()) == [uid("w")]
+    transform = asyncio.run(service.get_transform(uid("w")))
+    assert transform.physical_object.label == "w"
+    assert transform.physical_object.mesh.content_type == "ply"
+    assert b"element face 12" in transform.physical_object.mesh.mesh  # a cube, one piece

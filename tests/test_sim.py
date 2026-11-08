@@ -173,3 +173,57 @@ def test_prop_shapes_build_matching_geoms(sim):
     sim.advance(1.0)  # they fall and come to rest on the floor
     assert sim.data.body("ball").xpos[2] == pytest.approx(0.03, abs=0.002)
     assert sim.data.body("brick").xpos[2] == pytest.approx(0.025, abs=0.002)
+
+
+def test_mesh_props_parse_and_build(sim):
+    import mujoco
+    import trimesh
+
+    from mujoco_module.meshes import MeshSource
+
+    cfg = WorldConfig.from_attrs({"props": [
+        {"name": "widget", "type": "mesh", "mesh": "/w.stl", "scale": 0.001, "mass": 0.3,
+         "position": [0.3, 0, 0.3]},
+    ]})
+    (prop,) = cfg.props
+    assert prop.shape == "mesh" and prop.mesh == MeshSource("/w.stl", (0.001,) * 3, 0.05)
+    hash(cfg)  # stays hashable
+
+    def box(extents, center):
+        b = trimesh.creation.box(extents).apply_translation(center)
+        return b.vertices.copy(), b.faces.copy()
+
+    pieces = {"widget": [box((0.1, 0.1, 0.02), (0, 0, 0)), box((0.1, 0.1, 0.04), (0, 0, 0.03))]}
+    sim.configure_world(cfg, pieces)
+    assert sim.model.geom("widget/0").type[0] == mujoco.mjtGeom.mjGEOM_MESH
+    assert sim.model.body("widget").mass[0] == pytest.approx(0.3)
+    sim.advance(1.0)
+    # bottom piece's underside is 10 mm below the body origin
+    assert sim.data.body("widget").xpos[2] == pytest.approx(0.01, abs=0.003)
+    assert sim.get_prop_pose("widget")["position"][2] == pytest.approx(0.01, abs=0.003)
+
+    moved = sim.set_prop_pose("widget", [0.5, 0, 0.3], [1, 0, 0, 0])
+    assert moved["position"] == pytest.approx([0.5, 0, 0.3])
+    sim.park_props(["widget"])
+    assert sim.get_prop_pose("widget")["position"] == pytest.approx([0.3, 0, 0.3])
+
+    # a rebuild that fails to compile leaves the previous world in place
+    bad = WorldConfig.from_attrs({"props": [{"name": "x", "type": "mesh", "mesh": "/x.stl"}]})
+    old_cfg, old_pieces = sim.cfg, sim.prop_pieces
+    with pytest.raises(ValueError):
+        sim.configure_world(bad, {"x": []})
+    assert sim.cfg is old_cfg and sim.prop_pieces is old_pieces
+
+
+def test_mesh_prop_validation(sim):
+    with pytest.raises(ValueError, match="prop w: a mesh prop needs mesh"):
+        WorldConfig.from_attrs({"props": [{"name": "w", "type": "mesh"}]})
+    with pytest.raises(ValueError, match='prop w: mesh only applies to type "mesh"'):
+        WorldConfig.from_attrs({"props": [{"name": "w", "mesh": "/a.stl"}]})
+    with pytest.raises(ValueError, match="prop w: threshold"):
+        WorldConfig.from_attrs({"props": [{"name": "w", "type": "mesh", "mesh": "/a.stl", "threshold": 2}]})
+    with pytest.raises(ValueError, match='prop w: threshold only applies to type "mesh"'):
+        WorldConfig.from_attrs({"props": [{"name": "w", "threshold": 0.1}]})
+    cfg = WorldConfig.from_attrs({"props": [{"name": "w", "type": "mesh", "mesh": "/a.stl"}]})
+    with pytest.raises(ValueError, match="pieces not loaded"):
+        sim.configure_world(cfg)

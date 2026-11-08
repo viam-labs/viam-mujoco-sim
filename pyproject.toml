@@ -5,9 +5,11 @@ description = "Control and simulate robots in MuJoCo through Viam"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
+    "coacd>=1.0.14",
     "mujoco>=3.3",
     "numpy>=1.26.0",
     "pillow>=11.2.1",
+    "trimesh>=5.2.0",
     "viam-sdk>=0.85.1",
 ]
 
