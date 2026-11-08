@@ -334,6 +334,13 @@ def test_load_mjcf_names_unnamed_actuators_after_their_target():
     assert [a.name for a in spec.actuators] == [f"joint{i}" for i in range(1, 7)] + ["gripper"]
 
 
+def test_load_file_takes_mesh_dir_only_for_a_urdf():
+    with pytest.raises(ValueError, match=r"lite6: mesh_dir is for a .urdf mjcf; an MJCF names its own meshdir"):
+        robots.load_file(ASSETS / "ufactory_lite6" / "lite6.xml", "lite6", mesh_dir="meshes")
+    with pytest.raises(ValueError, match=r"mjcf must be an .xml \(MJCF\) or .urdf file, got lite6.sdf"):
+        robots.load_file(ASSETS / "lite6.sdf", "lite6")
+
+
 def test_load_kinematics_reads_paths_and_file_urls(tmp_path, monkeypatch):
     data = robots.load_kinematics("ufactory_lite6/lite6_kinematics.json", "arm")
     assert json.loads(data)["name"] == "lite6"
@@ -408,3 +415,35 @@ def test_format_pose_round_trips_through_parse_pose():
 def test_viam_geometries_become_mujoco_shapes(geometry, kind, size):
     got_kind, got_size, _ = robots._mj_shape(geometry)
     assert (got_kind, got_size) == (kind, pytest.approx(size))
+
+
+# A world link, an offset joint from it, and two end links (tool and a side sensor)
+WORLD_URDF = """<robot name="two">
+  <link name="world"/><link name="base"/><link name="upper"/><link name="tool"/><link name="sensor"/>
+  <joint name="mount" type="fixed"><parent link="world"/><child link="base"/>
+    <origin xyz="0 0 0.05"/></joint>
+  <joint name="j1" type="revolute"><parent link="base"/><child link="upper"/>
+    <origin xyz="0 0 0.1"/><axis xyz="0 0 1"/></joint>
+  <joint name="j2" type="revolute"><parent link="upper"/><child link="tool"/>
+    <origin xyz="0.2 0 0"/><axis xyz="0 1 0"/></joint>
+  <joint name="side" type="fixed"><parent link="base"/><child link="sensor"/>
+    <origin xyz="0.1 0 0"/></joint>
+</robot>"""
+
+
+def test_a_world_link_is_the_world_frame():
+    pruned = robots.prune_urdf(WORLD_URDF.encode(), "tool")
+    kin = robots.parse_kinematics(pruned, urdf=True, label="two")  # hung before the world link was skipped
+    assert (kin.joints, kin.end) == (("j1", "j2"), "tool")
+    assert kin.frames["mount"].parent == "world"
+    assert kin.forward([0.0, 0.0])["tool"][:3, 3] == pytest.approx([0.2, 0, 0.15])
+
+
+def test_prune_urdf_keeps_the_path_from_the_root_to_the_link():
+    from xml.etree import ElementTree
+
+    root = ElementTree.fromstring(robots.prune_urdf(WORLD_URDF.encode(), "tool"))
+    assert [link.get("name") for link in root.findall("link")] == ["base", "upper", "tool"]
+    assert [joint.get("name") for joint in root.findall("joint")] == ["mount", "j1", "j2"]
+    with pytest.raises(ValueError, match=r"expected one chain with one end frame, found ends \['tool', 'sensor'\]"):
+        robots.parse_kinematics(WORLD_URDF.encode(), urdf=True, label="two")

@@ -371,3 +371,8 @@ def test_kinematics_collision_needs_geometries(sim, three_joint_files):
     ArmHandle(sim, "mine", three_joint_files)  # no geometries: mesh by default
     with pytest.raises(ValueError, match='collision "kinematics" needs an SVA kinematics file'):
         ArmHandle(sim, "other", {**three_joint_files, "collision": "kinematics"})
+
+
+def test_mesh_dir_is_only_for_a_urdf_arm(sim):
+    with pytest.raises(ValueError, match="mesh_dir is for a .urdf mjcf"):
+        make_arm(sim, mesh_dir="meshes")

@@ -6,7 +6,7 @@ from xml.etree import ElementTree
 
 import pytest
 
-from mujoco_module import bases
+from mujoco_module import bases, robots
 from mujoco_module.handles import BaseHandle
 from mujoco_module.odometry import OdometryHandle
 from mujoco_module.sim import WorldConfig
@@ -16,7 +16,7 @@ HUSKY = Path(__file__).parents[1] / "assets" / "clearpath_husky" / "husky.xml"
 
 
 def test_husky_inference():
-    spec = bases.load(HUSKY, "husky.xml")
+    spec = robots.load_file(HUSKY, "husky.xml")
     bases.take_chassis(spec, None, "husky.xml")
     base = bases.infer(spec.compile(), "husky.xml")
     assert sorted(w.joint for w in base.wheels if w.left) == ["front_left_wheel", "rear_left_wheel"]

@@ -367,7 +367,7 @@ def test_a_urdf_base_drives_and_warns_about_density_masses(sim, caplog):
     skid = BaseHandle(sim, "skid", {
         "mjcf": str(urdf), "mesh_dir": "../../assets/meshes", "max_linear_mps": 1.0, "max_angular_dps": 90,
     })
-    assert "base skid: links ['base_link'] have no <inertial>; their mass comes from geom density" in caplog.text
+    assert "links ['base_link'] have no <inertial>; their mass comes from geom density" in caplog.text
     finish(sim, skid.move_straight(0.3, 0.2)).result()
     settle(sim)
     assert frame_pose(sim, "skid")[1] == pytest.approx(0.3, abs=0.01)

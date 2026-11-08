@@ -16,8 +16,8 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | Model | API | What it does |
 |---|---|---|
 | [`viam-labs:mujoco-sim:world`](#model-viam-labsmujoco-simworld) | `generic` | Owns the scene, props and step loop. Configure exactly one. |
-| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF arm, placed by its frame, with joint control. |
-| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF gripper. |
+| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame, with joint control. |
+| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF or URDF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
@@ -134,10 +134,10 @@ re-anchored. `warnings` holds MuJoCo's warning counts, such as
 
 A simulated arm, placed by its standard Viam frame. Two are bundled, both from
 the [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie);
-any other arm works from its MJCF file and its Viam kinematics file (see
-[Your own robot](#your-own-robot)). The arm starts at its MJCF's `home`
-keyframe. Joints are position servos; moves are rate limited by
-`max_joint_deg_s`.
+any other arm works from its MJCF file and its Viam kinematics file, or from
+its URDF alone (see [Your own arm](#your-own-arm)). The arm starts at its
+MJCF's `home` keyframe (a URDF arm at all-zero joints). Joints are position
+servos; moves are rate limited by `max_joint_deg_s`.
 
 | `asset` | Arm | Home (degrees) | Kinematics |
 |---|---|---|---|
@@ -167,7 +167,8 @@ keyframe. Joints are position servos; moves are rate limited by
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
 | `asset` | string | One of `asset`, `mjcf` | | A bundled arm: `"lite6"` or `"ur5e"`. Its defaults apply; any attribute below set in config wins. |
-| `mjcf` | string | One of `asset`, `mjcf` | | Your arm's MJCF file: an absolute path, `~/...`, or a path relative to the module's `assets/`. |
+| `mjcf` | string | One of `asset`, `mjcf` | | Your arm's MJCF (`.xml`) or URDF (`.urdf`) file: an absolute path, `~/...`, or a path relative to the module's `assets/`. See [From a URDF](#from-a-urdf). |
+| `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | A `.urdf` `mjcf`'s meshes: absolute, `~`, or relative to the file. `package://` paths are looked up there by file name. |
 | `max_joint_deg_s` | float | No | `180` | Per-joint velocity limit on the commanded target, reported by `dynamics_metadata`. |
 | `max_joint_deg_s2` | float | No | | Per-joint acceleration limit, reported by `dynamics_metadata` for trajectory planning. |
 | `move_timeout_sec` | float | No | `30` | How long a move waits to arrive before it fails. |
@@ -175,9 +176,10 @@ keyframe. Joints are position servos; moves are rate limited by
 | `is_moving_velocity_threshold_rad_s` | float | No | `0.01` | Joints must also be slower than this to count as arrived. |
 | `robot_control_freq_hz` | float | No | `50` | Rate at which `MoveThroughJointPositions` pushes targets, up to 1000. |
 | `path_max_step_deg` | float | No | `2.0` | Largest per-joint step between pushed targets, up to 30. |
-| `kinematics_url` | string | With `mjcf` | the bundled arm's file | The arm's Viam kinematics file, served by `GetKinematics`: `.json` for SVA, `.urdf`, `.xml` or `.xacro` for URDF. `http(s)://`, `file://`, or a path like `mjcf`. Read when the arm is configured. |
+| `kinematics_url` | string | With an `.xml` `mjcf` | the bundled arm's file; a `.urdf` `mjcf` pruned to `flange_link` | The arm's Viam kinematics file, served by `GetKinematics`: `.json` for SVA, `.urdf`, `.xml` or `.xacro` for URDF. `http(s)://`, `file://`, or a path like `mjcf`. Read when the arm is configured. |
 | `joints` | [string] | No | inferred | The arm's MJCF joint names, base to flange. |
-| `flange_site` | string | No | `"attachment_site"` | The MJCF site at the flange, where Viam's kinematics chain ends. |
+| `flange_site` | string | No | `"attachment_site"` | The MJCF site at the flange, where Viam's kinematics chain ends. Not for a `.urdf`. |
+| `flange_link` | string | With a `.urdf` that has several end links | the file's one end link | The URDF link at the flange. Only for a `.urdf`. |
 | `home_keyframe` | string | No | `"home"` | The MJCF keyframe whose `ctrl` is the start pose; all zeros without one. |
 | `base_offset` | pose | No | identity | From the arm's frame to the MJCF's world, for an MJCF whose base differs from its kinematics file. `{"translation": {"x", "y", "z"} mm, "orientation": {"o_x", "o_y", "o_z", "theta"} degrees}`. |
 | `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
@@ -200,7 +202,7 @@ The frame's `parent` must be `world`.
 | `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. |
 | `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time. |
 | `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
-| `GetKinematics` | The `kinematics_url` file. |
+| `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes. |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
 | `Stop` | Holds the current target, or the measured position if it interrupted a trajectory. |
 | `MoveToPosition` | Not supported; use the motion service. |
@@ -213,14 +215,11 @@ The frame's `parent` must be `world`.
 | `get_joint_positions_radians` | | `{values: [radians, one per joint]}` |
 | `set_joint_targets_radians` | `values`: radians, one per joint | `{"accepted": true}`; latches the target and returns at once. |
 
-### Your own robot
+### Your own arm
 
 Give the arm `mjcf` and `kinematics_url` instead of `asset`. Everything else is
-read from the two files. A robot described only by a URDF can be converted to
-MJCF offline with the experimental `make_mjcf_from_robot_description.py` from
-[ros-controls/mujoco_ros2_control](https://github.com/ros-controls/mujoco_ros2_control/blob/main/mujoco_ros2_control/docs/tools.rst)
-(it runs in a ROS 2 environment), then pointed at with `mjcf`. (A base takes
-a URDF directly; see [Bring your own base](#bring-your-own-base).)
+read from the two files. An arm described by a URDF needs only the URDF; see
+[From a URDF](#from-a-urdf).
 
 - **Joints.** The first N actuated hinge or slide joints in the MJCF's body
   tree, where N is the kinematics file's joint count. They must form one chain
@@ -249,6 +248,31 @@ arm pick-arm: the MJCF flange and the kinematics file's end effector disagree by
 Vendor and Menagerie link lengths differ by about a millimetre, which passes.
 Paths can point anywhere on the machine, including a registry package's
 directory; a relative path is under this module's `assets/`.
+
+### From a URDF
+
+Point `mjcf` at the arm's `.urdf` (see [Bring your own robot](#bring-your-own-robot)
+to get one from a xacro) and leave out `kinematics_url`:
+
+- **Kinematics.** `GetKinematics` serves the URDF pruned to the links and
+  joints from its root to `flange_link`, with its collision meshes (STL or
+  PLY), so Viam's planner and the sim read the same file. A file with one end
+  link (a link no joint hangs off) needs no `flange_link`; with several,
+  configuring fails and lists them. An explicit `kinematics_url` still wins:
+  an SVA file needs `joints` set, and a URDF one can't have mesh collisions
+  (the planner gets no mesh bytes with it).
+- **Joints and servos.** The arm's joints are the kinematics' joints. Each
+  gets a position servo that reaches the joint's `<limit effort>` at about 2°
+  of error, damped by the joint's inertia; a joint without an effort limit is
+  an error. Every link is gravity-compensated.
+- **Flange.** The module adds `attachment_site` at `flange_link`; a gripper
+  attaches there.
+- **Collision.** The URDF's own collision geoms. Links already touching at
+  home are excluded from colliding with each other (a vendor's base and
+  shoulder hulls often overlap a little, which would jam the first joint).
+- **Planning speed.** The planner checks the URDF's full collision meshes,
+  which can make planning slow with dense meshes. An SVA `kinematics_url`
+  with simple shapes (and `joints`) plans faster.
 
 ### Collision shapes
 
@@ -321,7 +345,8 @@ fingertip center: use the TCP value from the table above, or for your own
 | `world` | string | Yes | | The world component's name. |
 | `arm` | string | Yes | | The arm this gripper belongs to. |
 | `asset` | string | No | `"lite6_gripper"` | A bundled gripper, see above. An attached gripper on an arm whose MJCF already has one (the `lite6`) is an error. |
-| `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF, attached at the arm's `flange_site`; a path like the arm's `mjcf`. It needs exactly one actuator, and its root bodies and jaw joint must be named; a suction gripper has an `<adhesion>` actuator on its cup body instead of a jaw. |
+| `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF (`.xml`) or URDF (`.urdf`), attached at the arm's flange site; a path like the arm's `mjcf`. An MJCF needs exactly one actuator, and its root bodies and jaw joint must be named; a suction gripper has an `<adhesion>` actuator on its cup body instead of a jaw. A URDF needs exactly one movable joint that isn't a `<mimic>`, with `<limit effort>` and a range: the module drives it with a position servo sized like a URDF arm's, and `<mimic>` fingers follow it. Use an MJCF for other designs. |
+| `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | A `.urdf` `mjcf`'s meshes, as for the arm. |
 | `actuator` | string | No | inferred | The gripper's actuator. |
 | `open`, `closed` | float | No | the low and high ends of the actuator's `ctrlrange` | Position actuators: the `ctrl` targets. Force actuators (`<motor>`): their signs pick the direction. An error for suction. |
 | `sensorless` | bool | No | `false` | `IsHoldingSomething` reports the latched grip instead of contacts, like the real Lite6 gripper. |
@@ -563,52 +588,10 @@ told (`forward_axis`), a wheel's radius can't be found or the radii disagree
 with `drive: wheels`, or no speed limits are given
 (`max_linear_mps`/`max_angular_dps`).
 
-### Bring your own base
+### Your own base
 
-A ROS robot's description is usually a xacro. To use the Husky's:
-
-1. Clone [husky/husky](https://github.com/husky/husky) and `cd
-   husky_description`. Delete the six `accessories/` `xacro:include` lines
-   near the top of `urdf/husky.urdf.xacro` (they pull packages, such as
-   `lms1xx` and `realsense2_description`, that aren't in the ROS image).
-2. Expand it with the Viam CLI (it runs xacro in Docker):
-
-   ```sh
-   viam xacro convert --input-file urdf/husky.urdf.xacro --output-file husky.urdf
-   ```
-
-3. Point the base at it. Its meshes are in `meshes/` beside it, the default
-   `mesh_dir`:
-
-   ```json
-   "attributes": {
-     "world": "sim-world",
-     "mjcf": "/path/to/husky_description/husky.urdf",
-     "drive": "wheels",
-     "max_linear_mps": 1.0,
-     "max_angular_dps": 115
-   }
-   ```
-
-What to fix for realism:
-
-- **Visuals.** MuJoCo drops a URDF's visuals (and can't load DAE meshes), so
-  the base renders its collision shapes. For the real look, convert the DAE
-  visuals to OBJ or STL and add them to an MJCF.
-- **Masses.** A link with geometry and no `<inertial>` gets its mass from
-  geom density (water's), and the base logs a warning naming those links.
-  The expanded Husky's `base_link` comes out at 116 kg. Give those links
-  `<inertial>`s.
-- **Save it as MJCF to hand-tune** (friction, `priority`, masses, visuals),
-  then point `mjcf` at the `.xml`:
-
-  ```python
-  import mujoco
-  spec = mujoco.MjSpec.from_file("husky.urdf")
-  spec.compiler.fusestatic = False  # keep base_link a body
-  spec.meshdir, spec.strippath = "meshes", True
-  open("husky.xml", "w").write(spec.to_xml())
-  ```
+See [Bring your own robot](#bring-your-own-robot) for the Husky from
+Clearpath's xacro.
 
 ### Camera on the rover
 
@@ -883,6 +866,99 @@ world state store doesn't feed the motion service.
 | `StreamTransformChanges` | An ADDED event per prop, then UPDATED events for props that moved more than 1 mm or 0.5°, checked every 0.1 s. |
 
 Cylinder props are sent as meshes, since the geometry API has no cylinder.
+
+## Bring your own robot
+
+A ROS robot's description is usually a xacro. Expand it to a URDF with the
+Viam CLI (it runs xacro in Docker), then point a base's, arm's or gripper's
+`mjcf` at the `.urdf`:
+
+```sh
+viam xacro convert --input-file urdf/robot.urdf.xacro --output-file robot.urdf
+```
+
+Don't add `--collapse-fixed-joints`: its output repeats each joint's
+`<parent>`, `<child>` and `<origin>`, which MuJoCo refuses. A URDF's
+`package://` meshes are looked up by file name in `mesh_dir` (default
+`meshes/` beside the URDF if it exists, else its folder).
+
+What to fix for realism:
+
+- **Visuals.** MuJoCo drops a URDF's visuals (and can't load DAE meshes), so
+  the robot renders its collision shapes. For the real look, convert the DAE
+  visuals to OBJ or STL and add them to an MJCF.
+- **Masses.** A link with geometry and no `<inertial>` gets its mass from
+  geom density (water's), and configuring logs a warning naming those links.
+  The expanded Husky's `base_link` comes out at 116 kg. Give those links
+  `<inertial>`s.
+- **Save it as MJCF to hand-tune** (friction, `priority`, masses, visuals),
+  then point `mjcf` at the `.xml`:
+
+  ```python
+  import mujoco
+  spec = mujoco.MjSpec.from_file("husky.urdf")
+  spec.compiler.fusestatic = False  # keep base_link a body
+  spec.meshdir, spec.strippath = "meshes", True
+  open("husky.xml", "w").write(spec.to_xml())
+  ```
+
+### A base: the Clearpath Husky
+
+1. Clone [husky/husky](https://github.com/husky/husky) and `cd
+   husky_description`. Delete the six `accessories/` `xacro:include` lines
+   near the top of `urdf/husky.urdf.xacro` (they pull packages, such as
+   `lms1xx` and `realsense2_description`, that aren't in the ROS image).
+2. Expand it:
+
+   ```sh
+   viam xacro convert --input-file urdf/husky.urdf.xacro --output-file husky.urdf
+   ```
+
+3. Point the base at it. Its meshes are in `meshes/` beside it, the default
+   `mesh_dir`:
+
+   ```json
+   "attributes": {
+     "world": "sim-world",
+     "mjcf": "/path/to/husky_description/husky.urdf",
+     "drive": "wheels",
+     "max_linear_mps": 1.0,
+     "max_angular_dps": 115
+   }
+   ```
+
+### An arm: the Universal Robots UR5e
+
+1. Clone [UniversalRobots/Universal_Robots_ROS2_Description](https://github.com/UniversalRobots/Universal_Robots_ROS2_Description)
+   and expand the UR5e in it:
+
+   ```sh
+   viam xacro convert --input-file urdf/ur.urdf.xacro --output-file ur5e.urdf \
+     --args ur_type:=ur5e --args name:=ur5e
+   ```
+
+2. Point the arm at it. The file ends in three links (`tool0`, `ft_frame` and
+   `base`), so name the flange; its collision meshes are in
+   `meshes/ur5e/collision`:
+
+   ```json
+   "attributes": {
+     "world": "sim-world",
+     "mjcf": "/path/to/Universal_Robots_ROS2_Description/ur5e.urdf",
+     "mesh_dir": "meshes/ur5e/collision",
+     "flange_link": "tool0"
+   }
+   ```
+
+   The arm starts with all joints at zero. A bundled gripper (`robotiq_2f85`)
+   attaches at `tool0` as on the bundled UR5e.
+
+### A gripper
+
+A URDF gripper attaches at the arm's flange like an MJCF one. It needs one
+movable joint that isn't a `<mimic>` (the module drives it; `<mimic>` fingers
+follow) with `<limit effort>` and a range. A gripper with several driven
+joints, a tendon or suction needs an MJCF.
 
 ## De-palletizing
 

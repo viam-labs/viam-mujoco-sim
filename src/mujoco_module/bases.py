@@ -12,10 +12,10 @@ import itertools
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 import mujoco
 import numpy as np
+
 
 _HINGE = int(mujoco.mjtJoint.mjJNT_HINGE)
 _TRN_JOINT = int(mujoco.mjtTrn.mjTRN_JOINT)
@@ -48,36 +48,6 @@ class Base:
     box: tuple[np.ndarray, np.ndarray] | None  # chassis collision (center, size), viam frame
 
 
-def load(path: Path, label: str, mesh_dir: str | None = None) -> mujoco.MjSpec:
-    """The file as a spec. Unnamed actuators take their target's name (state
-    carries across rebuilds by name); static bodies aren't fused, so the
-    compiled model has the same bodies as the scene. A URDF's meshes
-    (package:// paths) are looked up by file name in mesh_dir, relative to
-    the file; by default its meshes/ folder if it has one, else its own."""
-    if path.suffix.lower() not in (".xml", ".urdf"):
-        raise ValueError(f"{label}: mjcf must be an .xml (MJCF) or .urdf file, got {path.name}")
-    try:
-        spec = mujoco.MjSpec.from_file(str(path))
-    except ValueError as e:
-        raise ValueError(f"{label}: cannot load mjcf {path}: {e}") from e
-    spec.compiler.fusestatic = False
-    if path.suffix.lower() == ".urdf":
-        if mesh_dir is not None:
-            folder = path.parent / Path(mesh_dir).expanduser()
-        else:
-            folder = path.parent / "meshes" if (path.parent / "meshes").is_dir() else path.parent
-        for mesh in spec.meshes:
-            # absolute paths: an attached spec's meshdir and strippath don't carry into the scene
-            found = folder / Path(mesh.file).name
-            if not found.is_file():
-                raise ValueError(f"{label}: mesh {mesh.file} not found as {found}; set mesh_dir")
-            mesh.file = str(found)
-    for actuator in spec.actuators:
-        if not actuator.name:
-            actuator.name = actuator.target
-    return spec
-
-
 def take_chassis(spec: mujoco.MjSpec, name: str | None, label: str) -> str:
     """Leave only the chassis under the worldbody: its single top-level body,
     or `name`. The chassis's free joint and its pose in the file are dropped
@@ -104,12 +74,6 @@ def take_chassis(spec: mujoco.MjSpec, name: str | None, label: str) -> str:
     chassis.alt.type = mujoco.mjtOrientation.mjORIENTATION_QUAT
     chassis.quat = [1.0, 0.0, 0.0, 0.0]
     return name
-
-
-def density_links(spec: mujoco.MjSpec) -> list[str]:
-    """Bodies with geoms and no <inertial>: MuJoCo gives them mass from geom
-    density (1000 kg/m^3), which a URDF link without <inertial> rarely means."""
-    return [body.name for body in spec.bodies if body.geoms and not body.explicitinertial]
 
 
 def _name(model: mujoco.MjModel, kind: mujoco.mjtObj, index: int) -> str:

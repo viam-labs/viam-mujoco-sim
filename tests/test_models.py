@@ -273,6 +273,8 @@ def test_gripper_validate_mjcf():
         MujocoGripper.validate_config(config("g", {**base, "mjcf": "nope.xml"}))
     with pytest.raises(ValueError, match="open"):
         MujocoGripper.validate_config(config("g", {**base, "open": "wide"}))
+    with pytest.raises(ValueError, match="mesh_dir must be a folder path"):
+        MujocoGripper.validate_config(config("g", {**base, "mesh_dir": ""}))
 
 
 def test_gripper_frame_parent_may_be_its_arm():
@@ -669,6 +671,7 @@ def test_arm_kinematics_url_may_be_a_path(running_sim, tmp_path):
         ({"mjcf": "nope.xml", "kinematics_url": "ufactory_lite6/lite6_kinematics.json"}, "mjcf: file .*nope.xml not found"),
         ({"asset": "lite6", "joints": "joint1"}, "joints must be a list"),
         ({"asset": "lite6", "flange_site": 3}, "flange_site must be a name"),
+        ({"asset": "lite6", "mesh_dir": 3}, "mesh_dir must be a folder path"),
         ({"asset": "lite6", "collision": "hull"}, 'collision must be "kinematics" or "mesh"'),
         ({"asset": "lite6", "flange_offset": {"orientation": {"theta": "half"}}}, "flange_offset"),
     ],

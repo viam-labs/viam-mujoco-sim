@@ -6,8 +6,14 @@ Attributes:
   asset (string)            - "lite6_gripper": the arm MJCF's own gripper (default),
                               or "robotiq_2f85" / "robotiq_epick" (suction), a
                               bundled MJCF attached like mjcf
-  mjcf (string)             - instead: a gripper MJCF to attach at the arm's flange
-                              site; absolute, ~, or relative to assets/
+  mjcf (string)             - instead: a gripper MJCF (.xml) or URDF (.urdf) to attach
+                              at the arm's flange site; absolute, ~, or relative to
+                              assets/. A URDF's one movable joint that isn't a
+                              <mimic> gets a position servo sized from its
+                              <limit effort>
+  mesh_dir (string)         - a .urdf mjcf's mesh folder, absolute, ~ or relative to
+                              the file (default meshes/ beside it if it exists,
+                              else its folder)
   actuator (string)         - the gripper's actuator (default inferred)
   open, closed (float)      - actuator values for open and closed (default the
                               low and high ends of its ctrlrange)
@@ -82,6 +88,8 @@ class MujocoGripper(Gripper, EasyResource):
             if not isinstance(attrs["mjcf"], str) or not attrs["mjcf"]:
                 raise ValueError(f"{config.name}: mjcf must be a file path")
             robots.resolve_path(attrs["mjcf"], f"{config.name}: mjcf")
+        if "mesh_dir" in attrs and (not isinstance(attrs["mesh_dir"], str) or not attrs["mesh_dir"]):
+            raise ValueError(f"{config.name}: mesh_dir must be a folder path")
         if not isinstance(attrs.get("sensorless", False), bool):
             raise ValueError(f"{config.name}: sensorless must be a boolean")
         if "actuator" in attrs and (not isinstance(attrs["actuator"], str) or not attrs["actuator"]):

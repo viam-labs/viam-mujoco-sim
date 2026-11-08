@@ -131,20 +131,52 @@ class ArmHandle:
         self.name = name
         self._prefix = f"{name}/"
         self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
-        # read here, not on first GetKinematics: building the arm needs it
-        # ponytail: a cold-cache http(s) fetch blocks the event loop (up to the download timeout); fetch in validate_config or make reconfigure async if that bites
-        self.kinematics_url = str(attrs["kinematics_url"])
-        self.kinematics_data = robots.load_kinematics(self.kinematics_url, f"{label}: kinematics_url")
-        self.kinematics = robots.parse_kinematics(
-            self.kinematics_data, robots.is_urdf(self.kinematics_url), self.kinematics_url
-        )
+        where = str(self.mjcf)
+        urdf = self.mjcf.suffix.lower() == ".urdf"
+        robots.check_flange_attrs(attrs, urdf, label)
+        mesh_dir = attrs.get("mesh_dir")
+        spec = robots.load_mjcf(self.mjcf, mesh_dir)
+        if urdf:
+            flange = robots.flange_link(self.mjcf.read_bytes(), attrs.get("flange_link"), where)
+        # served by GetKinematics with the kinematics: RDK reads a URDF's mesh collisions from them
+        self.kinematics_meshes: dict[str, tuple[str, bytes]] = {}
+        if urdf and "kinematics_url" not in attrs:
+            self.kinematics_url = where
+            self.kinematics_data = robots.prune_urdf(self.mjcf.read_bytes(), flange)
+            self.kinematics_meshes = robots.kinematics_meshes(
+                self.kinematics_data, robots.mesh_folder(self.mjcf, mesh_dir), where
+            )
+        else:
+            # read here, not on first GetKinematics: building the arm needs it
+            # ponytail: a cold-cache http(s) fetch blocks the event loop (up to the download timeout); fetch in validate_config or make reconfigure async if that bites
+            self.kinematics_url = str(attrs["kinematics_url"])
+            self.kinematics_data = robots.load_kinematics(self.kinematics_url, f"{label}: kinematics_url")
+        urdf_kinematics = robots.is_urdf(self.kinematics_url)
+        self.kinematics = robots.parse_kinematics(self.kinematics_data, urdf_kinematics, self.kinematics_url)
+        names = attrs.get("joints")
+        # an MJCF arm's kinematics_url isn't checked: it never was (backward compatibility)
+        if urdf and urdf_kinematics and "kinematics_url" in attrs and robots.has_mesh_collisions(
+            self.kinematics_data
+        ):
+            raise ValueError(
+                f"{label}: kinematics_url {self.kinematics_url} has mesh collisions, which Viam's "
+                "planner can't read from it; leave kinematics_url unset to use the mjcf's own "
+                "(served with its meshes), or use an SVA file"
+            )
+        if urdf and names is None:
+            if not urdf_kinematics:
+                raise ValueError(
+                    f"{label}: a .urdf arm with an SVA kinematics_url needs joints, the URDF's "
+                    "arm joint names in chain order"
+                )
+            names = list(self.kinematics.joints)
         # The arm on its own, as the file describes it. Ids below index this
         # model; names carry over into the scene with the prefix.
-        self.model = robots.load_mjcf(self.mjcf).compile()
-        where = str(self.mjcf)
-        self.joints = robots.arm_joints(
-            self.model, len(self.kinematics.joints), where, attrs.get("joints")
-        )
+        self.model = spec.compile()
+        self.joints = robots.arm_joints(self.model, len(self.kinematics.joints), where, names)
+        if urdf:
+            robots.prepare_urdf_arm(spec, [self.model.joint(j).name for j in self.joints], flange, where)
+            self.model = spec.compile()
         self.actuators = robots.arm_actuators(self.model, self.joints, where)
         self._joint_names = tuple(self._prefix + self.model.joint(j).name for j in self.joints)
         self._actuator_names = tuple(self._prefix + self.model.actuator(a).name for a in self.actuators)
@@ -155,7 +187,7 @@ class ArmHandle:
         self.root_body = self.model.body(
             int(self.model.body_rootid[self.model.jnt_bodyid[self.joints[0]]])
         ).name
-        self.flange_site = str(attrs.get("flange_site", "attachment_site"))
+        self.flange_site = "attachment_site" if urdf else str(attrs.get("flange_site", "attachment_site"))
         if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.flange_site) < 0:
             raise ValueError(f"{where}: has no site {self.flange_site!r}; set flange_site")
         site = self.model.site(self.flange_site)
@@ -204,12 +236,14 @@ class ArmHandle:
                 self.model, self.kinematics, self.joints, self.model.body(self.root_body).id, base_offset
             )
             # Like RDK, ignore collisions the arm is already in at home.
-            child = robots.load_mjcf(self.mjcf)
+            child = spec.copy()
             robots.apply_shapes(child, shapes, label)
             excluded += robots.home_contacts(child, self.joint_names(), self._home)
 
+        arm_spec = spec
+
         def build(spec: mujoco.MjSpec) -> None:
-            child = robots.load_mjcf(self.mjcf)
+            child = arm_spec.copy()  # the file isn't read again
             robots.apply_shapes(child, shapes, label)
             frame = spec.worldbody.add_frame(pos=list(mount[:3, 3]), quat=list(robots.quat(mount)))
             spec.attach(child, prefix=self._prefix, frame=frame)
@@ -503,13 +537,8 @@ class BaseHandle:
         self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
         where = str(self.mjcf)
         mesh_dir = attrs.get("mesh_dir")
-        spec = bases.load(self.mjcf, where, mesh_dir)
+        spec = robots.load_file(self.mjcf, where, mesh_dir)
         chassis = bases.take_chassis(spec, attrs.get("chassis"), where)
-        light = bases.density_links(spec) if self.mjcf.suffix.lower() == ".urdf" else []
-        if light:
-            LOGGER.warning(
-                "%s: links %s have no <inertial>; their mass comes from geom density", label, light
-            )
         try:
             model = spec.compile()
         except ValueError as e:
@@ -895,7 +924,11 @@ class GripperHandle:
                     "drop mjcf to use the arm's own gripper, or use an arm MJCF without one"
                 )
             path = robots.resolve_path(str(mjcf), f"{label}: mjcf")
-            model, prefix, where = robots.load_mjcf(path).compile(), f"{name}/", str(path)
+            gripper_spec = robots.load_mjcf(path, attrs.get("mesh_dir"))
+            prefix, where = f"{name}/", str(path)
+            if path.suffix.lower() == ".urdf":
+                robots.add_servos(gripper_spec, [robots.driven_joint(gripper_spec.compile(), where)], where)
+            model = gripper_spec.compile()
             actuator = robots.gripper_actuator(model, where, name=attrs.get("actuator"))
         kind = robots.control_type(model, actuator, where)
         self._position = kind == "position"
@@ -970,7 +1003,7 @@ class GripperHandle:
                 site = spec.site(flange)
                 if site is None:
                     return  # arm removed; the gripper comes back with it
-                child = robots.load_mjcf(path)
+                child = gripper_spec.copy()  # the file isn't read again
                 # attach keeps the scene's options; take the gripper's contact
                 # settings (the 2F-85's elliptic cones) where it sets them
                 defaults = mujoco.MjSpec().option

@@ -100,7 +100,7 @@ def validate_sim_component(
                 raise ValueError(f"{config.name}: set asset or mjcf, not both")
             if not isinstance(mjcf, str) or not mjcf:
                 raise ValueError(f"{config.name}: mjcf must be a file path")
-            if not attrs.get("kinematics_url"):
+            if not attrs.get("kinematics_url") and not mjcf.lower().endswith(".urdf"):
                 raise ValueError(
                     f"{config.name}: mjcf needs kinematics_url, the arm's Viam kinematics file"
                 )

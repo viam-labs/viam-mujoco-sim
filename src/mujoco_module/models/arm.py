@@ -7,10 +7,18 @@ Attributes:
   asset (string)                   - a bundled arm, "lite6" (with its wide gripper)
                                      or "ur5e";
                                      its defaults apply under the attributes set here
-  mjcf (string)                    - instead of asset: the arm's MJCF file, absolute,
-                                     ~, or relative to assets/; needs kinematics_url
+  mjcf (string)                    - instead of asset: the arm's MJCF (.xml, needs
+                                     kinematics_url) or URDF (.urdf) file, absolute,
+                                     ~, or relative to assets/. A URDF's joints need
+                                     <limit effort>: the module adds a position servo
+                                     on each, sized from it
+  mesh_dir (string)                - a .urdf mjcf's mesh folder, absolute, ~ or relative
+                                     to the file (default meshes/ beside it if it
+                                     exists, else its folder)
   joints ([string])                - MJCF joint names in chain order (default inferred)
   flange_site (string)             - MJCF site at the flange (default attachment_site)
+  flange_link (string)             - .urdf only: the link at the flange (default the
+                                     file's one end link)
   home_keyframe (string)           - MJCF keyframe with the home ctrl (default home)
   base_offset, flange_offset       - {translation: {x,y,z} mm, orientation: {o_x,o_y,
                                      o_z,theta deg}}: arm frame to MJCF world, and
@@ -39,7 +47,9 @@ Attributes:
   kinematics_url (string)          - the arm's Viam kinematics file (.json = SVA,
                                      .urdf = URDF): http(s)://, file://, or a path
                                      (absolute, ~, or relative to assets/). Read
-                                     when the arm is configured.
+                                     when the arm is configured. A .urdf mjcf's
+                                     default: the file from its root to
+                                     flange_link, served with its collision meshes
 
 Place it with the standard frame; frame.parent must be "world".
 """
@@ -61,6 +71,7 @@ from typing import (
 )
 
 from typing_extensions import Self
+from viam.components import KinematicsReturn
 from viam.components.arm import Arm, JointPositions, KinematicsFileFormat, Mesh, Pose
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, ResourceName
@@ -223,7 +234,8 @@ class MujocoArm(Arm, EasyResource):
             if "://" not in url:
                 robots.resolve_path(url, f"{config.name}: kinematics_url")
         if isinstance(attrs.get("mjcf"), str):
-            robots.resolve_path(attrs["mjcf"], f"{config.name}: mjcf")
+            path = robots.resolve_path(attrs["mjcf"], f"{config.name}: mjcf")
+            robots.check_flange_attrs(attrs, path.suffix.lower() == ".urdf", config.name)
         joints = attrs.get("joints")
         if joints is not None and (
             not isinstance(joints, list)
@@ -231,9 +243,11 @@ class MujocoArm(Arm, EasyResource):
             or not all(isinstance(joint, str) and joint for joint in joints)
         ):
             raise ValueError(f"{config.name}: joints must be a list of MJCF joint names")
-        for key in ("flange_site", "home_keyframe"):
+        for key in ("flange_site", "flange_link", "home_keyframe"):
             if key in attrs and (not isinstance(attrs[key], str) or not attrs[key]):
                 raise ValueError(f"{config.name}: {key} must be a name")
+        if "mesh_dir" in attrs and (not isinstance(attrs["mesh_dir"], str) or not attrs["mesh_dir"]):
+            raise ValueError(f"{config.name}: mesh_dir must be a folder path")
         if attrs.get("collision", "kinematics") not in ("kinematics", "mesh"):
             raise ValueError(f'{config.name}: collision must be "kinematics" or "mesh"')
         for key in ("base_offset", "flange_offset"):
@@ -464,16 +478,20 @@ class MujocoArm(Arm, EasyResource):
         """True while a MoveTo* RPC is in flight."""
         return self._moving_count > 0
 
-    async def get_kinematics(
-        self, **kwargs
-    ) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
+    async def get_kinematics(self, **kwargs) -> KinematicsReturn:
         handle = self._h()
         fmt = (
             KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
             if robots.is_urdf(handle.kinematics_url)
             else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
         )
-        return fmt, handle.kinematics_data
+        if not handle.kinematics_meshes:
+            return fmt, handle.kinematics_data
+        meshes = {
+            path: Mesh(content_type=kind, mesh=data)
+            for path, (kind, data) in handle.kinematics_meshes.items()
+        }
+        return fmt, handle.kinematics_data, meshes
 
     async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
         return {}

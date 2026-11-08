@@ -5,7 +5,7 @@ from pathlib import Path
 import mujoco
 import pytest
 
-from mujoco_module import bases
+from mujoco_module import bases, robots
 
 URDF = Path(__file__).parent / "data" / "skid.urdf"
 MESHES = Path(__file__).parents[1] / "assets" / "meshes"
@@ -61,7 +61,7 @@ SKID = """<mujoco>
 def base_model(tmp_path, xml, chassis=None, name="base.xml"):
     path = tmp_path / name
     path.write_text(xml)
-    spec = bases.load(path, "base.xml")
+    spec = robots.load_file(path, "base.xml")
     bases.take_chassis(spec, chassis, "base.xml")
     return spec.compile()
 
@@ -200,9 +200,9 @@ def test_traction_is_the_higher_priority_friction(tmp_path):
 
 
 def test_a_urdf_loads_with_mesh_dir():
-    spec = bases.load(URDF, "skid.urdf", mesh_dir="../../assets/meshes")
+    spec = robots.load_file(URDF, "skid.urdf", mesh_dir="../../assets/meshes")
     assert bases.take_chassis(spec, None, "skid.urdf") == "base_link"  # the root link
-    assert bases.density_links(spec) == ["base_link"]  # it has a geom and no <inertial>
+    assert robots.density_links(spec) == ["base_link"]  # it has a geom and no <inertial>
     base = bases.infer(spec.compile(), "skid.urdf")
     # the front wheels hang off front_axle_link, a fixed link: they count
     assert sorted(w.joint for w in base.wheels if w.left) == ["front_left_wheel", "rear_left_wheel"]
@@ -216,10 +216,10 @@ def test_urdf_meshes_default_to_a_meshes_folder_beside_the_file(tmp_path):
     with pytest.raises(
         ValueError, match=r"mesh package://skid_description/meshes/bin.stl not found as .*/bin.stl; set mesh_dir"
     ):
-        bases.load(tmp_path / "skid.urdf", "skid.urdf")
+        robots.load_file(tmp_path / "skid.urdf", "skid.urdf")
     (tmp_path / "meshes").mkdir()
     shutil.copy(MESHES / "bin.stl", tmp_path / "meshes")
-    spec = bases.load(tmp_path / "skid.urdf", "skid.urdf")
+    spec = robots.load_file(tmp_path / "skid.urdf", "skid.urdf")
     assert spec.meshes[0].file == str(tmp_path / "meshes" / "bin.stl")
     spec.compile()
 
@@ -228,7 +228,7 @@ def test_unreadable_files_name_the_path(tmp_path):
     truncated = tmp_path / "truncated.xml"
     truncated.write_text(SKID[:80])
     with pytest.raises(ValueError, match=r"cannot load mjcf .*truncated.xml"):
-        bases.load(truncated, "base")
+        robots.load_file(truncated, "base")
 
 
 def test_zero_track_is_an_error(tmp_path):

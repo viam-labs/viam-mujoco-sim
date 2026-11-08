@@ -13,11 +13,13 @@ import itertools
 import json
 import math
 import os
+import re
 import tempfile
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from logging import getLogger
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree
@@ -28,6 +30,8 @@ from viam.spatialmath import OrientationVector, Quaternion
 
 from .meshes import ASSETS_DIR
 from .shapes import GEOM_TYPES
+
+LOGGER = getLogger("viam-mujoco-sim")
 
 _HINGE = int(mujoco.mjtJoint.mjJNT_HINGE)
 _SLIDE = int(mujoco.mjtJoint.mjJNT_SLIDE)
@@ -297,7 +301,8 @@ def _parse_urdf(root: ElementTree.Element, label: str) -> Kinematics:
     joints = root.findall("joint")
     children = {joint.find("child").get("link") for joint in joints}
     for link in root.findall("link"):
-        if link.get("name") not in children:
+        # RDK skips a world link: its joints' parent "world" is the world frame
+        if link.get("name") not in children and link.get("name") != "world":
             _add(frames, Frame(name=link.get("name"), parent="world", offset=np.eye(4)), label)
     for joint in joints:
         name, kind = joint.get("name"), joint.get("type")
@@ -324,6 +329,73 @@ def _parse_urdf(root: ElementTree.Element, label: str) -> Kinematics:
     return _chain(frames, label)
 
 
+def prune_urdf(data: bytes, link: str) -> bytes:
+    """The URDF with only the links and joints on the path from its root to
+    `link`, and no <link name="world"/>; a joint from world stays (RDK reads
+    that parent as the world frame, and MuJoCo keeps the joint's offset)."""
+    root = ElementTree.fromstring(data)
+    by_child = {joint.find("child").get("link"): joint for joint in root.findall("joint")}
+    links, joints, name = {link}, set(), link
+    while name in by_child:
+        joints.add(by_child[name].get("name"))
+        name = by_child[name].find("parent").get("link")
+        links.add(name)
+    links.discard("world")
+    for element in list(root):
+        if (element.tag == "link" and element.get("name") not in links) or (
+            element.tag == "joint" and element.get("name") not in joints
+        ):
+            root.remove(element)
+    return ElementTree.tostring(root)
+
+
+def flange_link(data: bytes, name: str | None, label: str) -> str:
+    """`name`, which must be a link of the URDF, else its one end link (a link
+    no joint hangs off; a world link aside)."""
+    root = ElementTree.fromstring(data)
+    links = [link.get("name") for link in root.findall("link") if link.get("name") != "world"]
+    if name is not None:
+        if name not in links:
+            raise ValueError(f"{label}: flange_link {name!r} is not a link; use one of {links}")
+        return name
+    parents = {joint.find("parent").get("link") for joint in root.findall("joint")}
+    ends = [link for link in links if link not in parents and link != "world"]
+    if len(ends) != 1:
+        raise ValueError(f"{label}: has end links {ends}; set flange_link to the link at the flange")
+    return ends[0]
+
+
+def check_flange_attrs(attrs: Mapping[str, Any], urdf: bool, label: str) -> None:
+    """flange_site is for an MJCF arm and flange_link for a URDF one."""
+    if urdf and "flange_site" in attrs:
+        raise ValueError(f"{label}: flange_site is for an MJCF arm; set flange_link for a .urdf")
+    if not urdf and "flange_link" in attrs:
+        raise ValueError(f"{label}: flange_link is for a .urdf arm; set flange_site for an MJCF")
+
+
+def has_mesh_collisions(data: bytes) -> bool:
+    """Whether a URDF has a collision mesh, which RDK reads from a file beside it."""
+    return ElementTree.fromstring(data).find("link/collision/geometry/mesh") is not None
+
+
+MESH_TYPES = {".stl": "stl", ".ply": "ply"}  # the mesh formats RDK reads
+
+
+def kinematics_meshes(data: bytes, folder: Path, label: str) -> dict[str, tuple[str, bytes]]:
+    """A URDF kinematics file's collision meshes as RDK looks them up, keyed
+    by path with any package://<package>/ stripped: (content type, bytes),
+    read by file name from `folder` as the sim's meshes are."""
+    meshes = {}
+    for mesh in ElementTree.fromstring(data).iterfind("link/collision/geometry/mesh"):
+        filename = mesh.get("filename")
+        kind = MESH_TYPES.get(Path(filename).suffix.lower())
+        if kind is None:
+            raise ValueError(f"{label}: collision mesh {filename} is not STL or PLY, which Viam's planner needs")
+        key = re.sub(r"^package://[^/]+/", "", filename)
+        meshes[key] = (kind, (folder / Path(filename).name).read_bytes())
+    return meshes
+
+
 def parse_kinematics(data: bytes, urdf: bool, label: str) -> Kinematics:
     """An SVA JSON or URDF kinematics file as one chain. Only SVA links carry
     geometry."""
@@ -342,19 +414,108 @@ def parse_kinematics(data: bytes, urdf: bool, label: str) -> Kinematics:
 # ----------------------------------------------------------------------------
 
 
-def load_mjcf(path: Path | str) -> mujoco.MjSpec:
-    """The MJCF as a spec, every actuator named (Menagerie leaves some
-    unnamed; they take their target's name) so state carries across rebuilds.
-    Every body is gravity-compensated, as a real arm controller does: without
-    it, position servos sag under load (the UR5e shoulder by 0.6 degrees) and
-    moves never converge."""
-    spec = mujoco.MjSpec.from_file(str(path))
-    for body in spec.bodies:
-        body.gravcomp = 1
+def mesh_folder(path: Path, mesh_dir: str | None) -> Path:
+    """Where a URDF's meshes are looked up by file name: mesh_dir, relative to
+    the file; by default its meshes/ folder if it has one, else its own."""
+    if mesh_dir is not None:
+        return path.parent / Path(mesh_dir).expanduser()
+    return path.parent / "meshes" if (path.parent / "meshes").is_dir() else path.parent
+
+
+def density_links(spec: mujoco.MjSpec) -> list[str]:
+    """Bodies with geoms and no <inertial>: MuJoCo gives them mass from geom
+    density (1000 kg/m^3), which a URDF link without <inertial> rarely means."""
+    return [body.name for body in spec.bodies if body.geoms and not body.explicitinertial]
+
+
+def load_file(path: Path, label: str, mesh_dir: str | None = None) -> mujoco.MjSpec:
+    """An .xml (MJCF) or .urdf file as a spec. Unnamed actuators take their
+    target's name (Menagerie leaves some unnamed; state carries across
+    rebuilds by name); static bodies aren't fused, so the compiled model has
+    the same bodies as the scene. A URDF's meshes (package:// paths) are found
+    by file name in mesh_folder."""
+    suffix = path.suffix.lower()
+    if suffix not in (".xml", ".urdf"):
+        raise ValueError(f"{label}: mjcf must be an .xml (MJCF) or .urdf file, got {path.name}")
+    if mesh_dir is not None and suffix != ".urdf":
+        raise ValueError(f"{label}: mesh_dir is for a .urdf mjcf; an MJCF names its own meshdir")
+    if suffix == ".xml":
+        try:
+            is_urdf = ElementTree.parse(path).getroot().tag == "robot"
+        except (ElementTree.ParseError, OSError):
+            is_urdf = False  # MuJoCo reports an unreadable file below
+        if is_urdf:
+            raise ValueError(f"{label}: {path} is a URDF; rename it to .urdf")
+    try:
+        spec = mujoco.MjSpec.from_file(str(path))
+    except ValueError as e:
+        raise ValueError(f"{label}: cannot load mjcf {path}: {e}") from e
+    spec.compiler.fusestatic = False
+    if suffix == ".urdf":
+        folder = mesh_folder(path, mesh_dir)
+        for mesh in spec.meshes:
+            # absolute paths: an attached spec's meshdir and strippath don't carry into the scene
+            found = folder / Path(mesh.file).name
+            if not found.is_file():
+                raise ValueError(f"{label}: mesh {mesh.file} not found as {found}; set mesh_dir")
+            mesh.file = str(found)
+        light = density_links(spec)
+        if light:
+            LOGGER.warning("%s: links %s have no <inertial>; their mass comes from geom density", label, light)
     for actuator in spec.actuators:
         if not actuator.name:
             actuator.name = actuator.target
     return spec
+
+
+def load_mjcf(path: Path, mesh_dir: str | None = None) -> mujoco.MjSpec:
+    """An arm's or gripper's file (.xml or .urdf) as a spec (load_file), every body
+    gravity-compensated, as a real arm controller does: without it, position
+    servos sag under load (the UR5e shoulder by 0.6 degrees) and moves never
+    converge."""
+    spec = load_file(path, str(path), mesh_dir)
+    for body in spec.bodies:
+        body.gravcomp = 1
+    return spec
+
+
+EFFORT_ERROR_RAD = 0.035  # an added servo reaches its joint's effort limit about 2 degrees off target
+
+
+def add_servos(spec: mujoco.MjSpec, joints: Sequence[str], label: str) -> None:
+    """A position actuator on each joint, named after it, with ctrl the joint
+    position (gear 1, gain == kp). kp reaches the joint's effort limit (a
+    URDF's <limit effort>, which MuJoCo makes the joint's actuator force
+    limit) at EFFORT_ERROR_RAD; kv damps it near-critically with the joint's
+    inertia at qpos0 in the spec as it is; ctrlrange is the joint's range."""
+    model = spec.compile()
+    data = mujoco.MjData(model)
+    mujoco.mj_forward(model, data)
+    inertia = np.zeros((model.nv, model.nv))
+    mujoco.mj_fullM(model, data, inertia)
+    for name in joints:
+        joint = model.joint(name)
+        if not model.jnt_actfrclimited[joint.id]:
+            raise ValueError(f"{label}: joint {name!r} has no effort limit; add <limit effort> to the URDF")
+        kp = float(model.jnt_actfrcrange[joint.id, 1]) / EFFORT_ERROR_RAD
+        dof = joint.dofadr[0]
+        actuator = spec.add_actuator(name=name, target=name, trntype=mujoco.mjtTrn.mjTRN_JOINT)
+        actuator.set_to_position(kp=kp, kv=2 * math.sqrt(kp * inertia[dof, dof]))
+        if model.jnt_limited[joint.id]:
+            actuator.ctrllimited = True
+            actuator.ctrlrange = model.jnt_range[joint.id].tolist()
+
+
+def prepare_urdf_arm(spec: mujoco.MjSpec, joints: Sequence[str], flange: str, label: str) -> None:
+    """Make a URDF arm's spec (from load_mjcf) drivable: servos on its joints
+    (add_servos), an attachment_site at the flange link's origin, and contact
+    excludes for the bodies touching at home (zeros). Vendor collision hulls
+    touching there would jam joints: MuJoCo's parent/child filter skips a
+    body welded to the world."""
+    add_servos(spec, joints, label)
+    spec.body(flange).add_site(name="attachment_site")
+    for first, second in home_contacts(spec, joints, [0.0] * len(joints)):
+        spec.add_exclude(bodyname1=first, bodyname2=second)
 
 
 def _name(model: mujoco.MjModel, kind: mujoco.mjtObj, index: int) -> str:
@@ -497,6 +658,24 @@ def gripper_actuator(
     if len(found) > 1:
         names = [_name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a) for a in found]
         raise ValueError(f"{label}: has more than one gripper actuator {names}; set actuator")
+    return found[0]
+
+
+def driven_joint(model: mujoco.MjModel, label: str) -> str:
+    """A URDF gripper's one movable joint that is not a <mimic> joint (which
+    MuJoCo makes the first joint of a joint equality, following its driver)."""
+    mimic = {
+        int(model.eq_obj1id[e]) for e in range(model.neq) if model.eq_type[e] == mujoco.mjtEq.mjEQ_JOINT
+    }
+    found = [
+        _name(model, mujoco.mjtObj.mjOBJ_JOINT, j) for j in range(model.njnt)
+        if model.jnt_type[j] in (_HINGE, _SLIDE) and j not in mimic
+    ]
+    if len(found) != 1:
+        raise ValueError(
+            f"{label}: a URDF gripper needs one movable joint that isn't a <mimic>, found {found}; "
+            "use an MJCF gripper"
+        )
     return found[0]
 
 

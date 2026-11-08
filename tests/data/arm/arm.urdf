@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<!-- A three-joint arm in the shape of a vendor description expanded with
+     `viam xacro convert`: a world link with an offset joint from it,
+     package:// STL collision meshes (meshes/ beside this file) whose base and
+     first-link hulls overlap by 0.5 mm at home, an effort limit on every
+     joint, and two end links, tool0 and a side sensor. -->
+<robot name="three">
+  <link name="world"/>
+  <link name="base_link">
+    <inertial><origin xyz="0 0 0.05"/><mass value="2"/>
+      <inertia ixx="0.0033" iyy="0.0033" izz="0.0033" ixy="0" ixz="0" iyz="0"/></inertial>
+    <collision><origin xyz="0 0 0.05"/>
+      <geometry><mesh filename="package://three_description/meshes/base.stl"/></geometry></collision>
+  </link>
+  <link name="link1">
+    <inertial><origin xyz="0 0 0.05"/><mass value="1"/>
+      <inertia ixx="0.0011" iyy="0.0011" izz="0.0006" ixy="0" ixz="0" iyz="0"/></inertial>
+    <collision><origin xyz="0 0 0.0495"/>
+      <geometry><mesh filename="package://three_description/meshes/link1.stl"/></geometry></collision>
+  </link>
+  <link name="link2">
+    <inertial><origin xyz="0.1 0 0"/><mass value="0.5"/>
+      <inertia ixx="0.0001" iyy="0.0018" izz="0.0018" ixy="0" ixz="0" iyz="0"/></inertial>
+    <collision><origin xyz="0.1 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry></collision>
+  </link>
+  <link name="link3">
+    <inertial><origin xyz="0.05 0 0"/><mass value="0.3"/>
+      <inertia ixx="0.0001" iyy="0.0003" izz="0.0003" ixy="0" ixz="0" iyz="0"/></inertial>
+    <collision><origin xyz="0.06 0 0"/><geometry><box size="0.08 0.03 0.03"/></geometry></collision>
+  </link>
+  <link name="tool0"/>
+  <link name="sensor_link"/>
+  <joint name="world_joint" type="fixed">
+    <parent link="world"/><child link="base_link"/><origin xyz="0 0 0.05" rpy="0 0 0"/>
+  </joint>
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/><child link="link1"/><origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/><limit lower="-3" upper="3" effort="50" velocity="3"/>
+  </joint>
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/><child link="link2"/><origin xyz="0 0 0.12" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="50" velocity="3"/>
+  </joint>
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/><child link="link3"/><origin xyz="0.2 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/><limit lower="-2" upper="2" effort="10" velocity="3"/>
+  </joint>
+  <joint name="tool0_joint" type="fixed">
+    <parent link="link3"/><child link="tool0"/><origin xyz="0.1 0 0" rpy="0 1.5707963267948966 0"/>
+  </joint>
+  <joint name="sensor_joint" type="fixed">
+    <parent link="link3"/><child link="sensor_link"/><origin xyz="0.05 0.03 0" rpy="0 0 0"/>
+  </joint>
+</robot>
