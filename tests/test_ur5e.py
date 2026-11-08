@@ -1,5 +1,6 @@
 """The bundled UR5e and Robotiq 2F-85, as compiled scenes."""
 
+import math
 from pathlib import Path
 
 import mujoco
@@ -8,6 +9,8 @@ import pytest
 
 from mujoco_module import robots
 from mujoco_module.handles import ArmHandle, GripperHandle
+from mujoco_module.models.arm import _densify
+from mujoco_module.sim import WorldConfig
 
 KINEMATICS = Path(__file__).parents[1] / "assets" / "universal_robots_ur5e" / "ur5e_kinematics.json"
 HOME = [-1.5708, -1.5708, 1.5708, -1.5708, -1.5708, 0.0]
@@ -125,3 +128,73 @@ def test_2f85_on_the_lite6_is_an_error(sim):
     ArmHandle(sim, "pick-arm", {"asset": "lite6"})
     with pytest.raises(ValueError, match="already has a gripper in its MJCF"):
         GripperHandle(sim, "grip", "pick-arm", {"asset": "robotiq_2f85"})
+
+
+def test_epick_attaches_with_its_cup_130mm_out_along_the_tool_axis(sim):
+    ArmHandle(sim, "ur", {"asset": "ur5e"})
+    gripper = GripperHandle(sim, "grip", "ur", {"asset": "robotiq_epick"})
+    assert gripper.suction
+    assert sim.model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+    end = sim.data.site("ur/viam_frame")
+    axes = end.xmat.reshape(3, 3)
+    assert axes.T @ (sim.data.site("grip/pinch").xpos - end.xpos) == pytest.approx([0, 0, 0.130], abs=1e-4)
+    # the housing mesh runs from the flange to just short of the cup
+    geom = sim.model.geom("grip/housing")
+    mesh = sim.model.mesh(geom.dataid[0])
+    local = sim.model.mesh_vert[mesh.vertadr[0] : mesh.vertadr[0] + mesh.vertnum[0]]
+    world = sim.data.geom_xpos[geom.id] + local @ sim.data.geom_xmat[geom.id].reshape(3, 3).T
+    along = (world - end.xpos) @ axes[:, 2]
+    assert -0.005 < along.min() < 0 and 0.099 < along.max() < 0.105
+    assert np.abs((world - end.xpos) @ axes[:, :2]).max() < 0.045
+
+
+# Tool straight down above (-0.133, 0.492), the UR5e's home TCP position: at
+# z 0.15 (the top of a carton on the floor), 0.40 and 0.25.
+PICK = [-1.5708, -1.4357, 1.9828, -2.1179, -1.5708, 0.0]
+LIFT = [-1.5708, -1.5655, 1.4579, -1.4632, -1.5708, 0.0]
+LOWER = [-1.5708, -1.5354, 1.8134, -1.8488, -1.5708, 0.0]
+CARTON = {"name": "carton", "type": "cube", "size": 1, "scale": [0.19, 0.15, 0.15], "mass": 1.0,
+          "position": [1.0, 1.0, 0.075]}
+
+
+def test_epick_carries_a_carton_through_ramped_moves_and_drops_it(sim):
+    """Sets the ePick's adhesion gain (100 N). Moves stream targets as
+    MoveThroughJointPositions does, at 30 deg/s with abrupt starts and stops."""
+    sim.configure_world(WorldConfig.from_attrs({"props": [CARTON]}))
+    arm = ArmHandle(sim, "ur", {"asset": "ur5e", "max_joint_deg_s": 30})
+    gripper = GripperHandle(sim, "grip", "ur", {"asset": "robotiq_epick"})
+    worst = 0.0
+
+    def gap() -> float:
+        """Distance from the cup's face to the carton's top centre."""
+        carton = sim.data.body("carton")
+        top = carton.xpos + carton.xmat.reshape(3, 3) @ [0, 0, 0.075]
+        return float(np.linalg.norm(sim.data.site("grip/pinch").xpos - top))
+
+    def move(target):
+        nonlocal worst
+        stream = _densify(arm.get_joint_positions(), [target], math.radians(30) * 0.02)
+        for step in stream + [target] * 50:  # then a second to settle
+            arm.set_joint_targets(step)
+            sim.advance(0.02)
+            worst = max(worst, gap())
+
+    move(PICK)
+    pinch = sim.data.site("grip/pinch").xpos.copy()
+    sim.set_prop_pose("carton", list(pinch - [0, 0, 0.075]), [1, 0, 0, 0])
+    sim.advance(0.5)
+    gripper.close_jaws()
+    sim.advance(0.2)
+    assert gripper.firm_grasp()
+    worst = 0.0
+    move(LIFT)
+    move([0.0, *LIFT[1:]])  # a quarter turn about the base
+    move([0.0, *LOWER[1:]])
+    assert gripper.firm_grasp()
+    assert worst < 0.005  # within the cup's 2 mm margin, plus a little
+    carried = sim.get_prop_pose("carton")["position"]
+    assert carried[2] > 0.16  # centre lifted 9 cm clear of where it sat
+    gripper.open_jaws()
+    sim.advance(1.0)
+    assert not gripper.firm_grasp()
+    assert sim.get_prop_pose("carton")["position"][2] == pytest.approx(0.075, abs=0.002)

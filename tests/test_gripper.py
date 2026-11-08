@@ -259,3 +259,130 @@ def test_unnamed_root_body_is_an_error(sim, position_arm, tmp_path):
     unnamed_root.write_text(GRIPPER_MJCF.replace('<body name="palm">', "<body>"))
     with pytest.raises(ValueError, match="root body has no name"):
         GripperHandle(sim, "g", "arm", {"mjcf": str(unnamed_root)})
+
+
+SUCTION_MJCF = """<mujoco>
+  <worldbody>
+    <body name="tool"><geom type="cylinder" size="0.02 0.01" pos="0.08 0 0.01"/>
+      <body name="cup" pos="0.08 0 0.0225">
+        <geom type="cylinder" size="0.0125 0.0025" margin="0.002"/>
+      </body>
+    </body>
+  </worldbody>
+  <actuator><adhesion name="suction" body="cup" ctrlrange="0 1" gain="20"/></actuator>
+</mujoco>"""
+
+
+@pytest.fixture
+def suction_file(tmp_path):
+    path = tmp_path / "suction.xml"
+    path.write_text(SUCTION_MJCF)
+    return str(path)
+
+
+def ctrl(sim, actuator):
+    return sim.data.ctrl[sim.model.actuator(actuator).id]
+
+
+def test_suction_grab_open_and_stop_set_the_vacuum(sim, position_arm, suction_file):
+    position_arm(BARE_ARM_MJCF)
+    gripper = GripperHandle(sim, "g", "arm", {"mjcf": suction_file})
+    assert gripper.suction
+    gripper.close_jaws()
+    sim.step_once()
+    assert ctrl(sim, "g/suction") == 1.0
+    assert gripper.vacuum() == 1.0
+    gripper.stop()  # keeps the vacuum: a held object is not dropped
+    sim.step_once()
+    assert ctrl(sim, "g/suction") == 1.0
+    assert not gripper.is_moving()
+    gripper.open_jaws()
+    sim.step_once()
+    assert ctrl(sim, "g/suction") == 0.0
+    assert gripper.vacuum() == 0.0
+
+
+def test_suction_grip_force_is_the_adhesion_force(sim, position_arm, suction_file):
+    position_arm(BARE_ARM_MJCF)
+    gripper = GripperHandle(sim, "g", "arm", {"mjcf": suction_file, "grip_force_n": 5})
+    gripper.close_jaws()
+    sim.step_once()
+    assert ctrl(sim, "g/suction") == pytest.approx(0.25)  # 5 N of a 20 N gain
+    assert gripper.vacuum() == pytest.approx(0.25)
+    with pytest.raises(ValueError, match=r"grip_force_n 30.0 is outside the suction actuator's range \[0, 20\] N"):
+        GripperHandle(sim, "g2", "arm", {"mjcf": suction_file, "grip_force_n": 30})
+    with pytest.raises(ValueError, match="open and closed do not apply to a suction gripper"):
+        GripperHandle(sim, "g2", "arm", {"mjcf": suction_file, "open": 0, "closed": 1})
+
+
+def test_suction_holds_a_free_body_only_with_the_vacuum_on(sim, position_arm, suction_file):
+    import mujoco
+
+    from conftest import BLOCK
+    from mujoco_module.sim import WorldConfig
+
+    position_arm(BARE_ARM_MJCF)
+    gripper = GripperHandle(sim, "g", "arm", {"mjcf": suction_file})
+    top = sim.data.body("g/cup").xpos + [0, 0, 0.0025]
+    on_cup = list(top + [0, 0, BLOCK["size"] / 2])
+    sim.set_prop_pose("pick_block", on_cup, [1, 0, 0, 0])
+    assert not gripper.firm_grasp()  # touching, vacuum off
+    gripper.close_jaws()
+    assert gripper.firm_grasp()
+    gripper.open_jaws()
+    assert not gripper.firm_grasp()  # released, though still touching
+    # a fixed body (like an obstacle) under vacuum is not holding
+    shelf = {"name": "shelf", "type": "cube", "size": BLOCK["size"], "fixed": True, "position": on_cup}
+    sim.configure_world(WorldConfig.from_attrs({"props": [{**BLOCK, "position": [0.5, 0.5, 0.02]}, shelf]}))
+    sim.set_prop_pose("pick_block", [0.5, 0.5, 0.02], [1, 0, 0, 0])
+    mujoco.mj_forward(sim.model, sim.data)
+    cup = sim.model.body("g/cup").id
+    shelf_id = sim.model.body("shelf").id
+    assert any(
+        {cup, shelf_id} == {sim.model.geom_bodyid[c.geom1], sim.model.geom_bodyid[c.geom2]}
+        for c in sim.data.contact[: sim.data.ncon]
+    )
+    gripper.close_jaws()
+    assert not gripper.firm_grasp()
+
+
+def test_integrated_suction_gripper(sim, position_arm):
+    position_arm(POSITION_GRIPPER_MJCF.replace(
+        '<position name="grip" joint="f" kp="100" kv="5" ctrlrange="0 0.04"/>',
+        '<adhesion name="grip" body="hand" ctrlrange="0 1" gain="10"/>',
+    ))
+    gripper = GripperHandle(sim, "g", "arm", {})
+    assert gripper.suction
+    gripper.close_jaws()
+    sim.step_once()
+    assert ctrl(sim, "arm/grip") == 1.0
+    assert not gripper.firm_grasp()
+
+
+def test_suction_model_reports_vacuum_and_keeps_it_on_stop(running_sim, tmp_path, suction_file):
+    import asyncio
+    import json
+
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.arm import MujocoArm
+    from mujoco_module.models.gripper import MujocoGripper
+    from mujoco_module.models.world import MujocoWorld
+
+    def config(name, attrs):
+        return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
+
+    (tmp_path / "arm.xml").write_text(BARE_ARM_MJCF)
+    (tmp_path / "arm.json").write_text(json.dumps(ONE_JOINT_SVA))
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    arm = {"world": "sim-world", "mjcf": str(tmp_path / "arm.xml"), "kinematics_url": str(tmp_path / "arm.json")}
+    MujocoArm.new(config("arm", arm), {})
+    gripper = MujocoGripper.new(config("g", {"world": "sim-world", "arm": "arm", "mjcf": suction_file}), {})
+    asyncio.run(gripper.grab())
+    asyncio.run(gripper.stop())
+    status = asyncio.run(gripper.is_holding_something())
+    assert status.meta == {"input": 1.0, "firm_grasp": False, "vacuum": 1.0}
+    assert status.is_holding_something is False
+    asyncio.run(gripper.open())
+    assert asyncio.run(gripper.is_holding_something()).meta["vacuum"] == 0.0

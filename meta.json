@@ -20,7 +20,7 @@
     {
       "model": "viam-labs:mujoco-sim:gripper",
       "api": "rdk:component:gripper",
-      "short_description": "A gripper on a mujoco-sim arm: the Lite6's, a Robotiq 2F-85, or your own MJCF",
+      "short_description": "A gripper on a mujoco-sim arm: the Lite6's, a Robotiq 2F-85 or ePick, or your own MJCF",
       "markdown_link": "README.md#model-viam-labsmujoco-simgripper"
     },
     {

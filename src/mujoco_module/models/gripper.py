@@ -4,7 +4,8 @@ Attributes:
   world (string, required)  - name of the viam-labs:mujoco-sim:world component
   arm (string, required)    - the viam-labs:mujoco-sim:arm it is on
   asset (string)            - "lite6_gripper": the arm MJCF's own gripper (default),
-                              or "robotiq_2f85", a bundled MJCF attached like mjcf
+                              or "robotiq_2f85" / "robotiq_epick" (suction), a
+                              bundled MJCF attached like mjcf
   mjcf (string)             - instead: a gripper MJCF to attach at the arm's flange
                               site; absolute, ~, or relative to assets/
   actuator (string)         - the gripper's actuator (default inferred)
@@ -14,7 +15,9 @@ Attributes:
                               instead of contacts, like the production
                               gripper (default false)
   grip_force_n (float)      - force grippers: closing/opening force, > 0 and
-                              within the actuator's ctrlrange (default 5)
+                              within the actuator's ctrlrange (default 5);
+                              suction grippers: the adhesion force (default the
+                              actuator's maximum)
 
 The gripper is binary: Open, Grab and GoToInputs latch a state and return
 immediately, matching the viam-labs:isaac-sim Lite6 gripper. The jaws move
@@ -121,8 +124,10 @@ class MujocoGripper(Gripper, EasyResource):
         return True
 
     async def stop(self, **kwargs) -> None:
-        await asyncio.to_thread(self._h().stop)
-        self._closed = False
+        handle = self._h()
+        await asyncio.to_thread(handle.stop)
+        if not handle.suction:  # suction keeps its vacuum on Stop
+            self._closed = False
 
     async def is_moving(self) -> bool:
         return await asyncio.to_thread(self._h().is_moving)
@@ -130,16 +135,14 @@ class MujocoGripper(Gripper, EasyResource):
     async def is_holding_something(self, **kwargs) -> Gripper.HoldingStatus:
         handle = self._h()
         firm_grasp = await asyncio.to_thread(handle.firm_grasp)
-        jaw = await asyncio.to_thread(handle.jaw)
-        meta = {
-            "input": 1.0 if self._closed else 0.0,
-            "jaw": jaw,
-            "open": handle.open_q,
-            "closed": handle.closed_q,
-            "firm_grasp": firm_grasp,
-        }
-        if handle.slide:  # the names Lite6 clients read
-            meta.update(jaw_m=jaw, open_m=handle.open_q, closed_m=handle.closed_q)
+        meta = {"input": 1.0 if self._closed else 0.0, "firm_grasp": firm_grasp}
+        if handle.suction:
+            meta["vacuum"] = await asyncio.to_thread(handle.vacuum)
+        else:
+            jaw = await asyncio.to_thread(handle.jaw)
+            meta.update(jaw=jaw, open=handle.open_q, closed=handle.closed_q)
+            if handle.slide:  # the names Lite6 clients read
+                meta.update(jaw_m=jaw, open_m=handle.open_q, closed_m=handle.closed_q)
         holding = self._closed if self._sensorless else firm_grasp
         return Gripper.HoldingStatus(is_holding_something=holding, meta=meta)
 

@@ -59,6 +59,8 @@ GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
     "lite6_gripper": {},
     # mujoco_menagerie@98a70c56 robotiq_2f85
     "robotiq_2f85": {"mjcf": "robotiq_2f85/2f85.xml"},
+    # written here; mesh from ValerioMa/robotiq_tcp@45891ab, decimated
+    "robotiq_epick": {"mjcf": "robotiq_epick/epick.xml"},
 }
 
 MAX_SUBSTEPS = 50

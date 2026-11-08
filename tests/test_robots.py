@@ -248,6 +248,7 @@ def test_home_falls_back_to_keyframe_qpos():
         ('<position name="g" joint="f" kp="10"/>', "position"),
         ('<position name="g" joint="f" kp="10" timeconst="0.1"/>', "position"),
         ('<general name="g" joint="f" biastype="affine" gainprm="10" biasprm="0 -10 0"/>', "position"),
+        ('<adhesion name="g" body="hand" ctrlrange="0 1" gain="1"/>', "suction"),
     ],
 )
 def test_control_type(actuator, kind):
@@ -259,13 +260,28 @@ def test_control_type(actuator, kind):
     "actuator, what",
     [
         ('<velocity name="g" joint="f" kv="10"/>', "a velocity"),
-        ('<adhesion name="g" body="hand" ctrlrange="0 1" gain="1"/>', "an adhesion"),
         ('<intvelocity name="g" joint="f" kp="10" actrange="0 1"/>', "an unsupported"),
     ],
 )
 def test_unsupported_control_types_are_named(actuator, what):
     model = compile_xml(ARM.replace('<motor name="grip" joint="f" ctrlrange="-5 5"/>', actuator).replace(' ctrl="0.3 0.1 0.2 0"', ""))
     with pytest.raises(ValueError, match=f"'g' is {what} actuator"):
+        robots.control_type(model, model.actuator("g").id, "arm.xml")
+
+
+@pytest.mark.parametrize(
+    "actuator",
+    [
+        '<general name="g" body="hand" ctrlrange="-1 1" gainprm="5"/>',
+        '<general name="g" body="hand" ctrllimited="false" gainprm="5"/>',
+        '<general name="g" body="hand" ctrlrange="0 1" gainprm="5" biastype="affine" biasprm="1"/>',
+        '<adhesion name="g" body="hand" ctrlrange="0.2 1" gain="1"/>',
+        '<adhesion name="g" body="hand" ctrlrange="0 1" gain="0"/>',
+    ],
+)
+def test_body_actuators_other_than_adhesion_are_errors(actuator):
+    model = compile_xml(ARM.replace('<motor name="grip" joint="f" ctrlrange="-5 5"/>', actuator).replace(' ctrl="0.3 0.1 0.2 0"', ""))
+    with pytest.raises(ValueError, match="'g' pulls on a body but is not a suction actuator"):
         robots.control_type(model, model.actuator("g").id, "arm.xml")
 
 
@@ -282,8 +298,10 @@ def test_integrated_gripper_actuator_jaw_and_bodies():
     assert (model.joint(jaw.joint).name, jaw.open, jaw.closed) == ("f", 0.0, 0.04)
     # the open command reversed: open drives toward the other end
     assert robots.jaw(model, grip, 5.0, -5.0, "arm.xml").open == 0.04
-    bodies = robots.integrated_gripper_bodies(model, joints[-1], jaw.joint)
+    bodies = robots.integrated_gripper_bodies(model, joints[-1], int(model.jnt_bodyid[jaw.joint]))
     assert names(model, mujoco.mjtObj.mjOBJ_BODY, bodies) == ["hand", "finger"]
+    # a suction cup: the body itself, not a jaw joint
+    assert robots.integrated_gripper_bodies(model, joints[-1], model.body("hand").id) == bodies
     assert robots.gripper_actuator(model, "arm.xml", name="act_a") == model.actuator("act_a").id
     with pytest.raises(ValueError, match="'nope' is not in the MJCF"):
         robots.gripper_actuator(model, "arm.xml", name="nope")

@@ -1,0 +1,35 @@
+<mujoco model="robotiq_epick">
+  <!-- Robotiq ePick vacuum gripper. Mesh: ValerioMa/robotiq_tcp@45891ab
+       robotiq_epick_visualization/meshes/collision/robotiq_epick.stl, decimated
+       (see NOTICE). Collision shapes and inertia follow that repo's URDF. The
+       cup's face, and the pinch site, are 130 mm from the flange. -->
+  <compiler angle="radian" meshdir="assets" autolimits="true"/>
+
+  <option cone="elliptic" impratio="10"/>
+
+  <asset>
+    <material name="housing" rgba="0.72 0.72 0.74 1"/>
+    <material name="rubber" rgba="0.12 0.12 0.12 1"/>
+    <mesh name="epick" file="robotiq_epick.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <body name="base">
+      <inertial pos="0 0 0.055" mass="0.745" diaginertia="0.003084 0.002999 0.000546"/>
+      <!-- the STL's long axis is along Y; turn it onto the tool axis -->
+      <geom name="housing" type="mesh" mesh="epick" material="housing" pos="0 0 0.095"
+        quat="0.7071068 0.7071068 0 0" contype="0" conaffinity="0" group="2"/>
+      <geom name="body" type="cylinder" size="0.044 0.0525" pos="0 0 0.0525" group="3"/>
+      <geom name="stem" type="cylinder" size="0.006 0.015" pos="0 0 0.11" material="rubber"/>
+      <body name="cup" pos="0 0 0.1275">
+        <geom name="cup" type="cylinder" size="0.0225 0.0025" mass="0.01" margin="0.002"
+          material="rubber"/>
+        <site name="pinch" pos="0 0 0.0025"/>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <adhesion name="suction" body="cup" ctrlrange="0 1" gain="100"/>
+  </actuator>
+</mujoco>

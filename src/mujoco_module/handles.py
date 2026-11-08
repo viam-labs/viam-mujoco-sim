@@ -733,7 +733,8 @@ class GripperHandle:
     with attrs["mjcf"] a gripper MJCF attached at the arm's flange site.
     Position control writes the open/closed values to
     ctrl; force control writes their signs times grip_force_n. The jaw is the
-    actuator's joint (a tendon's first), in its own units (m or rad)."""
+    actuator's joint (a tendon's first), in its own units (m or rad). Suction
+    (<adhesion>) has no jaw: grab writes the vacuum level to ctrl, open 0."""
 
     MOVING = 1e-3  # jaw joint units per second
 
@@ -761,21 +762,43 @@ class GripperHandle:
             path = robots.resolve_path(str(mjcf), f"{label}: mjcf")
             model, prefix, where = robots.load_mjcf(path).compile(), f"{name}/", str(path)
             actuator = robots.gripper_actuator(model, where, name=attrs.get("actuator"))
-        self._position = robots.control_type(model, actuator, where) == "position"
+        kind = robots.control_type(model, actuator, where)
+        self._position = kind == "position"
+        self.suction = kind == "suction"
         low, high = (float(value) for value in model.actuator_ctrlrange[actuator])
-        if not model.actuator_ctrllimited[actuator] and not ("open" in attrs and "closed" in attrs):
-            raise ValueError(f"{where}: the gripper actuator has no ctrlrange; set open and closed")
-        self._open = float(attrs.get("open", low))
-        self._closed = float(attrs.get("closed", high))
-        jaw = robots.jaw(model, actuator, self._open, self._closed, where)
-        self.open_q, self.closed_q = jaw.open, jaw.closed
-        self.slide = int(model.jnt_type[jaw.joint]) == int(mujoco.mjtJoint.mjJNT_SLIDE)
-        if not model.joint(jaw.joint).name:
-            raise ValueError(f"{where}: the gripper's jaw joint has no name; name the MJCF's jaw joint")
-        self._joint = prefix + model.joint(jaw.joint).name
+        self._force = float(attrs.get("grip_force_n", DEFAULT_GRIP_FORCE_N))
+        if self.suction:
+            stray = [key for key in ("open", "closed") if key in attrs]
+            if stray:
+                raise ValueError(f"{label}: {' and '.join(stray)} do not apply to a suction gripper")
+            # adhesion force is gain x ctrl, shared among the cup's contacts
+            gain = float(model.actuator_gainprm[actuator, 0])
+            self._max = high
+            self._open, self._closed = 0.0, high
+            if "grip_force_n" in attrs:
+                self._closed = self._force / gain
+                if not low <= self._closed <= high:
+                    raise ValueError(
+                        f"{label}: grip_force_n {self._force} is outside the suction actuator's "
+                        f"range [{low * gain:g}, {high * gain:g}] N"
+                    )
+            gripper_body = int(model.actuator_trnid[actuator, 0])
+            self._cup = prefix + model.body(gripper_body).name
+        else:
+            if not model.actuator_ctrllimited[actuator] and not ("open" in attrs and "closed" in attrs):
+                raise ValueError(f"{where}: the gripper actuator has no ctrlrange; set open and closed")
+            self._open = float(attrs.get("open", low))
+            self._closed = float(attrs.get("closed", high))
+            jaw = robots.jaw(model, actuator, self._open, self._closed, where)
+            self.open_q, self.closed_q = jaw.open, jaw.closed
+            self.slide = int(model.jnt_type[jaw.joint]) == int(mujoco.mjtJoint.mjJNT_SLIDE)
+            if not model.joint(jaw.joint).name:
+                raise ValueError(f"{where}: the gripper's jaw joint has no name; name the MJCF's jaw joint")
+            self._joint = prefix + model.joint(jaw.joint).name
+            gripper_body = int(model.jnt_bodyid[jaw.joint])
         self._actuator = prefix + model.actuator(actuator).name
         if mjcf is None:
-            roots = robots.integrated_gripper_bodies(model, handle.joints[-1], jaw.joint)[:1]
+            roots = robots.integrated_gripper_bodies(model, handle.joints[-1], gripper_body)[:1]
         else:
             roots = [b for b in range(1, model.nbody) if model.body_parentid[b] == 0]
         if not all(model.body(root).name for root in roots):
@@ -785,11 +808,10 @@ class GripperHandle:
         # Captures the arm's flange site, integrated-gripper conflict and root at build;
         # viam-server rebuilds dependents when the arm is reconfigured.
         self._arm_root = f"{arm}/{handle.root_body}"
-        self._force = float(attrs.get("grip_force_n", DEFAULT_GRIP_FORCE_N))
         if self._position:
             if "grip_force_n" in attrs:
                 LOGGER.debug("%s: grip_force_n is ignored; the gripper is position controlled", label)
-        else:
+        elif not self.suction:
             if self._open * self._closed >= 0:
                 raise ValueError(
                     f"{where}: a force gripper needs open and closed of opposite signs, "
@@ -839,7 +861,9 @@ class GripperHandle:
             self._sim.remove_contribution(self.name)
 
     def _command(self, value: float) -> float:
-        return value if self._position else math.copysign(self._force, value)
+        if self._position or self.suction:
+            return value
+        return math.copysign(self._force, value)
 
     def _on_step(self, _dt: float) -> None:
         model, data = self._sim.model, self._sim.data
@@ -849,9 +873,9 @@ class GripperHandle:
             return  # arm absent; resume when it is re-added
         data.ctrl[actuator] = self._ctrl
 
-    def _require_joint(self) -> None:
+    def _require_scene(self) -> None:
         model = self._sim.model
-        if model is None or mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, self._joint) < 0:
+        if model is None or mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator) < 0:
             raise RuntimeError(f"the arm for gripper {self.name!r} is not in the scene")
 
     def _set(self, ctrl: float) -> None:
@@ -867,9 +891,12 @@ class GripperHandle:
         self._set(self._command(self._closed))
 
     def stop(self) -> None:
-        """Force: no force. Position: hold the jaw where it is."""
+        """Force: no force. Position: hold the jaw where it is. Suction: keep
+        the vacuum, so a held object stays held."""
 
         def apply() -> None:
+            if self.suction:
+                return
             if not self._position:
                 self._ctrl = 0.0
                 return
@@ -882,7 +909,7 @@ class GripperHandle:
         self._sim.run(apply)
 
     def _read_jaw(self) -> float:
-        self._require_joint()
+        self._require_scene()
         assert self._sim.model is not None and self._sim.data is not None
         return float(self._sim.data.qpos[self._sim.model.joint(self._joint).qposadr[0]])
 
@@ -890,9 +917,15 @@ class GripperHandle:
         """The jaw joint's position, from open_q to closed_q."""
         return self._sim.run(self._read_jaw)
 
+    def vacuum(self) -> float:
+        """Suction: the commanded vacuum, 0 to 1 of the actuator's maximum."""
+        return self._sim.run(lambda: self._ctrl / self._max)
+
     def is_moving(self) -> bool:
         def read() -> bool:
-            self._require_joint()
+            self._require_scene()
+            if self.suction:
+                return False
             assert self._sim.model is not None and self._sim.data is not None
             joint = self._sim.model.joint(self._joint)
             return bool(abs(self._sim.data.qvel[joint.dofadr[0]]) > self.MOVING)
@@ -901,16 +934,27 @@ class GripperHandle:
 
     def firm_grasp(self) -> bool:
         """Some body, neither the world nor part of the arm or gripper, touches
-        the gripper at two contacts that push from opposite sides."""
+        the gripper at two contacts that push from opposite sides. Suction:
+        the vacuum is on and the cup touches a body that can move (not an
+        obstacle) and is not part of the arm or gripper."""
 
         def read() -> bool:
-            self._require_joint()
+            self._require_scene()
             model, data = self._sim.model, self._sim.data
             assert model is not None and data is not None
+            arm_root = model.body_rootid[model.body(self._arm_root).id]
+            if self.suction:
+                cup = model.body(self._cup).id
+                return self._ctrl > 0.0 and any(
+                    model.geom_bodyid[mine] == cup
+                    and model.body_weldid[model.geom_bodyid[other]] != 0  # 0: welded to the world
+                    and model.body_rootid[model.geom_bodyid[other]] != arm_root
+                    for contact in data.contact[: data.ncon]
+                    for mine, other in ((contact.geom1, contact.geom2), (contact.geom2, contact.geom1))
+                )
             gripper = {
                 b for name in self._roots for b in robots.subtree(model, model.body(name).id)
             }
-            arm_root = model.body_rootid[model.body(self._arm_root).id]
             pushes: dict[int, list[np.ndarray]] = {}
             for contact in data.contact[: data.ncon]:
                 for mine, other, sign in (

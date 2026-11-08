@@ -33,6 +33,7 @@ _HINGE = int(mujoco.mjtJoint.mjJNT_HINGE)
 _SLIDE = int(mujoco.mjtJoint.mjJNT_SLIDE)
 _TRN_JOINT = int(mujoco.mjtTrn.mjTRN_JOINT)
 _TRN_TENDON = int(mujoco.mjtTrn.mjTRN_TENDON)
+_TRN_BODY = int(mujoco.mjtTrn.mjTRN_BODY)
 _WRAP_JOINT = int(mujoco.mjtWrap.mjWRAP_JOINT)
 _BIAS_NONE = int(mujoco.mjtBias.mjBIAS_NONE)
 _BIAS_AFFINE = int(mujoco.mjtBias.mjBIAS_AFFINE)
@@ -402,9 +403,25 @@ def arm_joints(
 
 
 def control_type(model: mujoco.MjModel, actuator: int, label: str) -> str:
-    """"position" or "force"; ValueError for anything else."""
+    """"position", "force" or "suction" (<adhesion>); ValueError for anything else."""
     trn = int(model.actuator_trntype[actuator])
     bias = int(model.actuator_biastype[actuator])
+    if trn == _TRN_BODY:
+        low, high = model.actuator_ctrlrange[actuator]
+        if (
+            model.actuator_gaintype[actuator] == _GAIN_FIXED
+            and bias == _BIAS_NONE
+            and model.actuator_dyntype[actuator] == int(mujoco.mjtDyn.mjDYN_NONE)
+            and model.actuator_ctrllimited[actuator]
+            and low == 0 < high
+            and model.actuator_gainprm[actuator, 0] > 0
+        ):
+            return "suction"
+        raise ValueError(
+            f"{label}: actuator {_name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator)!r} pulls on a "
+            "body but is not a suction actuator; use <adhesion> (fixed gain, no bias or dynamics, "
+            "ctrlrange 0 to a positive maximum)"
+        )
     if (
         trn in (_TRN_JOINT, _TRN_TENDON)
         and model.actuator_gaintype[actuator] == _GAIN_FIXED
@@ -414,16 +431,14 @@ def control_type(model: mujoco.MjModel, actuator: int, label: str) -> str:
             return "force"
         if bias == _BIAS_AFFINE and model.actuator_biasprm[actuator, 1] < 0:
             return "position"
-    if trn == int(mujoco.mjtTrn.mjTRN_BODY):
-        what = "an adhesion"
-    elif bias == _BIAS_AFFINE and model.actuator_biasprm[actuator, 1] == 0:
+    if bias == _BIAS_AFFINE and model.actuator_biasprm[actuator, 1] == 0:
         what = "a velocity"
     else:
         what = "an unsupported"
     raise ValueError(
         f"{label}: actuator {_name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator)!r} is {what} "
-        "actuator; supported are position (<position>, <general biastype=\"affine\">) "
-        "and force (<motor>, <general>)"
+        "actuator; supported are position (<position>, <general biastype=\"affine\">), "
+        "force (<motor>, <general>) and suction (<adhesion>)"
     )
 
 
@@ -518,15 +533,15 @@ def subtree(model: mujoco.MjModel, root: int) -> list[int]:
     return [b for b in range(model.nbody) if _is_ancestor(model, root, b)]
 
 
-def integrated_gripper_bodies(model: mujoco.MjModel, last_arm_joint: int, jaw_joint: int) -> list[int]:
-    """The child of the last arm joint's body whose subtree holds the jaw
-    joint, with its subtree; the jaw body's subtree when there is no such child."""
+def integrated_gripper_bodies(model: mujoco.MjModel, last_arm_joint: int, body: int) -> list[int]:
+    """The child of the last arm joint's body whose subtree holds `body` (the
+    jaw joint's body or the suction cup), with its subtree; `body`'s subtree
+    when there is no such child."""
     parent = int(model.jnt_bodyid[last_arm_joint])
-    jaw_body = int(model.jnt_bodyid[jaw_joint])
     for child in range(model.nbody):
-        if model.body_parentid[child] == parent and child != parent and _is_ancestor(model, child, jaw_body):
+        if model.body_parentid[child] == parent and child != parent and _is_ancestor(model, child, body):
             return subtree(model, child)
-    return subtree(model, jaw_body)
+    return subtree(model, body)
 
 
 # ----------------------------------------------------------------------------

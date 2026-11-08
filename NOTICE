@@ -17,6 +17,14 @@ This product includes third-party material:
 - assets/robotiq_2f85/ (Robotiq 2F-85 MJCF and meshes) from google-deepmind/mujoco_menagerie
   at commit 98a70c569c4c1b6da467a20012f766ee1f8dc521, BSD-2-Clause,
   Copyright (c) 2013, ROS-Industrial. See assets/robotiq_2f85/LICENSE.
+- assets/robotiq_epick/assets/robotiq_epick.stl (Robotiq ePick mesh) from ValerioMa/robotiq_tcp
+  at commit 45891abd454c3e5bc1bf75ebf151256d5a283d5d
+  (robotiq_epick_visualization/meshes/collision/robotiq_epick.stl), MIT,
+  Copyright (c) 2019 Valerio Magnago; the geometry appears derived from Robotiq's published CAD.
+  Decimated from 70,777 to 7,412 faces with trimesh 5.2.0 and fast-simplification 0.2.0:
+  trimesh.load_mesh(path).simplify_quadric_decimation(face_count=5000)
+  (the target is approximate; this yields 7,412 faces).
+  See assets/robotiq_epick/LICENSE. assets/robotiq_epick/epick.xml is written for this module.
 - src/mujoco_module/models/arm.py, src/mujoco_module/models/utils.py, src/main.py,
   env.sh and run.nodetect.sh are adapted from viam-modules/viam-isaac-sim, Apache-2.0,
   Copyright Viam; modified for MuJoCo.

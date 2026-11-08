@@ -49,7 +49,9 @@ cell with a UR5e and a Robotiq 2F-85. Its `pick_block` starts parked out of reac
 rover cell: a rover with a LIDAR inside a walled pen, and
 [`examples/rover-nav.json`](examples/rover-nav.json) adds odometry and
 nav-stack for SLAM and navigation in it (see
-[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)). With an
+[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)).
+[`examples/depalletize.json`](examples/depalletize.json) is a suction
+de-palletizing cell (see [De-palletizing](#de-palletizing)). With an
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
@@ -271,18 +273,23 @@ A gripper on a mujoco-sim arm, driven by one actuator: the arm MJCF's own
 (the Lite6's), a bundled gripper, or your own gripper MJCF, which is attached
 at the arm's `flange_site`. It is binary: `Grab` and `Open` latch the command
 and return before the jaws move, like the isaac-sim Lite6 gripper and the real
-one.
+one. A suction gripper (an `<adhesion>` actuator) has no jaws: `Grab` turns the
+vacuum on and `Open` turns it off. Adhesion pulls only through the cup's
+contacts, so a violent move can tear the object off.
 
 | `asset` | Gripper | On | Frame `translation.z` (TCP) | Frame `geometry` covering it |
 |---|---|---|---|---|
 | `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | box 78 × 78 × 70 mm at `z: -35` |
 | `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | box 150 × 80 × 170 mm at `z: -73` (fingers open along x) |
+| `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | box 90 × 90 × 130 mm at `z: -65` |
 
 Give the gripper's frame that geometry so the planner keeps the whole gripper
 clear of obstacles; without it, a path can pass the arm but clip the gripper.
-The 2F-85 also switches the whole scene to elliptic friction cones with
-`impratio` 10 (its own MJCF options, which grasping relies on) while it is
-configured.
+The 2F-85 and the ePick also switch the whole scene to elliptic friction cones
+with `impratio` 10 (their own MJCF options, which grasping relies on) while
+configured. The ePick's cup pulls with up to 100 N; it carries a 1 kg carton
+through moves streamed at `max_joint_deg_s` 30, as MoveThroughJointPositions
+streams them.
 
 ### Configuration
 
@@ -313,11 +320,11 @@ fingertip center: use the TCP value from the table above, or for your own
 | `world` | string | Yes | | The world component's name. |
 | `arm` | string | Yes | | The arm this gripper belongs to. |
 | `asset` | string | No | `"lite6_gripper"` | A bundled gripper, see above. An attached gripper on an arm whose MJCF already has one (the `lite6`) is an error. |
-| `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF, attached at the arm's `flange_site`; a path like the arm's `mjcf`. It needs exactly one actuator, and its root bodies and jaw joint must be named. |
+| `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF, attached at the arm's `flange_site`; a path like the arm's `mjcf`. It needs exactly one actuator, and its root bodies and jaw joint must be named; a suction gripper has an `<adhesion>` actuator on its cup body instead of a jaw. |
 | `actuator` | string | No | inferred | The gripper's actuator. |
-| `open`, `closed` | float | No | the low and high ends of the actuator's `ctrlrange` | Position actuators: the `ctrl` targets. Force actuators (`<motor>`): their signs pick the direction. |
+| `open`, `closed` | float | No | the low and high ends of the actuator's `ctrlrange` | Position actuators: the `ctrl` targets. Force actuators (`<motor>`): their signs pick the direction. An error for suction. |
 | `sensorless` | bool | No | `false` | `IsHoldingSomething` reports the latched grip instead of contacts, like the real Lite6 gripper. |
-| `grip_force_n` | float | No | `5` | Force grippers only: the closing and opening force, within the actuator's `ctrlrange` (the Lite6's is 10). |
+| `grip_force_n` | float | No | `5` | Force grippers: the closing and opening force, within the actuator's `ctrlrange` (the Lite6's is 10). Suction: the adhesion force, up to the actuator's gain times its `ctrlrange` maximum (the default). |
 
 ### Supported API
 
@@ -325,8 +332,8 @@ fingertip center: use the TCP value from the table above, or for your own
 |---|---|
 | `Open` | Latches open and returns at once. |
 | `Grab` | Latches closed and returns `true` at once. |
-| `Stop` | Force grippers release the force; position grippers hold the jaw where it is. |
-| `IsMoving` | True while the jaws move. |
+| `Stop` | Force grippers release the force; position grippers hold the jaw where it is; suction keeps the vacuum on. |
+| `IsMoving` | True while the jaws move; always false for suction. |
 | `IsHoldingSomething` | See below. |
 | `GetCurrentInputs` / `GoToInputs` | One value: `0` open, `1` closed. |
 | `GetKinematics` | Not supported, deliberately; the planner treats the gripper as a point. |
@@ -335,8 +342,9 @@ fingertip center: use the TCP value from the table above, or for your own
 
 | Key | Meaning |
 |---|---|
-| `firm_grasp` | The gripper touches one object from two opposite sides. |
+| `firm_grasp` | The gripper touches one object from two opposite sides. Suction: the vacuum is on and the cup touches an object that can move (a prop, not an obstacle). |
 | `input` | The latched command, `0` or `1`. |
+| `vacuum` | Suction only, instead of the jaw keys: the vacuum, 0 to 1 of the actuator's maximum. |
 | `jaw` | The jaw joint's position, from `open` to `closed`: meters for a slide joint (the Lite6), radians for a hinge (the 2F-85). |
 | `open`, `closed` | The jaw joint's limits, in the same units. |
 | `jaw_m`, `open_m`, `closed_m` | The same three in meters, for slide jaws only (the Lite6). |
@@ -730,6 +738,51 @@ world state store doesn't feed the motion service.
 | `StreamTransformChanges` | An ADDED event per prop, then UPDATED events for props that moved more than 1 mm or 0.5°, checked every 0.1 s. |
 
 Cylinder props are sent as meshes, since the geometry API has no cylinder.
+
+## De-palletizing
+
+[`examples/depalletize.json`](examples/depalletize.json) is a UR5e with a
+Robotiq ePick on a 400 mm pedestal, between a pallet of twelve 1 kg cartons
+(190 × 150 × 150 mm, two layers of 3 × 2) and a conveyor. The pedestal,
+pallet and conveyor are obstacles; the cartons are props, which the motion
+planner does not see on its own.
+
+[`examples/depalletize.py`](examples/depalletize.py) unloads the pallet over
+one client session:
+
+```sh
+uv run python examples/depalletize.py <machine address> <api key id> <api key>
+```
+
+It restacks the cartons (`park_props`), then for each one, top layer first,
+moves the cup onto its top face, grabs, lifts, carries it over the conveyor,
+lowers and lets go, and reports whether it landed on the belt. The conveyor
+doesn't move: the script moves each carton off its far end with
+`set_prop_pose` to clear the drop spot. Run it again to start over.
+
+Every `motion.move` passes a `WorldState`: the cartons still on the pallet as
+obstacles, read with `get_prop_pose`. The one being picked is left out only for
+the final straight-down approach onto it (otherwise the planner may route the
+arm through it), and the ones under it only for the first 25 mm of a lift. While a carton is held, the
+`WorldState` also carries it as a transform on the gripper, so the planner
+keeps the carton clear of everything too:
+
+```python
+Transform(
+    reference_frame="held_carton",
+    pose_in_observer_frame=PoseInFrame(reference_frame="pick-gripper", pose=Pose(z=76, o_z=1)),
+    physical_object=Geometry(
+        center=Pose(o_z=1),  # RDK needs a centre pose, even the identity
+        box=RectangularPrism(dims_mm=Vector3(x=190, y=150, z=146)),
+        label="held_carton",
+    ),
+)
+```
+
+The box hangs below the tool point, just clear of the gripper's own planner
+box, and is a few millimetres shorter than the carton so it doesn't touch the
+surface the carton sat on. Use the same pattern for any object a gripper
+carries.
 
 ## Mobile base, SLAM and navigation
 

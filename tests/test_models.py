@@ -256,6 +256,8 @@ def test_bundled_ur5e_and_2f85_validate():
     assert MujocoArm.validate_config(config("a", {"world": "sim-world", "asset": "ur5e"}))[0] == ["sim-world"]
     gripper = {"world": "sim-world", "arm": "a", "asset": "robotiq_2f85"}
     assert MujocoGripper.validate_config(config("g", gripper))[0] == ["sim-world", "a"]
+    epick = {**gripper, "asset": "robotiq_epick"}
+    assert MujocoGripper.validate_config(config("g", epick))[0] == ["sim-world", "a"]
     with pytest.raises(ValueError, match="asset must be one of"):
         MujocoGripper.validate_config(config("g", {**gripper, "asset": "suction"}))
 
@@ -543,7 +545,8 @@ def test_rover_nav_example_validates():
 
 
 @pytest.mark.parametrize(
-    "example", ["rover-lidar.json", "rover-nav.json", "lite6-pick.json", "ur5e-pick.json"]
+    "example",
+    ["rover-lidar.json", "rover-nav.json", "lite6-pick.json", "ur5e-pick.json", "depalletize.json"],
 )
 def test_example_obstacles_validate(example):
     import json
@@ -620,7 +623,7 @@ def test_arm_validate_accepts_mjcf_and_kinematics_url():
 
 
 
-@pytest.mark.parametrize("example", ["lite6-pick.json", "ur5e-pick.json"])
+@pytest.mark.parametrize("example", ["lite6-pick.json", "ur5e-pick.json", "depalletize.json"])
 def test_pick_example_arm_and_gripper_validate(example):
     import json
     import pathlib
@@ -635,3 +638,54 @@ def test_pick_example_arm_and_gripper_validate(example):
             models[item["model"]].validate_config(component)
             checked += 1
     assert checked == 2
+
+
+
+def test_depalletize_cartons_are_two_spaced_layers_on_the_pallet():
+    import itertools
+    import json
+    import pathlib
+
+    from mujoco_module.sim import WorldConfig
+
+    cfg = json.loads((pathlib.Path(__file__).parent.parent / "examples" / "depalletize.json").read_text())
+    components = {c["name"]: c for c in cfg["components"]}
+    props = WorldConfig.from_attrs(components["sim-world"]["attributes"]).props
+    assert [p.name for p in props] == [f"carton_{i}" for i in range(1, 13)]
+    assert all(p.geom_size == pytest.approx((0.095, 0.075, 0.075)) and p.mass == 1.0 for p in props)
+    pallet = components["pallet"]["frame"]
+    top = (pallet["translation"]["z"] + pallet["geometry"]["z"] / 2) / 1000
+    # carton_1..6 on carton_7..12 on the pallet
+    assert {round(p.position[2] - 0.075, 4) for p in props[:6]} == {round(top + 0.15, 4)}
+    assert {round(p.position[2] - 0.075, 4) for p in props[6:]} == {round(top, 4)}
+    for p in props:
+        assert abs(p.position[0] - pallet["translation"]["x"] / 1000) + 0.095 <= pallet["geometry"]["x"] / 2000
+        assert abs(p.position[1] - pallet["translation"]["y"] / 1000) + 0.075 <= pallet["geometry"]["y"] / 2000
+    for a, b in itertools.combinations(props, 2):
+        if a.position[2] == b.position[2]:  # planner boxes in a layer don't touch
+            dx, dy = (abs(u - v) for u, v in zip(a.position[:2], b.position[:2]))
+            assert max(dx - 0.19, dy - 0.15) >= 0.005, (a.name, b.name)
+
+
+def test_depalletize_script_imports_and_builds_its_world_state():
+    import importlib.util
+    import json
+    import pathlib
+
+    examples = pathlib.Path(__file__).parent.parent / "examples"
+    spec = importlib.util.spec_from_file_location("depalletize", examples / "depalletize.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    cfg = json.loads((examples / "depalletize.json").read_text())
+    world = next(c for c in cfg["components"] if c["name"] == "sim-world")
+    assert script.CARTONS == [p["name"] for p in world["attributes"]["props"]]
+    turned = [0.7071068, 0, 0, 0.7071068]  # a quarter turn about z
+    carton = script.box("carton_1", {"position": [0.401, -0.158, 0.369], "orientation_wxyz": turned})
+    center = carton.center
+    assert (center.x, center.y, center.z, center.o_z, center.theta) == pytest.approx((401, -158, 369, 1, 90))
+    assert (carton.box.dims_mm.x, carton.box.dims_mm.y, carton.box.dims_mm.z) == (190, 150, 150)
+    held = script.HELD
+    assert held.pose_in_observer_frame.reference_frame == "pick-gripper"
+    assert held.physical_object.HasField("center")  # RDK rejects a geometry without one
+    # clear of the gripper's planner box, which ends at the tool point
+    assert held.pose_in_observer_frame.pose.z - held.physical_object.box.dims_mm.z / 2 > 0
