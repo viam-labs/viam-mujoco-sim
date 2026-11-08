@@ -4,7 +4,25 @@ Adapted from viam-modules/viam-isaac-sim (Apache-2.0); modified for MuJoCo.
 
 Attributes:
   world (string, required)         - name of the viam-labs:mujoco-sim:world component
-  asset (string, required)         - known robot; "lite6" (with its wide gripper)
+  asset (string)                   - a bundled arm, "lite6" (with its wide gripper)
+                                     or "ur5e";
+                                     its defaults apply under the attributes set here
+  mjcf (string)                    - instead of asset: the arm's MJCF file, absolute,
+                                     ~, or relative to assets/; needs kinematics_url
+  joints ([string])                - MJCF joint names in chain order (default inferred)
+  flange_site (string)             - MJCF site at the flange (default attachment_site)
+  home_keyframe (string)           - MJCF keyframe with the home ctrl (default home)
+  base_offset, flange_offset       - {translation: {x,y,z} mm, orientation: {o_x,o_y,
+                                     o_z,theta deg}}: arm frame to MJCF world, and
+                                     flange site to Viam's end effector
+  collision (string)               - "kinematics" (default with an SVA file that has
+                                     geometries): MuJoCo collides the arm links with
+                                     the planner's shapes; "mesh": the MJCF's own
+                                     collision geoms. On a body that gets a shape of
+                                     at least 5 mm, all of that body's own colliding
+                                     geoms are turned off (so a gripper's geoms
+                                     sitting directly on the last link's body stop
+                                     colliding; use "mesh" for such MJCFs)
   position ([x,y,z] meters)        - fallback placement when no frame is set
   orientation_wxyz ([w,x,y,z])     - fallback orientation when no frame is set
   orientation_rpy_deg ([r,p,y])    - fallback orientation when no frame is set
@@ -18,18 +36,16 @@ Attributes:
   path_tolerance_delta_deg (float) - convergence tolerance (default 0.5)
   path_max_step_deg (float)        - max per-joint delta between pushed targets
                                      (default 2.0)
-  kinematics_url (string)          - override the kinematics file served by
-                                     GetKinematics (.json = SVA, .urdf = URDF)
+  kinematics_url (string)          - the arm's Viam kinematics file (.json = SVA,
+                                     .urdf = URDF): http(s)://, file://, or a path
+                                     (absolute, ~, or relative to assets/). Read
+                                     when the arm is configured.
 
 Place it with the standard frame; frame.parent must be "world".
 """
 
 import asyncio
-import hashlib
 import math
-import os
-import tempfile
-import urllib.request
 from datetime import timedelta
 from typing import (
     Any,
@@ -53,13 +69,13 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
-from .. import FAMILY, NAMESPACE
+from .. import FAMILY, NAMESPACE, robots
 from ..handles import (
     DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
     ArmHandle,
     JointTrajectoryPoint,
 )
-from ..sim import KNOWN_ASSETS, SimManager
+from ..sim import SimManager
 from viam.spatialmath import Quaternion
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -180,7 +196,6 @@ class MujocoArm(Arm, EasyResource):
         self._tolerance_rad = math.radians(_DEFAULT_TOLERANCE_DEG)
         self._control_period = 1.0 / _DEFAULT_CONTROL_FREQ_HZ
         self._max_step_rad = math.radians(_DEFAULT_MAX_STEP_DEG)
-        self._kinematics: Optional[Tuple[KinematicsFileFormat.ValueType, bytes]] = None
         self._moving_count = 0
 
     @classmethod
@@ -197,6 +212,32 @@ class MujocoArm(Arm, EasyResource):
     ) -> Tuple[Sequence[str], Sequence[str]]:
         result = validate_sim_component(config)
         attrs = get_attrs(config)
+        url = attrs.get("kinematics_url")
+        if url is not None:
+            if not isinstance(url, str) or not url:
+                raise ValueError(f"{config.name}: kinematics_url must be a URL or a file path")
+            if "://" in url and url.split("://", 1)[0] not in ("file", "http", "https"):
+                raise ValueError(
+                    f"{config.name}: kinematics_url scheme must be file, http or https"
+                )
+            if "://" not in url:
+                robots.resolve_path(url, f"{config.name}: kinematics_url")
+        if isinstance(attrs.get("mjcf"), str):
+            robots.resolve_path(attrs["mjcf"], f"{config.name}: mjcf")
+        joints = attrs.get("joints")
+        if joints is not None and (
+            not isinstance(joints, list)
+            or not joints
+            or not all(isinstance(joint, str) and joint for joint in joints)
+        ):
+            raise ValueError(f"{config.name}: joints must be a list of MJCF joint names")
+        for key in ("flange_site", "home_keyframe"):
+            if key in attrs and (not isinstance(attrs[key], str) or not attrs[key]):
+                raise ValueError(f"{config.name}: {key} must be a name")
+        if attrs.get("collision", "kinematics") not in ("kinematics", "mesh"):
+            raise ValueError(f'{config.name}: collision must be "kinematics" or "mesh"')
+        for key in ("base_offset", "flange_offset"):
+            robots.parse_pose(attrs.get(key), f"{config.name}: {key}")
         _is_moving_velocity_threshold(attrs, config.name)
         _max_joint_deg_s(attrs, config.name)
         _max_joint_deg_s2(attrs, config.name)
@@ -305,8 +346,9 @@ class MujocoArm(Arm, EasyResource):
     ) -> None:
         """Stream waypoint targets at `robot_control_freq_hz`. Sparse waypoint
         pairs are linearly interpolated so no single pushed target moves any
-        joint by more than `path_max_step_deg`; otherwise drives would cut
-        corners past intermediate waypoints they cannot reach in one tick."""
+        joint by more than `path_max_step_deg`, or than `max_joint_deg_s`
+        allows in one tick; otherwise drives would cut corners past
+        intermediate waypoints they cannot reach in one tick."""
         handle = self._h()
         raw = [_finite_radians(wp.values, "joint positions") for wp in positions]
         if not raw:
@@ -315,7 +357,10 @@ class MujocoArm(Arm, EasyResource):
         self._moving_count += 1
         try:
             start = await asyncio.to_thread(handle.get_joint_positions)
-            stream = _densify(start, raw, self._max_step_rad)
+            # never push targets faster than the joint limit: the rate-limited
+            # servo would chase the newest target and cut corners off the plan
+            limit = min(handle.dynamics_metadata()["max_velocity_rad_s"])
+            stream = _densify(start, raw, min(self._max_step_rad, limit * self._control_period))
 
             loop = asyncio.get_running_loop()
             push_start = loop.time()
@@ -419,61 +464,16 @@ class MujocoArm(Arm, EasyResource):
         """True while a MoveTo* RPC is in flight."""
         return self._moving_count > 0
 
-    def _kinematics_url(self) -> Optional[str]:
-        url = self._attrs.get("kinematics_url")
-        if url:
-            return str(url)
-        asset = self._attrs.get("asset")
-        if asset and asset in KNOWN_ASSETS:
-            return KNOWN_ASSETS[asset].get("kinematics")
-        return None
-
-    def _load_kinematics(self) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
-        url = self._kinematics_url()
-        if not url:
-            raise NotImplementedError(
-                f"no kinematics file known for arm {self.name}; set the "
-                '"kinematics_url" attribute (SVA .json or .urdf)'
-            )
-        ext = os.path.splitext(url)[1].lower()
-        fmt = (
-            KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
-            if ext in (".urdf", ".xml", ".xacro")
-            else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
-        )
-
-        if url.startswith("file://"):  # local files skip the disk cache: edits show up when the arm is rebuilt
-            with urllib.request.urlopen(url) as resp:
-                return fmt, resp.read()
-
-        cache_dir = os.environ.get("VIAM_MODULE_DATA") or tempfile.gettempdir()
-        cache = os.path.join(
-            cache_dir,
-            f"kinematics-{hashlib.sha1(url.encode()).hexdigest()[:12]}{ext}",
-        )
-        if os.path.exists(cache):
-            with open(cache, "rb") as f:
-                return fmt, f.read()
-
-        self.logger.info("fetching kinematics for %s from %s", self.name, url)
-        with urllib.request.urlopen(url, timeout=30) as resp:
-            data = resp.read()
-        try:
-            os.makedirs(cache_dir, exist_ok=True)
-            tmp = cache + ".tmp"
-            with open(tmp, "wb") as f:
-                f.write(data)
-            os.replace(tmp, cache)
-        except OSError:
-            pass  # caching is best-effort
-        return fmt, data
-
     async def get_kinematics(
         self, **kwargs
     ) -> Tuple[KinematicsFileFormat.ValueType, bytes]:
-        if self._kinematics is None:
-            self._kinematics = await asyncio.to_thread(self._load_kinematics)
-        return self._kinematics
+        handle = self._h()
+        fmt = (
+            KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
+            if robots.is_urdf(handle.kinematics_url)
+            else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
+        )
+        return fmt, handle.kinematics_data
 
     async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
         return {}
@@ -512,8 +512,9 @@ class MujocoArm(Arm, EasyResource):
             return await asyncio.to_thread(self._h().dynamics_metadata)
         if cmd == "set_joint_targets_radians":
             raw = command.get("values")
-            if not isinstance(raw, (list, tuple)) or len(raw) != 6:
-                raise ValueError("set_joint_targets_radians requires six values")
+            count = len(self._h().joint_names())
+            if not isinstance(raw, (list, tuple)) or len(raw) != count:
+                raise ValueError(f"set_joint_targets_radians requires {count} values")
             targets = [float(value) for value in cast(Any, raw)]
             if not all(math.isfinite(value) for value in targets):
                 raise ValueError("set_joint_targets_radians values must be finite")

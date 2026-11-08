@@ -3,11 +3,13 @@ depends on."""
 
 import asyncio
 import math
+import shutil
 import time
+from pathlib import Path
 
 import pytest
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import Vector3
+from viam.proto.common import KinematicsFileFormat, Vector3
 from viam.utils import dict_to_struct
 
 import mujoco_module.models  # noqa: F401
@@ -19,6 +21,8 @@ from mujoco_module.models.lidar import MujocoLidar
 from mujoco_module.models.movement_sensor import MujocoMovementSensor
 from mujoco_module.models.world import MujocoWorld
 from conftest import BLOCK
+
+KINEMATICS_FILE = Path(__file__).parents[1] / "assets" / "ufactory_lite6" / "lite6_kinematics.json"
 
 
 def config(name, attrs):
@@ -46,10 +50,10 @@ def test_validate_returns_world_and_arm_dependencies():
     )
     assert deps == ["sim-world", "pick-arm"]
     with pytest.raises(ValueError, match="asset must be one of"):
-        MujocoArm.validate_config(config("a", {"world": "sim-world", "asset": "ur5e"}))
+        MujocoArm.validate_config(config("a", {"world": "sim-world", "asset": "puma560"}))
     with pytest.raises(ValueError, match="grip_force_n"):
         MujocoGripper.validate_config(
-            config("g", {"world": "w", "arm": "a", "grip_force_n": 20})
+            config("g", {"world": "w", "arm": "a", "grip_force_n": -1})
         )
 
 
@@ -83,6 +87,10 @@ def test_gripper_holding_reports_firm_grasp(cell):
     assert isinstance(status.meta["firm_grasp"], bool)
     assert status.meta["firm_grasp"] is False
     assert status.is_holding_something is True  # sensorless: the latched grip
+    assert {"jaw", "open", "closed"} <= set(status.meta)
+    # the Lite6's jaw is a slide, so its meters keep their old names
+    assert status.meta["jaw_m"] == status.meta["jaw"]
+    assert (status.meta["open_m"], status.meta["closed_m"]) == pytest.approx((-0.0081, -1e-5))
     run(gripper.open())
     assert run(gripper.get_current_inputs()) == [0.0]
 
@@ -91,7 +99,7 @@ def test_arm_dynamics_and_kinematics_url(cell):
     _, arm, _ = cell
     meta = run(arm.do_command({"command": "dynamics_metadata"}))
     assert isinstance(meta["max_velocity_rad_s"], list)
-    assert arm._kinematics_url().endswith("lite6_kinematics.json")
+    assert arm._h().kinematics_url.endswith("lite6_kinematics.json")
     pose = run(arm.get_end_position())  # flange, mm, Viam orientation vector
     assert pose.z > 100
     assert (pose.o_x, pose.o_y, pose.o_z) == pytest.approx((0, 0, -1), abs=0.05)
@@ -180,6 +188,28 @@ def test_arm_moves_through_model(cell):
     assert run(arm.get_joint_positions()).values == pytest.approx([0, 0, 90, 0, 90, 0], abs=0.6)
 
 
+def test_move_through_streams_no_faster_than_the_joint_limit(running_sim, monkeypatch):
+    """Targets pushed faster than max_joint_deg_s make the rate-limited servo
+    chase the newest target and cut corners off the planned path."""
+    from viam.components.arm import JointPositions
+
+    MujocoWorld.new(config("sim-world", {"props": [BLOCK], "real_time": False}), {})
+    arm = MujocoArm.new(
+        config("pick-arm", {"world": "sim-world", "asset": "lite6", "max_joint_deg_s": 30}), {}
+    )
+    handle = arm._h()
+    pushed = []
+    original = handle.set_joint_targets
+    monkeypatch.setattr(handle, "set_joint_targets", lambda t: (pushed.append(list(t)), original(t)))
+    start = run(arm.get_joint_positions()).values
+    run(arm.move_through_joint_positions([JointPositions(values=[20, 0, 90, 0, 90, 0])]))
+    prev = [math.radians(v) for v in start]
+    for targets in pushed:
+        # 30 deg/s at the default 50 Hz is 0.6 deg per push
+        assert max(abs(a - b) for a, b in zip(targets, prev)) <= math.radians(0.6) + 1e-9
+        prev = targets
+
+
 def test_densify_ends_on_waypoint_within_step():
     from mujoco_module.models.arm import _densify
 
@@ -220,6 +250,27 @@ def test_camera_frame_parent_may_be_an_arm_but_not_aimed():
     cfg.frame.parent = "pick-arm"
     with pytest.raises(ValueError, match="target can't aim"):
         MujocoCamera.validate_config(cfg)
+
+
+def test_bundled_ur5e_and_2f85_validate():
+    assert MujocoArm.validate_config(config("a", {"world": "sim-world", "asset": "ur5e"}))[0] == ["sim-world"]
+    gripper = {"world": "sim-world", "arm": "a", "asset": "robotiq_2f85"}
+    assert MujocoGripper.validate_config(config("g", gripper))[0] == ["sim-world", "a"]
+    with pytest.raises(ValueError, match="asset must be one of"):
+        MujocoGripper.validate_config(config("g", {**gripper, "asset": "suction"}))
+
+
+def test_gripper_validate_mjcf():
+    base = {"world": "sim-world", "arm": "pick-arm"}
+    MujocoGripper.validate_config(config("g", {**base, "mjcf": "ufactory_lite6/lite6.xml"}))
+    with pytest.raises(ValueError, match="asset or mjcf, not both"):
+        MujocoGripper.validate_config(
+            config("g", {**base, "asset": "lite6_gripper", "mjcf": "ufactory_lite6/lite6.xml"})
+        )
+    with pytest.raises(ValueError, match="mjcf: file .*nope.xml not found"):
+        MujocoGripper.validate_config(config("g", {**base, "mjcf": "nope.xml"}))
+    with pytest.raises(ValueError, match="open"):
+        MujocoGripper.validate_config(config("g", {**base, "open": "wide"}))
 
 
 def test_gripper_frame_parent_may_be_its_arm():
@@ -491,7 +542,9 @@ def test_rover_nav_example_validates():
     assert {slam["base"], slam["movement_sensor"], slam["lidar"]} <= names
 
 
-@pytest.mark.parametrize("example", ["rover-lidar.json", "rover-nav.json", "lite6-pick.json"])
+@pytest.mark.parametrize(
+    "example", ["rover-lidar.json", "rover-nav.json", "lite6-pick.json", "ur5e-pick.json"]
+)
 def test_example_obstacles_validate(example):
     import json
     import pathlib
@@ -521,3 +574,64 @@ def test_example_obstacles_validate(example):
                 parsed["geometry"]["center"] = {**g["translation"], "o_z": 1}
         component.frame.CopyFrom(ParseDict(parsed, Frame()))
         assert MujocoObstacle.validate_config(component) == ([world["name"]], [])
+
+
+def test_arm_kinematics_url_may_be_a_path(running_sim, tmp_path):
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    source = tmp_path / "mine.json"
+    shutil.copy(KINEMATICS_FILE, source)
+    attrs = {"world": "sim-world", "asset": "lite6", "kinematics_url": str(source)}
+    MujocoArm.validate_config(config("a", attrs))
+    arm = MujocoArm.new(config("a", attrs), {})
+    fmt, data = run(arm.get_kinematics())
+    assert fmt == KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
+    assert data == source.read_bytes()
+    with pytest.raises(ValueError, match="kinematics_url: file .*nope.json not found"):
+        MujocoArm.validate_config(config("a", {**attrs, "kinematics_url": "nope.json"}))
+    with pytest.raises(ValueError, match="a: kinematics_url scheme must be file, http or https"):
+        MujocoArm.validate_config(config("a", {**attrs, "kinematics_url": "ftp://x/arm.json"}))
+
+
+@pytest.mark.parametrize(
+    "attrs, message",
+    [
+        ({"asset": "lite6", "mjcf": "x.xml", "kinematics_url": "k.json"}, "asset or mjcf, not both"),
+        ({"mjcf": "ufactory_lite6/lite6.xml"}, "mjcf needs kinematics_url"),
+        ({"mjcf": "nope.xml", "kinematics_url": "ufactory_lite6/lite6_kinematics.json"}, "mjcf: file .*nope.xml not found"),
+        ({"asset": "lite6", "joints": "joint1"}, "joints must be a list"),
+        ({"asset": "lite6", "flange_site": 3}, "flange_site must be a name"),
+        ({"asset": "lite6", "collision": "hull"}, 'collision must be "kinematics" or "mesh"'),
+        ({"asset": "lite6", "flange_offset": {"orientation": {"theta": "half"}}}, "flange_offset"),
+    ],
+)
+def test_arm_validate_rejects_bad_robot_attributes(attrs, message):
+    with pytest.raises(ValueError, match=message):
+        MujocoArm.validate_config(config("a", {"world": "sim-world", **attrs}))
+
+
+def test_arm_validate_accepts_mjcf_and_kinematics_url():
+    attrs = {
+        "world": "sim-world",
+        "mjcf": "ufactory_lite6/lite6_gripper_wide.xml",
+        "kinematics_url": "ufactory_lite6/lite6_kinematics.json",
+        "flange_offset": {"orientation": {"o_z": 1, "theta": 180}},
+    }
+    assert MujocoArm.validate_config(config("a", attrs)) == (["sim-world"], [])
+
+
+
+@pytest.mark.parametrize("example", ["lite6-pick.json", "ur5e-pick.json"])
+def test_pick_example_arm_and_gripper_validate(example):
+    import json
+    import pathlib
+
+    cfg = json.loads((pathlib.Path(__file__).parent.parent / "examples" / example).read_text())
+    models = {"viam-labs:mujoco-sim:arm": MujocoArm, "viam-labs:mujoco-sim:gripper": MujocoGripper}
+    checked = 0
+    for item in cfg["components"]:
+        if item["model"] in models:
+            component = config(item["name"], item["attributes"])
+            component.frame.parent = item["frame"]["parent"]
+            models[item["model"]].validate_config(component)
+            checked += 1
+    assert checked == 2

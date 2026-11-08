@@ -844,7 +844,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "coacd", specifier = ">=1.0.14" },
-    { name = "mujoco", specifier = ">=3.3" },
+    { name = "mujoco", specifier = ">=4.0,<5" },
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pillow", specifier = ">=11.2.1" },
     { name = "trimesh", specifier = ">=5.2.0" },

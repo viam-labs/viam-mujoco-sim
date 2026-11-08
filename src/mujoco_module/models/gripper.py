@@ -1,13 +1,20 @@
-"""viam-labs:mujoco-sim:gripper - the Lite6's integrated gripper.
+"""viam-labs:mujoco-sim:gripper - a gripper on a mujoco-sim arm.
 
 Attributes:
   world (string, required)  - name of the viam-labs:mujoco-sim:world component
-  arm (string, required)    - the viam-labs:mujoco-sim:arm it is part of
-  asset (string)            - "lite6_gripper" (the default and only option)
+  arm (string, required)    - the viam-labs:mujoco-sim:arm it is on
+  asset (string)            - "lite6_gripper": the arm MJCF's own gripper (default),
+                              or "robotiq_2f85", a bundled MJCF attached like mjcf
+  mjcf (string)             - instead: a gripper MJCF to attach at the arm's flange
+                              site; absolute, ~, or relative to assets/
+  actuator (string)         - the gripper's actuator (default inferred)
+  open, closed (float)      - actuator values for open and closed (default the
+                              low and high ends of its ctrlrange)
   sensorless (bool)         - IsHoldingSomething reports the latched grip
                               instead of contacts, like the production
                               gripper (default false)
-  grip_force_n (float)      - closing/opening force, (0, 10] N (default 5)
+  grip_force_n (float)      - force grippers: closing/opening force, > 0 and
+                              within the actuator's ctrlrange (default 5)
 
 The gripper is binary: Open, Grab and GoToInputs latch a state and return
 immediately, matching the viam-labs:isaac-sim Lite6 gripper. The jaws move
@@ -16,9 +23,8 @@ step, or poll as scripted_pick.py (in viam-modules/viam-isaac-sim) does.
 """
 
 import asyncio
-import math
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Optional, Tuple
+from typing import ClassVar, Optional, Tuple
 
 from grpclib import Status
 from typing_extensions import Self
@@ -31,24 +37,10 @@ from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes
 
-from .. import FAMILY, NAMESPACE
-from ..handles import GripperHandle
-from ..sim import SimManager
-from .utils import get_attrs, validate_sim_component
-
-ASSET = "lite6_gripper"
-DEFAULT_GRIP_FORCE_N = 5.0
-MAX_GRIP_FORCE_N = 10.0  # the Menagerie actuator's ctrlrange
-
-
-def _grip_force(attrs: Mapping[str, Any], name: str) -> float:
-    raw = attrs.get("grip_force_n", DEFAULT_GRIP_FORCE_N)
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError(f"{name}: grip_force_n must be numeric")
-    force = float(raw)
-    if not math.isfinite(force) or not 0.0 < force <= MAX_GRIP_FORCE_N:
-        raise ValueError(f"{name}: grip_force_n must be in (0, {MAX_GRIP_FORCE_N}]")
-    return force
+from .. import FAMILY, NAMESPACE, robots
+from ..handles import DEFAULT_GRIP_FORCE_N, GripperHandle
+from ..sim import GRIPPER_ASSETS, SimManager
+from .utils import finite_number, get_attrs, positive_number, validate_sim_component
 
 
 class MujocoGripper(Gripper, EasyResource):
@@ -79,11 +71,22 @@ class MujocoGripper(Gripper, EasyResource):
         arm = attrs.get("arm")
         if not arm or not isinstance(arm, str):
             raise ValueError(f'{config.name}: set "arm" to the arm this gripper is part of')
-        if attrs.get("asset", ASSET) != ASSET:
-            raise ValueError(f"{config.name}: asset must be {ASSET!r}")
+        if attrs.get("asset", "lite6_gripper") not in GRIPPER_ASSETS:
+            raise ValueError(f"{config.name}: asset must be one of {sorted(GRIPPER_ASSETS)}")
+        if "mjcf" in attrs:
+            if "asset" in attrs:
+                raise ValueError(f"{config.name}: set asset or mjcf, not both")
+            if not isinstance(attrs["mjcf"], str) or not attrs["mjcf"]:
+                raise ValueError(f"{config.name}: mjcf must be a file path")
+            robots.resolve_path(attrs["mjcf"], f"{config.name}: mjcf")
         if not isinstance(attrs.get("sensorless", False), bool):
             raise ValueError(f"{config.name}: sensorless must be a boolean")
-        _grip_force(attrs, config.name)
+        if "actuator" in attrs and (not isinstance(attrs["actuator"], str) or not attrs["actuator"]):
+            raise ValueError(f"{config.name}: actuator must be an actuator name")
+        for key in ("open", "closed"):
+            if key in attrs:
+                finite_number(config.name, attrs, key, 0.0)
+        positive_number(config.name, attrs, "grip_force_n", DEFAULT_GRIP_FORCE_N)
         return [*world, arm], []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
@@ -93,9 +96,7 @@ class MujocoGripper(Gripper, EasyResource):
         attrs = get_attrs(config)
         self._sensorless = bool(attrs.get("sensorless", False))
         self._closed = False
-        self._handle = GripperHandle(
-            SimManager.get(), self.name, str(attrs["arm"]), _grip_force(attrs, config.name)
-        )
+        self._handle = GripperHandle(SimManager.get(), self.name, str(attrs["arm"]), attrs)
 
     async def close(self) -> None:
         if self._handle is not None:
@@ -129,13 +130,16 @@ class MujocoGripper(Gripper, EasyResource):
     async def is_holding_something(self, **kwargs) -> Gripper.HoldingStatus:
         handle = self._h()
         firm_grasp = await asyncio.to_thread(handle.firm_grasp)
+        jaw = await asyncio.to_thread(handle.jaw)
         meta = {
             "input": 1.0 if self._closed else 0.0,
-            "jaw_m": await asyncio.to_thread(handle.jaw_m),
-            "open_m": GripperHandle.OPEN_M,
-            "closed_m": GripperHandle.CLOSED_M,
+            "jaw": jaw,
+            "open": handle.open_q,
+            "closed": handle.closed_q,
             "firm_grasp": firm_grasp,
         }
+        if handle.slide:  # the names Lite6 clients read
+            meta.update(jaw_m=jaw, open_m=handle.open_q, closed_m=handle.closed_q)
         holding = self._closed if self._sensorless else firm_grasp
         return Gripper.HoldingStatus(is_holding_something=holding, meta=meta)
 

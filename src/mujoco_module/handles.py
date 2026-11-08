@@ -18,7 +18,8 @@ from typing import Any, Literal
 import mujoco
 import numpy as np
 
-from .sim import KNOWN_ASSETS, Contribution, SimManager
+from . import robots
+from .sim import GRIPPER_ASSETS, KNOWN_ASSETS, LOGGER, Contribution, SimManager
 from viam.spatialmath import Quaternion
 
 Vec3 = tuple[float, float, float]
@@ -29,6 +30,7 @@ DEFAULT_MAX_JOINT_DEG_S = 180.0
 # frame in Viam's frame system (an arm's end effector, a base's origin).
 VIAM_FRAME_SITE = "viam_frame"
 DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S = 0.01
+DEFAULT_GRIP_FORCE_N = 5.0
 
 BASE_ASSETS: dict[str, dict[str, Any]] = {
     # Viam Rover 2, from Viam's public ViamRover2-2024-rpi5 fragment
@@ -81,8 +83,7 @@ class _ArmIds:
     qpos: np.ndarray
     dof: np.ndarray
     ctrl: np.ndarray
-    base_body: int
-    flange_site: int
+    end_site: int  # the arm's viam_frame site
 
 
 def _interpolate(points: Sequence[JointTrajectoryPoint], t: float) -> np.ndarray:
@@ -96,14 +97,51 @@ def _interpolate(points: Sequence[JointTrajectoryPoint], t: float) -> np.ndarray
 
 
 class ArmHandle:
+    """An arm from an MJCF file and a Viam kinematics file. Its joints,
+    actuators and home are inferred from the MJCF (robots.py); `attrs` are
+    the arm's attributes, over KNOWN_ASSETS[asset] when asset is set."""
+
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
-        meta = KNOWN_ASSETS[str(attrs["asset"])]
+        attrs = {**KNOWN_ASSETS.get(str(attrs.get("asset")), {}), **attrs}
+        label = f"arm {name}"
         self._sim = sim
         self.name = name
-        self._meta = meta
         self._prefix = f"{name}/"
-        self._joint_names = tuple(self._prefix + joint for joint in meta["joint_names"])
-        self._home = tuple(float(value) for value in meta["home"])
+        self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
+        # read here, not on first GetKinematics: building the arm needs it
+        # ponytail: a cold-cache http(s) fetch blocks the event loop (up to the download timeout); fetch in validate_config or make reconfigure async if that bites
+        self.kinematics_url = str(attrs["kinematics_url"])
+        self.kinematics_data = robots.load_kinematics(self.kinematics_url, f"{label}: kinematics_url")
+        self.kinematics = robots.parse_kinematics(
+            self.kinematics_data, robots.is_urdf(self.kinematics_url), self.kinematics_url
+        )
+        # The arm on its own, as the file describes it. Ids below index this
+        # model; names carry over into the scene with the prefix.
+        self.model = robots.load_mjcf(self.mjcf).compile()
+        where = str(self.mjcf)
+        self.joints = robots.arm_joints(
+            self.model, len(self.kinematics.joints), where, attrs.get("joints")
+        )
+        self.actuators = robots.arm_actuators(self.model, self.joints, where)
+        self._joint_names = tuple(self._prefix + self.model.joint(j).name for j in self.joints)
+        self._actuator_names = tuple(self._prefix + self.model.actuator(a).name for a in self.actuators)
+        self._home = tuple(
+            float(value)
+            for value in robots.home(self.model, str(attrs.get("home_keyframe", "home")), self.actuators)
+        )
+        self.root_body = self.model.body(
+            int(self.model.body_rootid[self.model.jnt_bodyid[self.joints[0]]])
+        ).name
+        self.flange_site = str(attrs.get("flange_site", "attachment_site"))
+        if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.flange_site) < 0:
+            raise ValueError(f"{where}: has no site {self.flange_site!r}; set flange_site")
+        site = self.model.site(self.flange_site)
+        base_offset = robots.parse_pose(attrs.get("base_offset"), f"{label}: base_offset")
+        flange_offset = robots.parse_pose(attrs.get("flange_offset"), f"{label}: flange_offset")
+        robots.check_frames(
+            self.model, self.kinematics, self.joints, self.model.site(self.flange_site).id,
+            self._home, base_offset, flange_offset, label,
+        )
         self._max_rad_s = math.radians(
             float(attrs.get("max_joint_deg_s", DEFAULT_MAX_JOINT_DEG_S))
         )
@@ -122,28 +160,45 @@ class ArmHandle:
         self._ids: _ArmIds | None = None
         self._ids_generation = -1
         self._callback_key = f"arm:{name}"
-        position = [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))]
-        orientation = [
-            float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))
-        ]
-        mjcf = str(meta["mjcf"])
+        # The arm's Viam frame (its configured pose) and, base_offset on from
+        # it, where the MJCF's world goes.
+        self._frame = robots.transform(
+            [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))],
+            [float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
+        )
+        mount = self._frame @ base_offset
+        excluded: list[tuple[str, str]] = []
+        has_shapes = any(frame.geometry for frame in self.kinematics.frames.values())
+        collision = attrs.get("collision") or ("kinematics" if has_shapes else "mesh")
+        shapes: list[robots.Shape] = []
+        if collision == "kinematics":
+            if not has_shapes:
+                raise ValueError(
+                    f'{label}: collision "kinematics" needs an SVA kinematics file with '
+                    'geometries; use collision "mesh"'
+                )
+            shapes = robots.kinematics_shapes(
+                self.model, self.kinematics, self.joints, self.model.body(self.root_body).id, base_offset
+            )
+            # Like RDK, ignore collisions the arm is already in at home.
+            child = robots.load_mjcf(self.mjcf)
+            robots.apply_shapes(child, shapes, label)
+            excluded += robots.home_contacts(child, self.joint_names(), self._home)
 
         def build(spec: mujoco.MjSpec) -> None:
-            child = mujoco.MjSpec.from_file(mjcf)
-            for actuator in child.actuators:
-                if not actuator.name:  # Menagerie leaves the arm actuators unnamed
-                    actuator.name = actuator.target
-            frame = spec.worldbody.add_frame(pos=position, quat=orientation)
+            child = robots.load_mjcf(self.mjcf)
+            robots.apply_shapes(child, shapes, label)
+            frame = spec.worldbody.add_frame(pos=list(mount[:3, 3]), quat=list(robots.quat(mount)))
             spec.attach(child, prefix=self._prefix, frame=frame)
             # Viam's end-effector frame, which children of the arm's frame
             # (a wrist camera) are placed relative to.
-            flange = spec.site(self._prefix + meta["flange_site"])
-            end_quat = np.zeros(4)
-            mujoco.mju_mulQuat(end_quat, flange.quat, np.asarray(meta["flange_offset_wxyz"], float))
+            flange = spec.site(self._prefix + self.flange_site)
+            # from the compiled model: the spec's quat ignores euler/axisangle/xyaxes/zaxis
+            end = robots.transform(site.pos, site.quat) @ flange_offset
             flange.parent.add_site(
-                name=self._prefix + VIAM_FRAME_SITE, pos=list(flange.pos), quat=list(end_quat)
+                name=self._prefix + VIAM_FRAME_SITE, pos=list(end[:3, 3]), quat=list(robots.quat(end))
             )
-            for first, second in meta.get("self_collision_excluded_pairs", ()):
+            for first, second in excluded:
                 spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
@@ -154,12 +209,18 @@ class ArmHandle:
             self._target = np.asarray(self._home)
             self._drop_trajectory()
 
+        def register() -> None:
+            sim.step_callbacks[self._callback_key] = self._on_step
+            sim.arms[name] = self
+
         sim.set_contribution(name, Contribution(build=build, init=init))
-        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
+        sim.run(register)
 
     def close(self) -> None:
         def detach() -> None:
             self._sim.step_callbacks.pop(self._callback_key, None)
+            if self._sim.arms.get(self.name) is self:
+                del self._sim.arms[self.name]
             error = RuntimeError(f"arm {self.name!r} was closed (removed or reconfigured)")
             trajectory, self._trajectory = self._trajectory, None
             pending = [trajectory.future] if trajectory is not None else []
@@ -184,9 +245,8 @@ class ArmHandle:
         return _ArmIds(
             qpos=np.array([joint.qposadr[0] for joint in joints]),
             dof=np.array([joint.dofadr[0] for joint in joints]),
-            ctrl=np.array([model.actuator(name).id for name in self._joint_names]),
-            base_body=model.body(self._prefix + self._meta["base_body"]).id,
-            flange_site=model.site(self._prefix + self._meta["flange_site"]).id,
+            ctrl=np.array([model.actuator(name).id for name in self._actuator_names]),
+            end_site=model.site(self._prefix + VIAM_FRAME_SITE).id,
         )
 
     def _now(self) -> tuple[mujoco.MjData, _ArmIds]:
@@ -260,7 +320,8 @@ class ArmHandle:
     # -- public API ---------------------------------------------------------
 
     def joint_names(self) -> tuple[str, ...]:
-        return tuple(self._meta["joint_names"])
+        """The arm's MJCF joint names, in chain order."""
+        return tuple(name.removeprefix(self._prefix) for name in self._joint_names)
 
     def get_joint_positions(self) -> list[float]:
         def read() -> list[float]:
@@ -374,18 +435,15 @@ class ArmHandle:
         return result
 
     def get_end_pose(self) -> tuple[Vec3, Quat]:
-        """Flange pose in the arm's base frame (metres, w-first quaternion)."""
+        """Viam's end-effector frame (the flange with flange_offset) in the
+        arm's frame (metres, w-first quaternion)."""
 
         def read() -> tuple[Vec3, Quat]:
             data, ids = self._now()
-            base_rotation = data.xmat[ids.base_body].reshape(3, 3)
-            offset = data.site_xpos[ids.flange_site] - data.xpos[ids.base_body]
-            position = base_rotation.T @ offset
-            rotation = base_rotation.T @ data.site_xmat[ids.flange_site].reshape(3, 3)
+            rotation = self._frame[:3, :3]
+            position = rotation.T @ (data.site_xpos[ids.end_site] - self._frame[:3, 3])
             quat = np.zeros(4)
-            mujoco.mju_mat2Quat(quat, rotation.ravel())
-            viam = Quaternion(*quat) * Quaternion(*self._meta["flange_offset_wxyz"])
-            quat = (viam.w, viam.i, viam.j, viam.k)
+            mujoco.mju_mat2Quat(quat, (rotation.T @ data.site_xmat[ids.end_site].reshape(3, 3)).ravel())
             return (
                 (float(position[0]), float(position[1]), float(position[2])),
                 (float(quat[0]), float(quat[1]), float(quat[2]), float(quat[3])),
@@ -671,38 +729,101 @@ class BaseHandle:
 
 
 class GripperHandle:
-    """The Lite6 gripper already attached with its arm: a force motor on the
-    left finger, the right finger mirrored by an equality constraint. Positive
-    force closes (q -> 0); negative opens (q -> -0.0081)."""
+    """A gripper driven by one actuator: the arm MJCF's own (the Lite6's), or
+    with attrs["mjcf"] a gripper MJCF attached at the arm's flange site.
+    Position control writes the open/closed values to
+    ctrl; force control writes their signs times grip_force_n. The jaw is the
+    actuator's joint (a tendon's first), in its own units (m or rad)."""
 
-    OPEN_M = -0.0081
-    CLOSED_M = 0.0
-    MOVING_M_S = 1e-3
+    MOVING = 1e-3  # jaw joint units per second
 
-    def __init__(
-        self, sim: SimManager, name: str, arm: str, grip_force_n: float
-    ) -> None:
+    def __init__(self, sim: SimManager, name: str, arm: str, attrs: dict[str, Any]) -> None:
+        attrs = {**GRIPPER_ASSETS.get(str(attrs.get("asset")), {}), **attrs}
         self._sim = sim
         self.name = name
-        prefix = f"{arm}/"
-        self._actuator = prefix + "gripper"
-        self._joint = prefix + "gripper_left_finger"
-        self._tips = (prefix + "gripper_left_finger", prefix + "gripper_right_finger")
-        self._arm_base = prefix + "link_base"
-        self._force = float(grip_force_n)
-        self._command = -1.0  # +1 close, -1 open, 0 no force
-        self._callback_key = f"gripper:{name}"
-
-        def attach() -> None:
-            sim.require_world()
-            assert sim.model is not None
-            if mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator) < 0:
-                raise RuntimeError(
-                    f"arm {arm!r} has no Lite6 gripper; configure the arm first"
+        label = f"gripper {name}"
+        handle = sim.run(lambda: sim.arms.get(arm))
+        if handle is None:
+            raise RuntimeError(f"arm {arm!r} is not in the scene; configure the arm first")
+        mjcf = attrs.get("mjcf")
+        if mjcf is None:
+            model, prefix, where = handle.model, f"{arm}/", f"arm {arm} ({handle.mjcf})"
+            actuator = robots.gripper_actuator(
+                model, where, exclude=handle.actuators, name=attrs.get("actuator")
+            )
+        else:
+            own = [handle.model.actuator(a).name for a in range(handle.model.nu) if a not in handle.actuators]
+            if own:
+                raise ValueError(
+                    f"{label}: arm {arm!r} already has a gripper in its MJCF (actuators {own}); "
+                    "drop mjcf to use the arm's own gripper, or use an arm MJCF without one"
                 )
-            sim.step_callbacks[self._callback_key] = self._on_step
+            path = robots.resolve_path(str(mjcf), f"{label}: mjcf")
+            model, prefix, where = robots.load_mjcf(path).compile(), f"{name}/", str(path)
+            actuator = robots.gripper_actuator(model, where, name=attrs.get("actuator"))
+        self._position = robots.control_type(model, actuator, where) == "position"
+        low, high = (float(value) for value in model.actuator_ctrlrange[actuator])
+        if not model.actuator_ctrllimited[actuator] and not ("open" in attrs and "closed" in attrs):
+            raise ValueError(f"{where}: the gripper actuator has no ctrlrange; set open and closed")
+        self._open = float(attrs.get("open", low))
+        self._closed = float(attrs.get("closed", high))
+        jaw = robots.jaw(model, actuator, self._open, self._closed, where)
+        self.open_q, self.closed_q = jaw.open, jaw.closed
+        self.slide = int(model.jnt_type[jaw.joint]) == int(mujoco.mjtJoint.mjJNT_SLIDE)
+        if not model.joint(jaw.joint).name:
+            raise ValueError(f"{where}: the gripper's jaw joint has no name; name the MJCF's jaw joint")
+        self._joint = prefix + model.joint(jaw.joint).name
+        self._actuator = prefix + model.actuator(actuator).name
+        if mjcf is None:
+            roots = robots.integrated_gripper_bodies(model, handle.joints[-1], jaw.joint)[:1]
+        else:
+            roots = [b for b in range(1, model.nbody) if model.body_parentid[b] == 0]
+        if not all(model.body(root).name for root in roots):
+            raise ValueError(f"{where}: a gripper root body has no name; name the MJCF's gripper bodies")
+        # Only roots are named; their subtrees are resolved in the current model.
+        self._roots = tuple(prefix + model.body(root).name for root in roots)
+        # Captures the arm's flange site, integrated-gripper conflict and root at build;
+        # viam-server rebuilds dependents when the arm is reconfigured.
+        self._arm_root = f"{arm}/{handle.root_body}"
+        self._force = float(attrs.get("grip_force_n", DEFAULT_GRIP_FORCE_N))
+        if self._position:
+            if "grip_force_n" in attrs:
+                LOGGER.debug("%s: grip_force_n is ignored; the gripper is position controlled", label)
+        else:
+            if self._open * self._closed >= 0:
+                raise ValueError(
+                    f"{where}: a force gripper needs open and closed of opposite signs, "
+                    f"got {self._open} and {self._closed}"
+                )
+            if model.actuator_ctrllimited[actuator] and not all(
+                low <= math.copysign(self._force, value) <= high for value in (self._open, self._closed)
+            ):
+                hint = "" if "grip_force_n" in attrs else " (the default); set grip_force_n within it"
+                raise ValueError(
+                    f"{label}: grip_force_n {self._force} is outside the actuator's "
+                    f"ctrlrange [{low}, {high}]{hint}"
+                )
+        self._ctrl = self._command(self._open)
+        self._callback_key = f"gripper:{name}"
+        self._attached = mjcf is not None
+        if self._attached:
+            flange = f"{arm}/{handle.flange_site}"
 
-        sim.run(attach)
+            def build(spec: mujoco.MjSpec) -> None:
+                site = spec.site(flange)
+                if site is None:
+                    return  # arm removed; the gripper comes back with it
+                child = robots.load_mjcf(path)
+                # attach keeps the scene's options; take the gripper's contact
+                # settings (the 2F-85's elliptic cones) where it sets them
+                defaults = mujoco.MjSpec().option
+                for key in ("cone", "impratio"):
+                    if getattr(child.option, key) != getattr(defaults, key):
+                        setattr(spec.option, key, getattr(child.option, key))
+                spec.attach(child, prefix=prefix, site=site)
+
+            sim.set_contribution(name, Contribution(build=build, late=True))
+        sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
 
     def close(self) -> None:
         def detach() -> None:
@@ -714,6 +835,11 @@ class GripperHandle:
                     data.ctrl[actuator] = 0.0
 
         self._sim.run(detach)
+        if self._attached:
+            self._sim.remove_contribution(self.name)
+
+    def _command(self, value: float) -> float:
+        return value if self._position else math.copysign(self._force, value)
 
     def _on_step(self, _dt: float) -> None:
         model, data = self._sim.model, self._sim.data
@@ -721,66 +847,92 @@ class GripperHandle:
         actuator = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator)
         if actuator < 0:
             return  # arm absent; resume when it is re-added
-        data.ctrl[actuator] = self._command * self._force
+        data.ctrl[actuator] = self._ctrl
 
     def _require_joint(self) -> None:
         model = self._sim.model
         if model is None or mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, self._joint) < 0:
             raise RuntimeError(f"the arm for gripper {self.name!r} is not in the scene")
 
-    def _set(self, command: float) -> None:
+    def _set(self, ctrl: float) -> None:
         def apply() -> None:
-            self._command = command
+            self._ctrl = ctrl
 
         self._sim.run(apply)
 
     def open_jaws(self) -> None:
-        self._set(-1.0)
+        self._set(self._command(self._open))
 
     def close_jaws(self) -> None:
-        self._set(1.0)
+        self._set(self._command(self._closed))
 
     def stop(self) -> None:
-        self._set(0.0)
+        """Force: no force. Position: hold the jaw where it is."""
 
-    def jaw_m(self) -> float:
-        def read() -> float:
-            self._require_joint()
-            assert self._sim.model is not None and self._sim.data is not None
-            joint = self._sim.model.joint(self._joint)
-            return float(self._sim.data.qpos[joint.qposadr[0]])
+        def apply() -> None:
+            if not self._position:
+                self._ctrl = 0.0
+                return
+            jaw = self._read_jaw()
+            span = self.closed_q - self.open_q
+            fraction = min(max((jaw - self.open_q) / span, 0.0), 1.0) if span else 0.0
+            # linear between open and closed ctrl: approximate for tendon/coupled grippers
+            self._ctrl = self._open + fraction * (self._closed - self._open)
 
-        return self._sim.run(read)
+        self._sim.run(apply)
+
+    def _read_jaw(self) -> float:
+        self._require_joint()
+        assert self._sim.model is not None and self._sim.data is not None
+        return float(self._sim.data.qpos[self._sim.model.joint(self._joint).qposadr[0]])
+
+    def jaw(self) -> float:
+        """The jaw joint's position, from open_q to closed_q."""
+        return self._sim.run(self._read_jaw)
 
     def is_moving(self) -> bool:
         def read() -> bool:
             self._require_joint()
             assert self._sim.model is not None and self._sim.data is not None
             joint = self._sim.model.joint(self._joint)
-            return bool(abs(self._sim.data.qvel[joint.dofadr[0]]) > self.MOVING_M_S)
+            return bool(abs(self._sim.data.qvel[joint.dofadr[0]]) > self.MOVING)
 
         return self._sim.run(read)
 
     def firm_grasp(self) -> bool:
-        """Both fingertips touch the same body, which is neither the world nor
-        part of the arm."""
+        """Some body, neither the world nor part of the arm or gripper, touches
+        the gripper at two contacts that push from opposite sides."""
 
         def read() -> bool:
             self._require_joint()
             model, data = self._sim.model, self._sim.data
             assert model is not None and data is not None
-            left, right = (model.geom(tip).id for tip in self._tips)
-            arm_root = model.body_rootid[model.body(self._arm_base).id]
-            touching: dict[int, set[int]] = {left: set(), right: set()}
+            gripper = {
+                b for name in self._roots for b in robots.subtree(model, model.body(name).id)
+            }
+            arm_root = model.body_rootid[model.body(self._arm_root).id]
+            pushes: dict[int, list[np.ndarray]] = {}
             for contact in data.contact[: data.ncon]:
-                for tip, other in ((contact.geom1, contact.geom2), (contact.geom2, contact.geom1)):
-                    if tip in touching:
-                        body = int(model.geom_bodyid[other])
-                        if body != 0 and model.body_rootid[body] != arm_root:
-                            touching[tip].add(body)
-            return bool(touching[left] & touching[right])
+                for mine, other, sign in (
+                    (contact.geom1, contact.geom2, 1.0), (contact.geom2, contact.geom1, -1.0)
+                ):
+                    body = int(model.geom_bodyid[other])
+                    if (
+                        model.geom_bodyid[mine] in gripper
+                        and body != 0
+                        and model.body_rootid[body] != arm_root
+                    ):
+                        # the normal points from geom1 to geom2; this one points into `other`
+                        pushes.setdefault(body, []).append(sign * contact.frame[:3])
+            return any(
+                float(np.dot(a, b)) < -0.5
+                for normals in pushes.values()
+                for a, b in itertools.combinations(normals, 2)
+            )
 
         return self._sim.run(read)
+
+
 
 
 def _look_at(position: Sequence[float], target: Sequence[float]) -> Quat:

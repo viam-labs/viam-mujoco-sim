@@ -13,7 +13,6 @@ across a rebuild by joint and actuator name.
 
 from __future__ import annotations
 
-import itertools
 import math
 import queue
 import threading
@@ -28,38 +27,38 @@ import mujoco
 import numpy as np
 from viam.logging import getLogger
 
-from .meshes import ASSETS_DIR, MeshSource, Piece, add_pieces, parse_mesh
+from .meshes import MeshSource, Piece, add_pieces, parse_mesh
 from .shapes import GEOM_TYPES, mj_size, prop_shape
 
 LOGGER = getLogger("viam-mujoco-sim")
 
 
+# Bundled arms: default attributes for `asset` (config attributes win).
+# Paths are relative to assets/.
 KNOWN_ASSETS: dict[str, dict[str, Any]] = {
     "lite6": {
-        "mjcf": ASSETS_DIR / "ufactory_lite6" / "lite6_gripper_wide.xml",
+        "mjcf": "ufactory_lite6/lite6_gripper_wide.xml",
         # vendored from viam-modules/viam-ufactory-xarm@73551eac (arm/lite6_kinematics.json)
-        "kinematics": (ASSETS_DIR / "ufactory_lite6" / "lite6_kinematics.json").as_uri(),
-        "joint_names": tuple(f"joint{index}" for index in range(1, 7)),
-        "home": (0.0, 0.0, 1.57, 0.0, 1.57, 0.0),
-        "base_body": "link_base",
-        # link6's origin; the end of Viam's Lite6 kinematics chain
-        "flange_site": "attachment_site",
+        "kinematics_url": "ufactory_lite6/lite6_kinematics.json",
         # Viam's gripper_mount frame is link6 turned half a turn about the
         # tool axis. Symmetric for a parallel gripper, but GetEndPosition
         # reports in Viam's convention.
-        "flange_offset_wxyz": (0.0, 0.0, 0.0, 1.0),
-        # MuJoCo collides meshes as convex hulls, which are inflated past the
-        # real links and jam reachable poses. Only the listed hull-inflation
-        # pairs are excluded; every other arm pair still collides, including
-        # links 3-6 and the gripper against link_base/link1, and link2 against
-        # links 5-6 and the gripper. That matters because Viam's kinematics
-        # model the base as a 1 mm sphere and give the gripper no geometry, so
-        # MuJoCo is the only check there.
-        "self_collision_excluded_pairs": (
-            *itertools.combinations(("link3", "link4", "link5", "link6", "gripper_body"), 2),
-            ("link1", "link3"), ("link2", "link4"), ("link2", "link_base"),
-        ),
+        "flange_offset": {"orientation": {"o_x": 0, "o_y": 0, "o_z": 1, "theta": 180}},
     },
+    "ur5e": {
+        # mujoco_menagerie@98a70c56 universal_robots_ur5e; its base body turns
+        # half a turn, so its world already matches Viam's base frame
+        "mjcf": "universal_robots_ur5e/ur5e.xml",
+        # vendored from viam-modules/universal-robots@3baa567d (src/kinematics/ur5e.json)
+        "kinematics_url": "universal_robots_ur5e/ur5e_kinematics.json",
+    },
+}
+# Bundled grippers: default attributes for the gripper's `asset`. No mjcf
+# means the arm MJCF's own gripper.
+GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
+    "lite6_gripper": {},
+    # mujoco_menagerie@98a70c56 robotiq_2f85
+    "robotiq_2f85": {"mjcf": "robotiq_2f85/2f85.xml"},
 }
 
 MAX_SUBSTEPS = 50
@@ -261,6 +260,7 @@ class SimManager:
         self.generation = 0
         self._contributions: dict[str, Contribution] = {}
         self.step_callbacks: dict[str, Callable[[float], None]] = {}
+        self.arms: dict[str, Any] = {}  # ArmHandle by component name, for its gripper
         self.playing = True
         self.slips = 0
         self._anchor_wall = 0.0

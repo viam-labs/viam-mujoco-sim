@@ -1,13 +1,14 @@
+import json
 import math
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from mujoco_module import robots
 from mujoco_module.handles import ArmHandle, JointTrajectoryPoint
 from mujoco_module.sim import WorldConfig
 from viam.spatialmath import AxisAngle
-from sva import _quat_matrix, forward_kinematics
 from conftest import BLOCK
 
 KINEMATICS = Path(__file__).parents[1] / "assets" / "ufactory_lite6" / "lite6_kinematics.json"
@@ -37,9 +38,10 @@ def test_flange_matches_viam_kinematics(sim, seed):
 
     mujoco.mj_kinematics(sim.model, sim.data)
     (x, y, z), quat = arm.get_end_pose()
-    expected = forward_kinematics(KINEMATICS, joints, "gripper_mount")
+    kinematics = robots.parse_kinematics(KINEMATICS.read_bytes(), urdf=False, label="lite6")
+    expected = kinematics.forward(joints)["gripper_mount"]
     assert np.allclose([x, y, z], expected[:3, 3], atol=1.5e-3)
-    assert np.allclose(_quat_matrix(quat), expected[:3, :3], atol=1e-2)
+    assert np.allclose(robots.transform(quat=quat)[:3, :3], expected[:3, :3], atol=1e-2)
     # and the base really sits at the configured frame in the world
     base = sim.data.body("pick-arm/link_base")
     assert np.allclose(base.xpos, [0.1, 0.2, 0.05])
@@ -173,3 +175,199 @@ def test_gripper_still_collides_with_arm_base(sim):
     pairs = [{int(sim.model.geom_bodyid[c.geom1]), int(sim.model.geom_bodyid[c.geom2])}
              for c in sim.data.contact[: sim.data.ncon] if c.dist < -0.005]
     assert {gripper, base} in pairs
+
+THREE_JOINT_MJCF = """<mujoco>
+  <compiler angle="radian"/>
+  <worldbody>
+    <body name="base" pos="0 0 0.3">
+      <geom size="0.03" pos="0 0 -0.06"/>
+      <body name="l1"><joint name="a" axis="0 0 1"/><geom size="0.02"/>
+        <body name="l2" pos="0 0 0.1"><joint name="b" axis="0 1 0"/><geom size="0.02"/>
+          <body name="l3" pos="0.1 0 0"><joint name="c" axis="0 1 0"/><geom size="0.02"/>
+            <site name="attachment_site"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="act_c" joint="c" kp="50" kv="5"/>
+    <position name="act_a" joint="a" kp="50" kv="5"/>
+    <position name="act_b" joint="b" kp="50" kv="5"/>
+  </actuator>
+  <keyframe><key name="home" qpos="0.1 0.2 0.3" ctrl="0.3 0.1 0.2"/></keyframe>
+</mujoco>"""
+
+THREE_JOINT_SVA = {
+    "name": "three",
+    "links": [
+        {"id": "base", "parent": "world", "translation": {"x": 0, "y": 0, "z": 300}},
+        {"id": "upper", "parent": "a", "translation": {"x": 0, "y": 0, "z": 100}},
+        {"id": "fore", "parent": "b", "translation": {"x": 100, "y": 0, "z": 0}},
+        {"id": "tool", "parent": "c", "translation": {"x": 0, "y": 0, "z": 0}},
+    ],
+    "joints": [
+        {"id": "a", "type": "revolute", "parent": "base", "axis": {"x": 0, "y": 0, "z": 1}},
+        {"id": "b", "type": "revolute", "parent": "upper", "axis": {"x": 0, "y": 1, "z": 0}},
+        {"id": "c", "type": "revolute", "parent": "fore", "axis": {"x": 0, "y": 1, "z": 0}},
+    ],
+}
+
+
+@pytest.fixture
+def three_joint_files(tmp_path):
+    mjcf, kinematics = tmp_path / "three.xml", tmp_path / "three.json"
+    mjcf.write_text(THREE_JOINT_MJCF)
+    kinematics.write_text(json.dumps(THREE_JOINT_SVA))
+    return {"mjcf": str(mjcf), "kinematics_url": str(kinematics)}
+
+
+def test_custom_arm_from_mjcf_and_kinematics(sim, three_joint_files):
+    arm = ArmHandle(sim, "mine", three_joint_files)
+    assert arm.joint_names() == ("a", "b", "c")
+    # home is the keyframe's ctrl, mapped to joints by actuator target, not by name
+    assert arm.get_joint_positions() == pytest.approx([0.1, 0.2, 0.3])
+    target = [0.5, -0.2, 0.4]
+    arm.set_joint_targets(target)
+    sim.advance(3.0)
+    assert arm.get_joint_positions() == pytest.approx(target, abs=0.01)
+
+
+def test_end_pose_is_in_the_arm_frame_with_base_offset(sim, three_joint_files, tmp_path):
+    # this arm's kinematics put its base 100 mm higher and turned 90 degrees;
+    # base_offset says where the MJCF world sits in the arm frame to match
+    sva = json.loads(json.dumps(THREE_JOINT_SVA))
+    sva["links"][0]["translation"]["z"] = 400
+    sva["links"][0]["orientation"] = {"type": "ov_degrees", "value": {"x": 0, "y": 0, "z": 1, "th": 90}}
+    kinematics_file = tmp_path / "turned.json"
+    kinematics_file.write_text(json.dumps(sva))
+    offset = {"translation": {"x": 0, "y": 0, "z": 100}, "orientation": {"o_z": 1, "theta": 90}}
+    arm = ArmHandle(sim, "mine", {
+        **three_joint_files, "kinematics_url": str(kinematics_file),
+        "base_offset": offset, "position": [1.0, 0, 0],
+    })
+    kinematics = robots.parse_kinematics(json.dumps(sva).encode(), urdf=False, label="turned")
+    expected = kinematics.forward([0.1, 0.2, 0.3])["tool"]
+    position, quat = arm.get_end_pose()
+    assert position == pytest.approx(expected[:3, 3], abs=1e-6)
+    assert robots.transform(quat=quat)[:3, :3] == pytest.approx(expected[:3, :3], abs=1e-6)
+    # the MJCF world sits at the arm's frame composed with base_offset
+    assert sim.data.body("mine/base").xpos == pytest.approx([1.0, 0, 0.4])
+
+
+def test_flange_site_euler_orientation_is_honoured(sim, three_joint_files):
+    # MjSpec keeps euler in site.alt, so its quat reads identity; the compiled site has it (90 deg; this MJCF is in radians)
+    Path(three_joint_files["mjcf"]).write_text(
+        THREE_JOINT_MJCF.replace('<site name="attachment_site"/>', '<site name="attachment_site" euler="0 0 1.5707963267948966"/>')
+    )
+    # the frame check needs the -90 deg flange_offset to undo the site's turn, so the end pose is the tool's
+    arm = ArmHandle(sim, "mine", {**three_joint_files, "flange_offset": {"orientation": {"theta": -90}}})
+    kinematics = robots.parse_kinematics(
+        Path(three_joint_files["kinematics_url"]).read_bytes(), urdf=False, label="three"
+    )
+    expected = kinematics.forward([0.1, 0.2, 0.3])["tool"]
+    position, quat = arm.get_end_pose()
+    assert position == pytest.approx(expected[:3, 3], abs=1e-6)
+    assert robots.transform(quat=quat)[:3, :3] == pytest.approx(expected[:3, :3], abs=1e-6)
+
+
+def test_missing_flange_site_names_the_attribute(sim, three_joint_files):
+    with pytest.raises(ValueError, match="has no site 'tcp'; set flange_site"):
+        ArmHandle(sim, "mine", {**three_joint_files, "flange_site": "tcp"})
+
+
+def suggestion(message, key):
+    """The pose an error message suggests for `key`, parsed."""
+    return robots.parse_pose(json.loads(message.split(f"try {key}: ")[1]), key)
+
+
+def test_frame_check_suggests_the_lite6_flange_offset(sim):
+    with pytest.raises(ValueError, match="disagree by .* 180.0 deg") as error:
+        make_arm(sim, flange_offset={})  # identity, not the bundled half turn
+    fix = suggestion(str(error.value), "flange_offset")
+    assert fix[:3, :3] == pytest.approx(np.diag([-1.0, -1.0, 1.0]), abs=1e-2)
+    assert np.linalg.norm(fix[:3, 3]) < 0.002
+
+
+def test_frame_check_suggests_a_base_offset(sim, three_joint_files):
+    with pytest.raises(ValueError, match="try base_offset") as error:
+        ArmHandle(sim, "mine", {**three_joint_files, "base_offset": {"translation": {"x": 50}}})
+    assert suggestion(str(error.value), "base_offset") == pytest.approx(np.eye(4), abs=1e-6)
+
+
+def test_frame_check_without_a_rigid_fix_has_no_suggestion(sim, three_joint_files, tmp_path):
+    sva = json.loads(json.dumps(THREE_JOINT_SVA))
+    sva["links"][2]["translation"]["x"] = 200  # the forearm is twice as long
+    kinematics_file = tmp_path / "long.json"
+    kinematics_file.write_text(json.dumps(sva))
+    with pytest.raises(ValueError, match="disagree by") as error:
+        ArmHandle(sim, "mine", {**three_joint_files, "kinematics_url": str(kinematics_file)})
+    assert "try" not in str(error.value)
+    assert "arm:mine" not in sim.step_callbacks
+
+
+def test_kinematics_shapes_sit_where_viam_puts_them(sim):
+    import mujoco
+
+    make_arm(sim)
+    kinematics = robots.parse_kinematics(KINEMATICS.read_bytes(), urdf=False, label="lite6")
+    viam = kinematics.forward(HOME)
+    checked = 0
+    for frame in kinematics.frames.values():
+        if not frame.geometry:
+            continue
+        expected = viam[frame.parent] @ robots.sva_pose(frame.geometry, frame.name)
+        geom = sim.data.geom(f"pick-arm/viam_{frame.name}")
+        assert np.linalg.norm(geom.xpos - expected[:3, 3]) < 0.005, frame.name
+        if sim.model.geom_type[geom.id] == mujoco.mjtGeom.mjGEOM_CAPSULE:
+            assert abs(geom.xmat.reshape(3, 3)[:, 2] @ expected[:3, 2]) > 0.999, frame.name
+        checked += 1
+    assert checked == 8
+
+
+def test_kinematics_shapes_replace_link_meshes_but_not_the_base_or_gripper(sim):
+    make_arm(sim)
+    model = sim.model
+    for link in ("link1", "link2", "link3", "link4", "link5"):
+        assert model.geom(f"pick-arm/{link}_c").contype == 0, link
+    # link_base and link6 only have Viam's 1 mm placeholder spheres
+    for geom in ("link_base_c", "link6_c", "gripper_lite_body_c", "gripper_left_finger"):
+        assert model.geom(f"pick-arm/{geom}").contype == 1, geom
+    assert model.geom("pick-arm/viam_base_top").contype == 1
+
+
+def test_arm_is_not_in_self_contact_at_home(sim):
+    import mujoco
+
+    make_arm(sim)
+    mujoco.mj_forward(sim.model, sim.data)
+    root = sim.model.body("pick-arm/link_base").id
+    arm_pairs = [
+        c for c in sim.data.contact[: sim.data.ncon]
+        if sim.model.body_rootid[sim.model.geom_bodyid[c.geom1]] == root
+        and sim.model.body_rootid[sim.model.geom_bodyid[c.geom2]] == root
+    ]
+    assert arm_pairs == []
+
+
+def test_mesh_collision_leaves_the_mjcf_as_is(sim):
+    make_arm(sim, collision="mesh")
+    names = [sim.model.geom(i).name for i in range(sim.model.ngeom)]
+    assert not [name for name in names if "viam_" in name]
+    assert sim.model.geom("pick-arm/link1_c").contype == 1
+
+
+def test_kinematics_collision_needs_named_bodies(sim, tmp_path, three_joint_files):
+    mjcf, kinematics = tmp_path / "unnamed.xml", tmp_path / "unnamed.json"
+    mjcf.write_text(THREE_JOINT_MJCF.replace('<body name="l1">', "<body>"))
+    sva = {**THREE_JOINT_SVA, "links": [dict(link) for link in THREE_JOINT_SVA["links"]]}
+    sva["links"][1]["geometry"] = {"r": 20, "l": 100}
+    kinematics.write_text(json.dumps(sva))
+    with pytest.raises(ValueError, match=r"arm body #\d+ has no name"):
+        ArmHandle(sim, "other", {"mjcf": str(mjcf), "kinematics_url": str(kinematics), "collision": "kinematics"})
+
+
+def test_kinematics_collision_needs_geometries(sim, three_joint_files):
+    ArmHandle(sim, "mine", three_joint_files)  # no geometries: mesh by default
+    with pytest.raises(ValueError, match='collision "kinematics" needs an SVA kinematics file'):
+        ArmHandle(sim, "other", {**three_joint_files, "collision": "kinematics"})

@@ -16,8 +16,8 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | Model | API | What it does |
 |---|---|---|
 | [`viam-labs:mujoco-sim:world`](#model-viam-labsmujoco-simworld) | `generic` | Owns the scene, props and step loop. Configure exactly one. |
-| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6 placed by its frame, with joint control. |
-| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's integrated binary gripper. |
+| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF arm, placed by its frame, with joint control. |
+| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover you can drive; ideal motion, visual wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
@@ -41,7 +41,8 @@ for you. In JSON, the module entry is:
 
 Configure one world first, then the arm, gripper and cameras, each naming the
 world. [`examples/lite6-pick.json`](examples/lite6-pick.json) is a complete
-pick cell. Its `pick_block` starts parked out of reach at x = 2.5 m on purpose;
+pick cell, and [`examples/ur5e-pick.json`](examples/ur5e-pick.json) is the same
+cell with a UR5e and a Robotiq 2F-85. Its `pick_block` starts parked out of reach at x = 2.5 m on purpose;
 `scripted_pick.py` from
 [viam-isaac-sim](https://github.com/viam-modules/viam-isaac-sim) places it with
 `set_prop_pose`. [`examples/rover-lidar.json`](examples/rover-lidar.json) is a
@@ -129,11 +130,17 @@ re-anchored. `warnings` holds MuJoCo's warning counts, such as
 
 ## Model viam-labs:mujoco-sim:arm
 
-A UFactory Lite6, from the
-[MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) model
-with its wide gripper. The arm is placed by its standard Viam frame and starts
-at home, `[0, 0, 90, 0, 90, 0]` degrees. Joints are position servos; moves are
-rate limited by `max_joint_deg_s`.
+A simulated arm, placed by its standard Viam frame. Two are bundled, both from
+the [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie);
+any other arm works from its MJCF file and its Viam kinematics file (see
+[Your own robot](#your-own-robot)). The arm starts at its MJCF's `home`
+keyframe. Joints are position servos; moves are rate limited by
+`max_joint_deg_s`.
+
+| `asset` | Arm | Home (degrees) | Kinematics |
+|---|---|---|---|
+| `lite6` | UFactory Lite6 with its wide gripper | `[0, 0, 90, 0, 90, 0]` | [viam-ufactory-xarm](https://github.com/viam-modules/viam-ufactory-xarm) |
+| `ur5e` | Universal Robots UR5e, no gripper | `[-90, -90, 90, -90, -90, 0]` | [universal-robots](https://github.com/viam-modules/universal-robots) |
 
 ### Configuration
 
@@ -157,7 +164,8 @@ rate limited by `max_joint_deg_s`.
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `asset` | string | Yes | | The robot. Only `"lite6"` is supported. |
+| `asset` | string | One of `asset`, `mjcf` | | A bundled arm: `"lite6"` or `"ur5e"`. Its defaults apply; any attribute below set in config wins. |
+| `mjcf` | string | One of `asset`, `mjcf` | | Your arm's MJCF file: an absolute path, `~/...`, or a path relative to the module's `assets/`. |
 | `max_joint_deg_s` | float | No | `180` | Per-joint velocity limit on the commanded target, reported by `dynamics_metadata`. |
 | `max_joint_deg_s2` | float | No | | Per-joint acceleration limit, reported by `dynamics_metadata` for trajectory planning. |
 | `move_timeout_sec` | float | No | `30` | How long a move waits to arrive before it fails. |
@@ -165,7 +173,13 @@ rate limited by `max_joint_deg_s`.
 | `is_moving_velocity_threshold_rad_s` | float | No | `0.01` | Joints must also be slower than this to count as arrived. |
 | `robot_control_freq_hz` | float | No | `50` | Rate at which `MoveThroughJointPositions` pushes targets, up to 1000. |
 | `path_max_step_deg` | float | No | `2.0` | Largest per-joint step between pushed targets, up to 30. |
-| `kinematics_url` | string | No | vendored Lite6 file | Kinematics file served by `GetKinematics`: `.json` for SVA, `.urdf` for URDF. `http(s)://` or `file://`. |
+| `kinematics_url` | string | With `mjcf` | the bundled arm's file | The arm's Viam kinematics file, served by `GetKinematics`: `.json` for SVA, `.urdf`, `.xml` or `.xacro` for URDF. `http(s)://`, `file://`, or a path like `mjcf`. Read when the arm is configured. |
+| `joints` | [string] | No | inferred | The arm's MJCF joint names, base to flange. |
+| `flange_site` | string | No | `"attachment_site"` | The MJCF site at the flange, where Viam's kinematics chain ends. |
+| `home_keyframe` | string | No | `"home"` | The MJCF keyframe whose `ctrl` is the start pose; all zeros without one. |
+| `base_offset` | pose | No | identity | From the arm's frame to the MJCF's world, for an MJCF whose base differs from its kinematics file. `{"translation": {"x", "y", "z"} mm, "orientation": {"o_x", "o_y", "o_z", "theta"} degrees}`. |
+| `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
+| `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -183,8 +197,8 @@ The frame's `parent` must be `world`.
 | `MoveToJointPositions` | Returns when the arm arrives, or fails after `move_timeout_sec`. |
 | `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. |
 | `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time. |
-| `GetEndPosition` | The flange (link 6) in the arm's base frame, in mm. |
-| `GetKinematics` | The vendored Lite6 SVA file, from [viam-ufactory-xarm](https://github.com/viam-modules/viam-ufactory-xarm). |
+| `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
+| `GetKinematics` | The `kinematics_url` file. |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
 | `Stop` | Holds the current target, or the measured position if it interrupted a trajectory. |
 | `MoveToPosition` | Not supported; use the motion service. |
@@ -194,14 +208,81 @@ The frame's `parent` must be `world`.
 | Command | Fields | Returns |
 |---|---|---|
 | `dynamics_metadata` | | `{source, joint_names, max_velocity_rad_s, max_acceleration_rad_s2}`; the last only when `max_joint_deg_s2` is set. |
-| `get_joint_positions_radians` | | `{values: [six radians]}` |
-| `set_joint_targets_radians` | `values`: six radians | `{"accepted": true}`; latches the target and returns at once. |
+| `get_joint_positions_radians` | | `{values: [radians, one per joint]}` |
+| `set_joint_targets_radians` | `values`: radians, one per joint | `{"accepted": true}`; latches the target and returns at once. |
+
+### Your own robot
+
+Give the arm `mjcf` and `kinematics_url` instead of `asset`. Everything else is
+read from the two files. A robot described only by a URDF can be converted to
+MJCF offline with the experimental `make_mjcf_from_robot_description.py` from
+[ros-controls/mujoco_ros2_control](https://github.com/ros-controls/mujoco_ros2_control/blob/main/mujoco_ros2_control/docs/tools.rst),
+then pointed at with `mjcf`.
+
+- **Joints.** The first N actuated hinge or slide joints in the MJCF's body
+  tree, where N is the kinematics file's joint count. They must form one chain
+  from the base; otherwise configuring fails and lists what it found. Set
+  `joints` to choose them yourself.
+- **Actuators.** The actuator whose transmission targets each joint, whatever
+  its name. Each must be a position actuator (`<position>` or
+  `<general biastype="affine">`) with gear 1 and gain equal to `kp`, because
+  the arm writes joint positions to `ctrl`.
+- **Home.** The `home_keyframe` keyframe's `ctrl` for those actuators, or its
+  joint `qpos` when the keyframe sets no `ctrl`.
+- **Gripper.** An actuator in the arm MJCF that drives none of the arm joints
+  is its integrated gripper (see the gripper model).
+
+Configuring also checks that the two files describe the same arm: the MJCF's
+`flange_site`, with the offsets, must land within 5 mm and 2° of the
+kinematics file's end effector at all-zero joints, at home, and at a mixed
+pose. If not, the error names the joint position and the disagreement, and
+when one fixed transform at the flange (or the base) explains it, it prints
+the `flange_offset` (or `base_offset`) to set:
+
+```
+arm pick-arm: the MJCF flange and the kinematics file's end effector disagree by 0.7 mm and 180.0 deg at the mixed joint position [...] ...; try flange_offset: {"translation": {"x": 0.0, "y": 0.0, "z": -0.6}, "orientation": {"o_x": 0.0, "o_y": 0.0, "o_z": 1.0, "theta": -180.0}}
+```
+
+Vendor and Menagerie link lengths differ by about a millimetre, which passes.
+Paths can point anywhere on the machine, including a registry package's
+directory; a relative path is under this module's `assets/`.
+
+### Collision shapes
+
+With an SVA kinematics file that gives its links geometry (both bundled arms'
+do), MuJoCo collides the arm with the same boxes, spheres and capsules Viam's
+planner uses: each one is added to the MuJoCo body that carries it, named
+`<arm>/viam_<link>`, and all of that body's own collision geoms are turned off.
+The MJCF's link bodies must be named. Links with only a placeholder (smaller
+than 5 mm, like the Lite6 base's 1 mm sphere) keep their MJCF collision geoms,
+and a gripper in its own bodies is never changed. A gripper whose geoms sit
+directly on the last link's body loses them too, so use `collision` `"mesh"`
+for such an arm. Pairs of
+links already touching at home are excluded from collision, as the planner
+ignores collisions present at its start.
+
+Where a planner shape is slimmer than the link, the visual mesh can sink a few
+millimetres into an obstacle; where it is fatter, the arm stops short. Set
+`collision` to `"mesh"` to collide the MJCF's own geoms instead.
 
 ## Model viam-labs:mujoco-sim:gripper
 
-The Lite6's integrated gripper, which comes with the arm. It is binary: open or
-closed with a constant force. `Grab` and `Open` latch the command and return
-before the jaws move, like the isaac-sim Lite6 gripper and the real one.
+A gripper on a mujoco-sim arm, driven by one actuator: the arm MJCF's own
+(the Lite6's), a bundled gripper, or your own gripper MJCF, which is attached
+at the arm's `flange_site`. It is binary: `Grab` and `Open` latch the command
+and return before the jaws move, like the isaac-sim Lite6 gripper and the real
+one.
+
+| `asset` | Gripper | On | Frame `translation.z` (TCP) | Frame `geometry` covering it |
+|---|---|---|---|---|
+| `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | box 78 × 78 × 70 mm at `z: -35` |
+| `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | box 150 × 80 × 170 mm at `z: -73` (fingers open along x) |
+
+Give the gripper's frame that geometry so the planner keeps the whole gripper
+clear of obstacles; without it, a path can pass the arm but clip the gripper.
+The 2F-85 also switches the whole scene to elliptic friction cones with
+`impratio` 10 (its own MJCF options, which grasping relies on) while it is
+configured.
 
 ### Configuration
 
@@ -222,8 +303,8 @@ before the jaws move, like the isaac-sim Lite6 gripper and the real one.
 }
 ```
 
-The frame's `parent` is the arm. A `z` of 81.1 mm puts the planner's tool
-point at the fingertip center of the simulated gripper.
+The frame's `parent` is the arm. Its `z` puts the planner's tool point at the
+fingertip center: use the TCP value from the table above, or for your own
 
 ### Attributes
 
@@ -231,9 +312,12 @@ point at the fingertip center of the simulated gripper.
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
 | `arm` | string | Yes | | The arm this gripper belongs to. |
-| `asset` | string | No | `"lite6_gripper"` | The only option. |
+| `asset` | string | No | `"lite6_gripper"` | A bundled gripper, see above. An attached gripper on an arm whose MJCF already has one (the `lite6`) is an error. |
+| `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF, attached at the arm's `flange_site`; a path like the arm's `mjcf`. It needs exactly one actuator, and its root bodies and jaw joint must be named. |
+| `actuator` | string | No | inferred | The gripper's actuator. |
+| `open`, `closed` | float | No | the low and high ends of the actuator's `ctrlrange` | Position actuators: the `ctrl` targets. Force actuators (`<motor>`): their signs pick the direction. |
 | `sensorless` | bool | No | `false` | `IsHoldingSomething` reports the latched grip instead of contacts, like the real Lite6 gripper. |
-| `grip_force_n` | float | No | `5` | Closing and opening force in newtons, greater than 0 and at most 10. |
+| `grip_force_n` | float | No | `5` | Force grippers only: the closing and opening force, within the actuator's `ctrlrange` (the Lite6's is 10). |
 
 ### Supported API
 
@@ -241,7 +325,7 @@ point at the fingertip center of the simulated gripper.
 |---|---|
 | `Open` | Latches open and returns at once. |
 | `Grab` | Latches closed and returns `true` at once. |
-| `Stop` | Releases the force. |
+| `Stop` | Force grippers release the force; position grippers hold the jaw where it is. |
 | `IsMoving` | True while the jaws move. |
 | `IsHoldingSomething` | See below. |
 | `GetCurrentInputs` / `GoToInputs` | One value: `0` open, `1` closed. |
@@ -251,10 +335,11 @@ point at the fingertip center of the simulated gripper.
 
 | Key | Meaning |
 |---|---|
-| `firm_grasp` | Both fingertips touch the same object. |
+| `firm_grasp` | The gripper touches one object from two opposite sides. |
 | `input` | The latched command, `0` or `1`. |
-| `jaw_m` | Left finger position in meters, `open_m` to `closed_m`. |
-| `open_m`, `closed_m` | The jaw limits. |
+| `jaw` | The jaw joint's position, from `open` to `closed`: meters for a slide joint (the Lite6), radians for a hinge (the 2F-85). |
+| `open`, `closed` | The jaw joint's limits, in the same units. |
+| `jaw_m`, `open_m`, `closed_m` | The same three in meters, for slide jaws only (the Lite6). |
 
 Its top-level answer is the latched grip when `sensorless` is true, and
 `firm_grasp` otherwise. To wait for a grasp, poll until `meta.firm_grasp` is
@@ -579,11 +664,12 @@ Use a capsule or box for round posts: Viam's geometry API has no cylinder yet
 viam-server can't pass a `cylinder` frame geometry to a module.
 
 A goal inside an obstacle is refused at planning time. A path that only grazes
-one can still fail in the sim: the planner checks the arm's kinematics
-geometry, while MuJoCo collides the Lite6's links as convex hulls, which are
-fatter, and the Lite6 kinematics give the gripper no geometry at all. The arm
-then stops short of its goal (`did not converge on final waypoint`). For moves
-past obstacles, pass a collision buffer to the motion service:
+one can still fail in the sim: MuJoCo collides the arm links with the
+planner's own shapes (see [Collision shapes](#collision-shapes)), but the
+visual meshes and the gripper differ from them, and the Lite6 kinematics give
+the gripper no geometry at all. The arm then stops short of its goal (`did not
+converge on final waypoint`). For moves past obstacles, pass a collision
+buffer to the motion service:
 
 ```python
 await motion.move(component_name="pick-gripper", destination=goal,
@@ -592,8 +678,9 @@ await motion.move(component_name="pick-gripper", destination=goal,
 
 The buffer applies to every obstacle, so leave it off for the final approach
 onto a surface, such as placing into the bin. To have the planner see the gripper
-itself, give its frame a geometry; this box covers the Lite6 gripper from the
-fingertips back to the flange:
+itself, give its frame a geometry (the gripper table lists one for each bundled
+gripper); this box covers the Lite6 gripper from the fingertips back to the
+flange:
 
 ```json
 "frame": {
@@ -797,10 +884,10 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
 - **Mesh obstacles are missing from the `FrameSystemConfig` API.** RDK can't serialize a model built from geometries, so that call leaves them out (it blanks the part). The planner and the 3D scene viewer still see them (checked on viam-server v1.15).
 - **Mesh URLs are downloaded once.** To pick up a changed file, change the URL (e.g. add `?v=2`).
 - **Viam's planner collides meshes as surfaces.** A link entirely inside a piece, or a step that jumps past a thin wall, isn't caught. Keep walls at least 5 mm thick.
-- **Arm self-collision is partial.** MuJoCo's convex hulls of the Lite6 links
-  overlap at reachable wrist angles, so those wrist-link pairs are excluded.
-  The gripper and links 3–6 still collide with the base and shoulder, which
-  Viam's planner can't see.
+- **Arm self-collision is partial.** Link pairs touching at home are excluded,
+  and the bundled Lite6 also excludes its wrist-link pairs, whose convex hulls
+  overlap at reachable wrist angles. The gripper and links 3–6 still collide
+  with the base and shoulder, which Viam's planner can't see.
 - **Place components relative to `world`.** Arm and base frames must have
   parent `world`; the gripper's frame parent is its arm, and a camera's or
   LIDAR's is `world` or another mujoco-sim component.
@@ -812,9 +899,12 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
 - **Depth is ideal.** It has no noise, holes or minimum range, unlike a real
   depth sensor. On macOS, MuJoCo warns that depth accuracy is limited; at 1 m
   it is still within 1 mm.
-- **Kinematics are vendored.** `GetKinematics` serves
-  `assets/ufactory_lite6/lite6_kinematics.json` (from
-  viam-ufactory-xarm@73551eac). The `kinematics_url` attribute overrides it.
+- **Kinematics are vendored.** `GetKinematics` serves the bundled arm's file
+  (`assets/ufactory_lite6/lite6_kinematics.json` from
+  viam-ufactory-xarm@73551eac, `assets/universal_robots_ur5e/ur5e_kinematics.json`
+  from universal-robots@3baa567d). The `kinematics_url` attribute overrides it.
+- **One-actuator grippers only.** No suction, and no grippers with more than
+  one actuator.
 
 ## Run it locally
 
@@ -839,8 +929,10 @@ make lint
 Tests run real MuJoCo; there is no mock backend. Tests use OSMesa on Linux
 (`apt install libosmesa6`); macOS uses CGL.
 
-The Lite6 model is vendored from
+The Lite6, UR5e and 2F-85 models are vendored from
 [mujoco_menagerie](https://github.com/google-deepmind/mujoco_menagerie)
+(`assets/ufactory_lite6` and `assets/universal_robots_ur5e`, BSD-3-Clause;
+`assets/robotiq_2f85`, BSD-2-Clause). See `NOTICE`.
 (`assets/ufactory_lite6`, BSD-3-Clause).
 
 To release, push a plain-semver tag such as `0.1.1`; the deploy workflow builds

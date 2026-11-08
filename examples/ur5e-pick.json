@@ -1,0 +1,164 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "pick_block",
+            "type": "cube",
+            "position": [
+              2.5,
+              0,
+              0.02
+            ],
+            "size": 0.0313,
+            "mass": 0.03,
+            "color": [
+              1,
+              0,
+              0
+            ],
+            "static_friction": 2.0,
+            "dynamic_friction": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 600.0,
+          "y": 0.0,
+          "z": -10.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 800.0,
+          "y": 1200.0,
+          "z": 20.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.55,
+          0.45,
+          0.35
+        ]
+      }
+    },
+    {
+      "name": "bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 550.0,
+          "y": -350.0,
+          "z": 0.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "mesh": "meshes/bin.stl",
+        "color": [
+          0.3,
+          0.5,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "ur5e",
+        "max_joint_deg_s": 30,
+        "max_joint_deg_s2": 60
+      }
+    },
+    {
+      "name": "pick-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 155.8
+        },
+        "geometry": {
+          "type": "box",
+          "x": 150,
+          "y": 80,
+          "z": 170,
+          "translation": {
+            "x": 0,
+            "y": 0,
+            "z": -73
+          }
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "pick-arm",
+        "asset": "robotiq_2f85",
+        "sensorless": true
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1800,
+          "y": 1500,
+          "z": 1200
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [
+          0.5,
+          0,
+          0.2
+        ],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "world-state",
+      "api": "rdk:service:world_state_store",
+      "model": "viam-labs:mujoco-sim:world_state",
+      "attributes": {
+        "world": "sim-world"
+      }
+    }
+  ]
+}

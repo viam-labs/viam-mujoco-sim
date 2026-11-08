@@ -14,13 +14,13 @@
     {
       "model": "viam-labs:mujoco-sim:arm",
       "api": "rdk:component:arm",
-      "short_description": "A simulated arm (Lite6)",
+      "short_description": "A simulated arm: UFactory Lite6, UR5e, or your own MJCF",
       "markdown_link": "README.md#model-viam-labsmujoco-simarm"
     },
     {
       "model": "viam-labs:mujoco-sim:gripper",
       "api": "rdk:component:gripper",
-      "short_description": "The Lite6's integrated binary gripper",
+      "short_description": "A gripper on a mujoco-sim arm: the Lite6's, a Robotiq 2F-85, or your own MJCF",
       "markdown_link": "README.md#model-viam-labsmujoco-simgripper"
     },
     {
