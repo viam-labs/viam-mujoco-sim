@@ -29,6 +29,8 @@ import mujoco
 import numpy as np
 from viam.logging import getLogger
 
+from .shapes import GEOM_TYPES, mj_size, prop_shape
+
 LOGGER = getLogger("viam-mujoco-sim")
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
@@ -116,7 +118,8 @@ def _unit_quaternion(value: Any, label: str) -> tuple[float, float, float, float
 @dataclass(frozen=True)
 class PropSpec:
     name: str
-    half_extents: tuple[float, ...]
+    shape: str  # "box", "sphere", "cylinder" or "capsule"
+    geom_size: tuple[float, ...]  # MuJoCo size, meters (see shapes.py)
     position: tuple[float, ...]
     orientation_wxyz: tuple[float, float, float, float]
     mass: float
@@ -126,17 +129,16 @@ class PropSpec:
 
     @classmethod
     def parse(cls, raw: Any) -> "PropSpec":
-        """Isaac's prop format, cubes only. dynamic_friction is accepted so
+        """Isaac's prop format plus sphere, cylinder and capsule types. dynamic_friction is accepted so
         Isaac configs carry over; MuJoCo has one sliding coefficient."""
         if not isinstance(raw, Mapping) or not raw.get("name"):
             raise ValueError(f"every prop needs a name: {raw!r}")
         name = str(raw["name"])
-        if raw.get("type", "cube") != "cube":
-            raise ValueError(f"prop {name}: only type 'cube' is supported")
         size = _positive(raw.get("size", 0.05), f"prop {name}: size")
         scale = _vector(raw.get("scale", [1, 1, 1]), 3, f"prop {name}: scale")
         if any(item <= 0.0 for item in scale):
             raise ValueError(f"prop {name}: scale must be positive")
+        shape, geom_size = prop_shape(name, str(raw.get("type", "cube")), size, scale)
         friction = _finite(raw.get("static_friction", 1.0), f"prop {name}: static_friction")
         if friction < 0.0:
             raise ValueError(f"prop {name}: static_friction must be non-negative")
@@ -146,7 +148,8 @@ class PropSpec:
             raise ValueError(f"prop {name}: dynamic_friction must be non-negative")
         return cls(
             name=name,
-            half_extents=tuple(size * item / 2.0 for item in scale),
+            shape=shape,
+            geom_size=geom_size,
             position=_vector(raw.get("position", [0, 0, 0]), 3, f"prop {name}: position"),
             orientation_wxyz=_unit_quaternion(
                 raw.get("orientation_wxyz", [1, 0, 0, 0]), f"prop {name}: orientation_wxyz"
@@ -389,8 +392,8 @@ class SimManager:
                 body.add_freejoint(name=prop.name)
             body.add_geom(
                 name=prop.name,
-                type=mujoco.mjtGeom.mjGEOM_BOX,
-                size=list(prop.half_extents),
+                type=GEOM_TYPES[prop.shape],
+                size=mj_size((prop.shape, prop.geom_size)),
                 mass=prop.mass,
                 rgba=[*prop.color, 1.0],
                 friction=[prop.friction, 0.005, 0.0001],

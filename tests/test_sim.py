@@ -32,8 +32,10 @@ def test_fixed_and_unknown_props_are_rejected(sim):
 
 
 def test_prop_config_validation():
-    with pytest.raises(ValueError, match="only type 'cube'"):
-        WorldConfig.from_attrs({"props": [{"name": "s", "type": "sphere"}]})
+    with pytest.raises(ValueError, match="type must be one of"):
+        WorldConfig.from_attrs({"props": [{"name": "s", "type": "cone"}]})
+    with pytest.raises(ValueError, match="sphere's scale must be uniform"):
+        WorldConfig.from_attrs({"props": [{"name": "s", "type": "sphere", "scale": [1, 1, 2]}]})
     with pytest.raises(ValueError, match="non-negative"):
         WorldConfig.from_attrs({"props": [{"name": "b", "static_friction": -1}]})
     with pytest.raises(ValueError, match="dynamic_friction must be non-negative"):
@@ -148,3 +150,26 @@ def test_rebuild_carries_state_and_inits_only_new_contributions(sim):
     assert inits == [1]
     sim.reset()
     assert inits == [1, 1]
+
+
+def test_prop_shapes_build_matching_geoms(sim):
+    import mujoco
+
+    sim.configure_world(WorldConfig.from_attrs({"props": [
+        {"name": "ball", "type": "sphere", "size": 0.06, "position": [0, 0, 0.5]},
+        {"name": "can", "type": "cylinder", "size": 0.06, "scale": [1, 1, 2], "position": [0.5, 0, 0.5]},
+        {"name": "pill", "type": "capsule", "size": 0.04, "scale": [1, 1, 3], "position": [1, 0, 0.5]},
+        {"name": "brick", "size": 0.1, "scale": [1, 2, 0.5], "position": [1.5, 0, 0.5]},
+    ]}))
+    geom = sim.model.geom
+    assert geom("ball").type[0] == mujoco.mjtGeom.mjGEOM_SPHERE
+    assert geom("ball").size[0] == pytest.approx(0.03)
+    assert geom("can").type[0] == mujoco.mjtGeom.mjGEOM_CYLINDER
+    assert tuple(geom("can").size[:2]) == pytest.approx((0.03, 0.06))
+    assert geom("pill").type[0] == mujoco.mjtGeom.mjGEOM_CAPSULE
+    assert tuple(geom("pill").size[:2]) == pytest.approx((0.02, 0.04))
+    assert geom("brick").type[0] == mujoco.mjtGeom.mjGEOM_BOX
+    assert tuple(geom("brick").size) == pytest.approx((0.05, 0.1, 0.025))
+    sim.advance(1.0)  # they fall and come to rest on the floor
+    assert sim.data.body("ball").xpos[2] == pytest.approx(0.03, abs=0.002)
+    assert sim.data.body("brick").xpos[2] == pytest.approx(0.025, abs=0.002)

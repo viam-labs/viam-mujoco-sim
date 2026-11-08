@@ -3,9 +3,11 @@
 Attributes:
   physics_dt (float)  - physics step in seconds (default 0.002)
   real_time (bool)    - pace sim time to wall time (default true)
-  props (list)        - cubes: {name, type: "cube", size, scale, position,
+  props (list)        - movable objects: {name, type: "cube" | "sphere" |
+                        "cylinder" | "capsule", size, scale, position,
                         orientation_wxyz, mass, color, fixed, static_friction,
-                        dynamic_friction (accepted, ignored)}
+                        dynamic_friction (accepted, ignored)}. Each shape fills
+                        a box of size x scale.
 
 DoCommand: status, play, pause, reset, set_prop_pose, get_prop_pose,
 park_props. Shapes match the viam-labs:isaac-sim world.

@@ -22,6 +22,8 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover you can drive; ideal motion, visual wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
+| [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere or capsule that Viam's motion planner also sees. |
+| [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props to the Viam app's 3D scene viewer. |
 
 ## Getting started
 
@@ -72,13 +74,6 @@ viam-server starts it first. Sim time is paced to wall time by default.
         "mass": 0.03,
         "color": [1, 0, 0],
         "static_friction": 2.0
-      },
-      {
-        "name": "place_pad",
-        "fixed": true,
-        "size": 0.2,
-        "scale": [1, 1, 0.05],
-        "position": [0.32, -0.22, 0.005]
       }
     ]
   }
@@ -91,15 +86,15 @@ viam-server starts it first. Sim time is paced to wall time by default.
 |---|---|---|---|---|
 | `physics_dt` | float | No | `0.002` | Physics step in seconds. |
 | `real_time` | bool | No | `true` | Pace sim time to wall time. `false` steps as fast as possible. |
-| `props` | list | No | `[]` | Cubes in the scene; see below. |
+| `props` | list | No | `[]` | Movable objects in the scene; see below. |
 
 Each prop:
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `name` | string | Yes | | Unique prop name, used by the prop commands. |
-| `type` | string | No | `"cube"` | Only `"cube"` is supported. |
-| `size` | float | No | `0.05` | Edge length in meters. |
+| `type` | string | No | `"cube"` | `"cube"`, `"sphere"`, `"cylinder"` or `"capsule"`. Each fills a box of `size × scale`: a sphere needs a uniform scale; a cylinder's or capsule's diameter is `size × scale[0]` (equal to `scale[1]`) and its height `size × scale[2]`, tip to tip for a capsule. A capsule's height must exceed its diameter (`scale[2] > scale[0]`). |
+| `size` | float | No | `0.05` | Width in meters; see `type` for each shape. |
 | `scale` | [x, y, z] | No | `[1, 1, 1]` | Per-axis scale of `size`. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Spawn position in meters. |
 | `orientation_wxyz` | [w, x, y, z] | No | `[1, 0, 0, 0]` | Spawn orientation. |
@@ -108,6 +103,8 @@ Each prop:
 | `fixed` | bool | No | `false` | A fixed prop never moves. |
 | `static_friction` | float | No | `1.0` | Sliding friction, non-negative. |
 | `dynamic_friction` | float | No | | Accepted so isaac-sim configs carry over; MuJoCo has one sliding coefficient, so it is ignored. |
+
+Props are invisible to Viam's motion planner. For fixed scene geometry the planner should avoid, use [obstacles](#model-viam-labsmujoco-simobstacle).
 
 ### DoCommand
 
@@ -515,6 +512,113 @@ Readings error until the configured base is in the scene.
 For SLAM and navigation with nav-stack, see
 [Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation).
 
+## Model viam-labs:mujoco-sim:obstacle
+
+A fixed box, sphere or capsule, such as a table, wall or fixture. Its frame's
+`geometry` is its shape. RDK puts frame geometries in the frame system, so
+Viam's motion planner avoids the same shape MuJoCo simulates: configure it once.
+
+### Configuration
+
+```json
+{
+  "name": "table",
+  "api": "rdk:component:generic",
+  "model": "viam-labs:mujoco-sim:obstacle",
+  "frame": {
+    "parent": "world",
+    "translation": { "x": 400, "y": 0, "z": 0 },
+    "geometry": { "type": "box", "x": 600, "y": 800, "z": 20,
+                  "translation": { "x": 0, "y": 0, "z": -10 } }
+  },
+  "attributes": { "world": "sim-world", "color": [0.6, 0.5, 0.4] }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `color` | [r, g, b] | No | `[0.7, 0.7, 0.7]` | RGB, 0 to 1. |
+| `static_friction` | float | No | `1.0` | Sliding friction, non-negative. |
+
+The frame's `parent` must be `world`, and it needs a `geometry`: `box` (`x`,
+`y`, `z` in mm), `sphere` (`r`) or `capsule` (`r`, and `l` tip to tip along the
+geometry's Z; `l` must be at least `2r`). The geometry's `translation` and
+`orientation` offset it within the frame. Obstacles never move, and `reset`
+leaves them where they are.
+
+Use a capsule or box for round posts: Viam's geometry API has no cylinder yet
+([viamrobotics/api#894](https://github.com/viamrobotics/api/pull/894)), and
+viam-server can't pass a `cylinder` frame geometry to a module.
+
+A goal inside an obstacle is refused at planning time. A path that only grazes
+one can still fail in the sim: the planner checks the arm's kinematics
+geometry, while MuJoCo collides the Lite6's links as convex hulls, which are
+fatter, and the Lite6 kinematics give the gripper no geometry at all. The arm
+then stops short of its goal (`did not converge on final waypoint`). For moves
+past obstacles, pass a collision buffer to the motion service:
+
+```python
+await motion.move(component_name="pick-gripper", destination=goal,
+                  extra={"collision_buffer_mm": 20})
+```
+
+The buffer applies to every obstacle, so leave it off for the final approach
+onto a surface, such as placing on a pad. To have the planner see the gripper
+itself, give its frame a geometry; this box covers the Lite6 gripper from the
+fingertips back to the flange:
+
+```json
+"frame": {
+  "parent": "pick-arm",
+  "translation": { "x": 0, "y": 0, "z": 81.1 },
+  "geometry": { "type": "box", "x": 78, "y": 78, "z": 70,
+                "translation": { "x": 0, "y": 0, "z": -35 } }
+}
+```
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetGeometries` | The frame geometry, labelled with the component's name. |
+
+## Model viam-labs:mujoco-sim:world_state
+
+A world state store that publishes every movable (non-fixed) prop with its
+live pose and shape, so props show up and move in the Viam app's 3D scene
+viewer. Obstacles, arms and bases already appear through the frame system. The
+world state store doesn't feed the motion service.
+
+### Configuration
+
+```json
+{
+  "name": "world-state",
+  "api": "rdk:service:world_state_store",
+  "model": "viam-labs:mujoco-sim:world_state",
+  "attributes": { "world": "sim-world" }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `ListUUIDs` | One per movable prop, stable across restarts. |
+| `GetTransform` | The prop's pose in `world` (mm, degrees), its shape and `metadata.color` (0–255). |
+| `StreamTransformChanges` | An ADDED event per prop, then UPDATED events for props that moved more than 1 mm or 0.5°, checked every 0.1 s. |
+
+Cylinder props are sent as meshes, since the geometry API has no cylinder.
+
 ## Mobile base, SLAM and navigation
 
 A simulated rover can map its world and navigate it with
@@ -532,8 +636,10 @@ LIDAR's mount from the frame system and the rover's footprint from the base's
 
 ### 1. Build the scene
 
-1. A world with walls and obstacles as fixed props, like the 3 m pen in the
-   example. Keep them tall enough for the LIDAR's scan plane to hit.
+1. A world with walls and obstacles as
+   [obstacle](#model-viam-labsmujoco-simobstacle) components, like the 3 m
+   pen in the example, so they're in the frame system and the 3D scene viewer
+   too. Keep them tall enough for the LIDAR's scan plane to hit.
 2. A `viam-labs:mujoco-sim:base` framed on `world`.
 3. A `viam-labs:mujoco-sim:lidar` framed on the rover, above the chassis
    (`translation.z` over 130 mm; the example uses 160).
@@ -643,7 +749,7 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
   map's origin is where mapping started, and its +X is the rover's forward
   there. Read the rover's map pose from `slam.get_position()` (millimetres and
   degrees, as Viam poses are).
-- Keep goals clear of walls and props by the rover's half-width plus
+- Keep goals clear of walls and obstacles by the rover's half-width plus
   nav-stack's `clearance_m` (0.13 + 0.2 m by default). A goal inside that band
   can't be reached, and nav-stack keeps trying rather than failing it.
 - Heading drift is what SLAM corrects. The example's 0.05 °/s maps cleanly;
@@ -658,9 +764,10 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
   that depends on it. A move in flight fails with
   `arm '<name>' was closed (removed or reconfigured)`. Leave the config alone
   during a run.
-- **Fixed props never move.** `set_prop_pose` and `park_props` reject them, and
-  `reset` leaves them where they are. Non-fixed props keep their pose across
-  world edits; use `park_props` or `reset`.
+- **Fixed props and obstacles never move.** `set_prop_pose` and `park_props`
+  reject them, and `reset` leaves them where they are. Non-fixed props keep
+  their pose across world edits; use `park_props` or `reset`.
+- **No cylinder obstacles yet.** Viam's geometry API has no cylinder ([viamrobotics/api#894](https://github.com/viamrobotics/api/pull/894)), so use a capsule or box for a round post. Cylinder props work and appear in the scene viewer as meshes.
 - **Arm self-collision is partial.** MuJoCo's convex hulls of the Lite6 links
   overlap at reachable wrist angles, so those wrist-link pairs are excluded.
   The gripper and links 3–6 still collide with the base and shoulder, which

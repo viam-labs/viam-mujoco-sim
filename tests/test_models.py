@@ -489,3 +489,37 @@ def test_rover_nav_example_validates():
     names = {c["name"] for c in example["components"]}
     slam = next(s for s in example["services"] if s["name"] == "slam")["attributes"]
     assert {slam["base"], slam["movement_sensor"], slam["lidar"]} <= names
+
+
+@pytest.mark.parametrize("example", ["rover-lidar.json", "rover-nav.json", "lite6-pick.json"])
+def test_example_obstacles_validate(example):
+    import json
+    import pathlib
+
+    from google.protobuf.json_format import ParseDict
+    from viam.proto.app.robot import Frame
+
+    from mujoco_module.models.obstacle import MujocoObstacle
+
+    cfg = json.loads((pathlib.Path(__file__).parent.parent / "examples" / example).read_text())
+    obstacles = [c for c in cfg["components"] if c["model"] == "viam-labs:mujoco-sim:obstacle"]
+    assert obstacles
+    world = next(c for c in cfg["components"] if c["model"] == "viam-labs:mujoco-sim:world")
+    for item in obstacles:
+        component = config(item["name"], item["attributes"])
+        frame = item["frame"]
+        g = frame["geometry"]
+        shapes = {
+            "box": {"box": {"dims_mm": {"x": g.get("x"), "y": g.get("y"), "z": g.get("z")}}},
+            "sphere": {"sphere": {"radius_mm": g.get("r")}},
+            "capsule": {"capsule": {"radius_mm": g.get("r"), "length_mm": g.get("l")}},
+        }
+        geometry = dict(shapes[g["type"]])
+        if "translation" in g:
+            geometry["center"] = {**g["translation"], "o_z": 1}
+        component.frame.CopyFrom(ParseDict({
+            "parent": frame["parent"],
+            "translation": frame["translation"],
+            "geometry": geometry,
+        }, Frame()))
+        assert MujocoObstacle.validate_config(component) == ([world["name"]], [])

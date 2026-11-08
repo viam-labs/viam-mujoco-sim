@@ -17,134 +17,167 @@
       "name": "sim-world",
       "api": "rdk:component:generic",
       "model": "viam-labs:mujoco-sim:world",
+      "attributes": {}
+    },
+    {
+      "name": "wall-n",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 1500.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 3000,
+          "y": 40.0,
+          "z": 400.0
+        }
+      },
       "attributes": {
-        "props": [
-          {
-            "name": "wall_n",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              3,
-              0.04,
-              0.4
-            ],
-            "position": [
-              0,
-              1.5,
-              0.2
-            ],
-            "color": [
-              0.8,
-              0.8,
-              0.8
-            ]
-          },
-          {
-            "name": "wall_s",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              3,
-              0.04,
-              0.4
-            ],
-            "position": [
-              0,
-              -1.5,
-              0.2
-            ],
-            "color": [
-              0.7,
-              0.7,
-              0.8
-            ]
-          },
-          {
-            "name": "wall_e",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              0.04,
-              3.04,
-              0.4
-            ],
-            "position": [
-              1.5,
-              0,
-              0.2
-            ],
-            "color": [
-              0.8,
-              0.7,
-              0.7
-            ]
-          },
-          {
-            "name": "wall_w",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              0.04,
-              3.04,
-              0.4
-            ],
-            "position": [
-              -1.5,
-              0,
-              0.2
-            ],
-            "color": [
-              0.7,
-              0.8,
-              0.7
-            ]
-          },
-          {
-            "name": "box_a",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              0.3,
-              0.3,
-              0.4
-            ],
-            "position": [
-              0.6,
-              0.7,
-              0.2
-            ],
-            "color": [
-              0.9,
-              0.3,
-              0.2
-            ]
-          },
-          {
-            "name": "box_b",
-            "type": "cube",
-            "fixed": true,
-            "size": 1,
-            "scale": [
-              0.2,
-              0.5,
-              0.4
-            ],
-            "position": [
-              -0.8,
-              -0.4,
-              0.2
-            ],
-            "color": [
-              0.2,
-              0.4,
-              0.9
-            ]
-          }
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.8,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-s",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": -1500.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 3000,
+          "y": 40.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.7,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-e",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1500.0,
+          "y": 0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40.0,
+          "y": 3040.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.7,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "wall-w",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1500.0,
+          "y": 0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40.0,
+          "y": 3040.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.8,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "box-a",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 600.0,
+          "y": 700.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 300.0,
+          "y": 300.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.9,
+          0.3,
+          0.2
+        ]
+      }
+    },
+    {
+      "name": "box-b",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -800.0,
+          "y": -400.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 200.0,
+          "y": 500.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.2,
+          0.4,
+          0.9
         ]
       }
     },

@@ -46,6 +46,18 @@
       "api": "rdk:component:movement_sensor",
       "short_description": "Wheel odometry for a mujoco-sim base, with optional drift",
       "markdown_link": "README.md#model-viam-labsmujoco-simmovement_sensor"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "api": "rdk:component:generic",
+      "short_description": "A fixed box, sphere or capsule the motion planner also sees",
+      "markdown_link": "README.md#model-viam-labsmujoco-simobstacle"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:world_state",
+      "api": "rdk:service:world_state_store",
+      "short_description": "Streams movable props to the 3D scene viewer",
+      "markdown_link": "README.md#model-viam-labsmujoco-simworld_state"
     }
   ],
   "entrypoint": "run.sh",
