@@ -1,11 +1,12 @@
 # viam-mujoco-sim
 
-A proof-of-concept [Viam](https://www.viam.com) module that simulates robots in
-[MuJoCo](https://mujoco.org). It is a drop-in sibling of
-[`viam-labs:isaac-sim`](https://github.com/viam-modules/viam-isaac-sim): the
-same core component attributes, the same world `DoCommand`s, and the standard
-Viam frame for placement, so a config moves between engines by changing the
-model triplet.
+A [Viam](https://www.viam.com) module that simulates robots in
+[MuJoCo](https://mujoco.org): arms and grippers (finger and suction), mobile
+bases, arms mounted on bases, RGB-D cameras, 2D LIDAR, odometry, obstacles,
+and a workcell kit (conveyors, parcel spawners, photo-eyes, scales). Bundled
+robots cover common hardware, and your own MJCF or URDF models load the same
+way. Viam's motion planner, 3D scene viewer and SDKs work with it, and
+components are placed with the standard Viam frame.
 
 Physics runs on the CPU and the module is a few tens of MB, so it runs on a Mac
 as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
@@ -47,9 +48,8 @@ Configure one world first, then the arm, gripper and cameras, each naming the
 world. [`examples/lite6-pick.json`](examples/lite6-pick.json) is a complete
 pick cell, and [`examples/ur5e-pick.json`](examples/ur5e-pick.json) is the same
 cell with a UR5e and a Robotiq 2F-85. Its `pick_block` starts parked out of reach at x = 2.5 m on purpose;
-`scripted_pick.py` from
-[viam-isaac-sim](https://github.com/viam-modules/viam-isaac-sim) places it with
-`set_prop_pose`. [`examples/rover-lidar.json`](examples/rover-lidar.json) is a
+move it into reach with the world's `set_prop_pose` DoCommand (see the example
+under the world model). [`examples/rover-lidar.json`](examples/rover-lidar.json) is a
 rover cell: a rover with a LIDAR inside a walled pen, and
 [`examples/rover-nav.json`](examples/rover-nav.json) adds odometry and
 nav-stack for SLAM and navigation in it (see
@@ -115,7 +115,7 @@ Each prop:
 | `color` | [r, g, b] | No | `[0.7, 0.7, 0.7]` | RGB, 0 to 1. |
 | `fixed` | bool | No | `false` | A fixed prop never moves. |
 | `static_friction` | float | No | `1.0` | Sliding friction, non-negative. |
-| `dynamic_friction` | float | No | | Accepted so isaac-sim configs carry over; MuJoCo has one sliding coefficient, so it is ignored. |
+| `dynamic_friction` | float | No | | Accepted for compatibility; MuJoCo has one sliding coefficient, so it is ignored. |
 
 Props are invisible to Viam's motion planner. For fixed scene geometry the planner should avoid, use [obstacles](#model-viam-labsmujoco-simobstacle).
 
@@ -403,8 +403,8 @@ millimetres into an obstacle; where it is fatter, the arm stops short. Set
 A gripper on a mujoco-sim arm, driven by one actuator: the arm MJCF's own
 (the Lite6's), a bundled gripper, or your own gripper MJCF, which is attached
 at the arm's `flange_site`. It is binary: `Grab` and `Open` latch the command
-and return before the jaws move, like the isaac-sim Lite6 gripper and the real
-one. A suction gripper (an `<adhesion>` actuator) has no jaws: `Grab` turns the
+and return before the jaws move, like the real
+Lite6 gripper. A suction gripper (an `<adhesion>` actuator) has no jaws: `Grab` turns the
 vacuum on and `Open` turns it off. Adhesion pulls only through the cup's
 contacts, so a violent move can tear the object off.
 
