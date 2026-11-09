@@ -51,7 +51,10 @@ Attributes:
                                      default: the file from its root to
                                      flange_link, served with its collision meshes
 
-Place it with the standard frame; frame.parent must be "world".
+Place it with the standard frame. frame.parent is "world" or another
+mujoco-sim component with a Viam frame, usually a base: the arm then rides
+it, mounted at the frame's offset from the base's frame, and is built after
+it (frame.parent is a dependency).
 """
 
 import asyncio
@@ -196,6 +199,13 @@ def _is_moving_velocity_threshold(
     return threshold
 
 
+def _frame_parent(config: ComponentConfig) -> str | None:
+    """The component the arm is framed on, None for the world."""
+    if config.HasField("frame") and config.frame.parent not in ("", "world"):
+        return config.frame.parent
+    return None
+
+
 class MujocoArm(Arm, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "arm")
 
@@ -221,7 +231,7 @@ class MujocoArm(Arm, EasyResource):
     def validate_config(
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        result = validate_sim_component(config)
+        deps, _ = validate_sim_component(config, world_frame_only=False)
         attrs = get_attrs(config)
         url = attrs.get("kinematics_url")
         if url is not None:
@@ -259,13 +269,16 @@ class MujocoArm(Arm, EasyResource):
         _number(attrs, "path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG, config.name, 0.0)
         _number(attrs, "robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ, config.name, 0.0, _MAX_CONTROL_FREQ_HZ)
         _number(attrs, "path_max_step_deg", _DEFAULT_MAX_STEP_DEG, config.name, 0.0, _MAX_MAX_STEP_DEG)
-        return result
+        parent = _frame_parent(config)
+        return ([*deps, parent] if parent else deps), []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs = apply_frame_to_attrs(config, get_attrs(config))
+        if parent := _frame_parent(config):
+            attrs["parent"] = parent
         self._move_timeout = float(attrs.get("move_timeout_sec", 30.0))
         self._tolerance_rad = math.radians(
             float(attrs.get("path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG))

@@ -226,15 +226,16 @@ class StaticShape:
 @dataclass
 class Contribution:
     """What one component adds to the scene. build edits a fresh spec on every
-    rebuild; init runs on the first model that contains the contribution, and
-    again on reset(). late contributions build after the rest, so they can
-    attach to bodies another contribution added (a wrist camera on its arm).
-    render_sizes are (width, height) renderers built and warmed with each
-    model, so a camera's first frame doesn't stall the step loop."""
+    rebuild and returns False, before changing the spec, when what it attaches
+    to isn't in the spec yet (a wrist camera's arm): False waits for its
+    parent, None or True means it built. A waiting build is tried again after
+    the others, and left out if that never appears. init runs on the first
+    model the contribution is built into (again after it was left out), and
+    on reset(). render_sizes are (width, height) renderers built and warmed
+    with each model, so a camera's first frame doesn't stall the step loop."""
 
-    build: Callable[[mujoco.MjSpec], None]
+    build: Callable[[mujoco.MjSpec], bool | None]
     init: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None
-    late: bool = False
     render_sizes: tuple[tuple[int, int], ...] = ()
 
 
@@ -289,6 +290,7 @@ class SimManager:
         self.data: mujoco.MjData | None = None
         self.generation = 0
         self._contributions: dict[str, Contribution] = {}
+        self._built: set[str] = set()  # the contributions in the current model
         self.step_callbacks: dict[str, Callable[[float], None]] = {}
         self.arms: dict[str, Any] = {}  # ArmHandle by component name, for its gripper
         self.conveyors: dict[str, Any] = {}  # ConveyorHandle by component name, for its spawner
@@ -385,7 +387,7 @@ class SimManager:
             old, old_pieces = self.cfg, self.prop_pieces
             self.cfg, self.prop_pieces = cfg, pieces
             try:
-                self._rebuild(fresh=set())
+                self._rebuild()
             except BaseException:
                 self.cfg, self.prop_pieces = old, old_pieces
                 raise
@@ -398,8 +400,7 @@ class SimManager:
             old = self._contributions.get(name)
             self._contributions[name] = contribution
             try:
-                # a replaced contribution keeps its state; only new ones init
-                self._rebuild(fresh={name} if old is None else set())
+                self._rebuild()
             except BaseException:
                 if old is None:
                     del self._contributions[name]
@@ -410,7 +411,7 @@ class SimManager:
         self.run(apply)
 
     def contributes(self, name: str) -> bool:
-        """Whether a component of this module named `name` is in the scene."""
+        """Whether `name` is a component of this module (built, or waiting for its parent)."""
         return name in self._contributions
 
     def remove_contribution(self, name: str) -> None:
@@ -418,14 +419,15 @@ class SimManager:
             old = self._contributions.pop(name, None)
             if old is not None and self.cfg is not None:
                 try:
-                    self._rebuild(fresh=set())
+                    self._rebuild()
                 except BaseException:
                     self._contributions[name] = old
                     raise
 
         self.run(remove)
 
-    def _build_spec(self) -> mujoco.MjSpec:
+    def _build_spec(self) -> tuple[mujoco.MjSpec, set[str]]:
+        """The scene's spec and the contributions built into it."""
         assert self.cfg is not None
         spec = mujoco.MjSpec()
         spec.option.timestep = self.cfg.physics_dt
@@ -468,23 +470,34 @@ class SimManager:
                 mass=prop.mass,
                 **contact,
             )
-        for contribution in sorted(self._contributions.values(), key=lambda c: c.late):
-            contribution.build(spec)
-        return spec
+        # passes until one builds nothing new: a chain (base, arm, gripper,
+        # wrist camera) builds in any insertion order
+        built: set[str] = set()
+        waiting = dict(self._contributions)
+        while waiting:
+            done = {name for name, c in waiting.items() if c.build(spec) is not False}
+            if not done:
+                break  # what's left waits for a parent that isn't configured
+            built |= done
+            waiting = {name: c for name, c in waiting.items() if name not in done}
+        return spec, built
 
-    def _rebuild(self, fresh: set[str]) -> None:
-        """Compile a new model; swap it in only if compilation succeeds."""
-        model = self._build_spec().compile()
+    def _rebuild(self) -> None:
+        """Compile a new model; swap it in only if compilation succeeds.
+        Contributions built now but not into the old model (new ones, and
+        ones whose parent came back) init; the rest keep their state."""
+        spec, built = self._build_spec()
+        model = spec.compile()
         data = mujoco.MjData(model)
         if self.model is not None and self.data is not None:
             _copy_state(self.model, self.data, model, data)
-        for name in fresh:
+        for name in built - self._built:
             init = self._contributions[name].init
             if init is not None:
                 init(model, data)
         mujoco.mj_forward(model, data)
         self._close_renderers()
-        self.model, self.data = model, data
+        self.model, self.data, self._built = model, data, built
         self.generation += 1
         for size in {size for c in self._contributions.values() for size in c.render_sizes}:
             self._renderer(*size).render()  # the first draw uploads the scene to the GPU
@@ -601,9 +614,10 @@ class SimManager:
             self.require_world()
             assert self.model is not None and self.data is not None
             mujoco.mj_resetData(self.model, self.data)
-            for contribution in self._contributions.values():
-                if contribution.init is not None:
-                    contribution.init(self.model, self.data)
+            for name in self._built:
+                init = self._contributions[name].init
+                if init is not None:
+                    init(self.model, self.data)
             mujoco.mj_forward(self.model, self.data)
             self.slips = 0
             self._rtf_samples.clear()

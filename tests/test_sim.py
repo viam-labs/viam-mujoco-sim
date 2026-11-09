@@ -227,3 +227,46 @@ def test_mesh_prop_validation(sim):
     cfg = WorldConfig.from_attrs({"props": [{"name": "w", "type": "mesh", "mesh": "/a.stl"}]})
     with pytest.raises(ValueError, match="pieces not loaded"):
         sim.configure_world(cfg)
+
+
+def _link(name, parent, inits):
+    """A contribution adding body `name` on body `parent` (None: the world),
+    waiting while the parent isn't in the spec."""
+    from mujoco_module.sim import Contribution
+
+    def build(spec):
+        body = spec.worldbody if parent is None else spec.body(parent)
+        if body is None:
+            return False
+        body.add_body(name=name, pos=[0, 0, 0.1]).add_geom(size=[0.01], mass=0.1)
+
+    return Contribution(build=build, init=lambda _m, _d: inits.append(name))
+
+
+def test_a_chain_builds_in_any_insertion_order(sim):
+    inits = []
+    for name, parent in (("camera", "gripper"), ("gripper", "arm"), ("arm", "base"), ("base", None)):
+        sim.set_contribution(name, _link(name, parent, inits))
+    assert sim.model.body("camera").parentid == sim.model.body("gripper").id
+    assert sim._built == {"base", "arm", "gripper", "camera"}
+    # each init ran once, on the model it first appeared in: the base's
+    assert sorted(inits) == ["arm", "base", "camera", "gripper"]
+    # an unrelated contribution doesn't re-init the chain
+    sim.set_contribution("other", _link("other", None, inits))
+    assert sorted(inits) == ["arm", "base", "camera", "gripper", "other"]
+
+
+def test_a_missing_parent_leaves_its_dependants_out_until_it_returns(sim):
+    inits = []
+    sim.set_contribution("arm", _link("arm", "base", inits))
+    sim.set_contribution("gripper", _link("gripper", "arm", inits))
+    assert sim._built == set() and inits == []  # waiting, without an error
+    assert mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_BODY, "arm") < 0
+    sim.set_contribution("base", _link("base", None, inits))
+    assert sorted(inits) == ["arm", "base", "gripper"]
+    sim.remove_contribution("base")
+    assert sim._built == set()
+    sim.reset()
+    assert len(inits) == 3  # reset inits only what is built
+    sim.set_contribution("base", _link("base", None, inits))
+    assert sorted(inits[3:]) == ["arm", "base", "gripper"]  # back: init again

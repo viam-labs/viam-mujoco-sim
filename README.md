@@ -16,7 +16,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | Model | API | What it does |
 |---|---|---|
 | [`viam-labs:mujoco-sim:world`](#model-viam-labsmujoco-simworld) | `generic` | Owns the scene, props and step loop. Configure exactly one. |
-| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame, with joint control. |
+| [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame on the world or a base, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF or URDF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
@@ -57,7 +57,9 @@ nav-stack for SLAM and navigation in it (see
 [`examples/depalletize.json`](examples/depalletize.json) is a suction
 de-palletizing cell (see [De-palletizing](#de-palletizing)), and
 [`examples/parcel-sort.json`](examples/parcel-sort.json) a parcel-sorting cell
-with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)). With an
+with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), and
+[`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
+between two tables (see [Mobile manipulation](#mobile-manipulation)). With an
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
@@ -268,7 +270,34 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `depth_width` | int | No | half of `width` | Depth image and point cloud width in pixels. |
 | `depth_height` | int | No | half of `height` | Depth image and point cloud height in pixels. |
 
-The frame's `parent` must be `world`.
+The frame's `parent` is `world` or a base; see [Mounting on a base](#mounting-on-a-base).
+
+### Mounting on a base
+
+Frame the arm on a `viam-labs:mujoco-sim:base` to make a mobile manipulator.
+The arm rides the base, and the frame's translation and orientation are its
+offset from the base's frame (on the floor under the chassis, +Y forward).
+The Husky's top plate is 383 mm up, so this puts a UR5e on it, 250 mm ahead
+of the centre:
+
+```json
+{
+  "name": "arm",
+  "api": "rdk:component:arm",
+  "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "husky", "translation": { "x": 0, "y": 250, "z": 385 } },
+  "attributes": { "world": "sim-world", "asset": "ur5e" }
+}
+```
+
+The base is a dependency of the arm: viam-server builds it first, and
+rebuilds the arm (back at home) when the base is reconfigured.
+`GetEndPosition` and `GetKinematics` stay in the arm's own frame wherever the
+base drives. Use `drive: ideal` for a base that carries an arm: an arm move
+leaves it within a millimetre of where it was. RDK doesn't follow the base
+as it drives, so plan arm moves in the base's frame; see
+[Mobile manipulation](#mobile-manipulation) and
+[Things to know](#things-to-know).
 
 ### Supported API
 
@@ -1510,6 +1539,37 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
   0.5 °/s smears the walls into rotated copies. See nav-stack's README for
   tuning.
 
+## Mobile manipulation
+
+[`examples/husky-ur5e.json`](examples/husky-ur5e.json) is a Clearpath Husky
+(`drive: ideal`) carrying a UR5e with a Robotiq 2F-85 on its top plate, with
+odometry, a block on table A 2.8 m ahead, and table B 2.8 m to the left.
+[`examples/mobile_pick.py`](examples/mobile_pick.py) moves the block over one
+client session:
+
+```sh
+uv run python examples/mobile_pick.py <machine address> <api key id> <api key>
+```
+
+It resets the world, drives 2 m to table A, picks up the block, backs up,
+turns left, drives 2 m to table B, puts the block down and reports where it
+landed. Before each drive it moves the arm to a carry pose close over the
+Husky, so the gripper and block stay clear of the tables. It checks every
+`motion.move` result and stops with an error if a plan fails. Run it again to
+start over.
+
+RDK doesn't know the sim base has moved (see [Things to know](#things-to-know)),
+so the script plans every move in the `husky` frame. At each table it reads
+the Husky's pose from odometry (`get_position` with
+`extra={"return_relative_pos_m": true}`, and `get_orientation`), moves the
+block's pose from `get_prop_pose` and the tables' boxes into the `husky`
+frame, and passes the destination and the `WorldState` in that frame. It
+doesn't transform the held block: it sits inside the gripper's planner box,
+so the planner already treats it as part of the gripper. The tables'
+obstacle components are in the frame system too, but placed relative to where
+RDK keeps the Husky: more than 2 m away, out of the arm's reach. Watch it
+with `scene-cam`, not the 3D scene view.
+
 ## Things to know
 
 - **Config edits reset the cell.** viam-server rebuilds a module resource on any
@@ -1533,9 +1593,21 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
   and the bundled Lite6 also excludes its wrist-link pairs, whose convex hulls
   overlap at reachable wrist angles. The gripper and links 3–6 still collide
   with the base and shoulder, which Viam's planner can't see.
-- **Place components relative to `world`.** Arm and base frames must have
-  parent `world`; the gripper's frame parent is its arm, and a camera's or
-  LIDAR's is `world` or another mujoco-sim component.
+- **Place components relative to `world`, or ride a base.** A base's frame
+  must have parent `world`; an arm's is `world` or a base; the gripper's is
+  its arm; a camera's or LIDAR's is `world` or another mujoco-sim component.
+- **The frame system doesn't follow a base.** RDK keeps a base at its
+  configured pose; it doesn't know the sim base has driven. Planning in the
+  base's (or a carried arm's) frame stays right, but world-frame geometry
+  (obstacles framed on `world`, world state store entries, imported
+  geometry) is placed relative to the base's configured pose, so after a
+  drive the planner sees it in the wrong place relative to the arm. The 3D
+  scene view uses the same frame system: it draws the base and arm at their
+  configured pose and props where they really are, so a held block appears a
+  drive's length from the gripper. Keep world obstacles out of the arm's
+  reach from the base's configured pose, and give the planner the real ones
+  in the base's frame, as [`examples/mobile_pick.py`](examples/mobile_pick.py)
+  does.
 - **Base motion is ideal unless you ask for wheels.** With the default
   `drive: ideal` a base drives exactly as commanded, can't tip over, and
   contacts stop it. With `drive: wheels` it slips and skids like the real

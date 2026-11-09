@@ -81,8 +81,9 @@ def validate_sim_component(
 ) -> Tuple[Sequence[str], Sequence[str]]:
     """Every component names its world (so viam-server starts it first) and,
     when it spawns an arm, a known asset or its own mjcf and kinematics_url. Components placed by
-    their frame must be framed on the world (frame_pose ignores the parent);
-    the gripper opts out because its frame parent is its arm."""
+    their frame must be framed on the world (frame_pose ignores the parent)
+    unless they pass world_frame_only=False and mount on the parent's
+    viam_frame themselves (a base is the one that doesn't)."""
     attrs = struct_to_dict(config.attributes)
     world = attrs.get("world")
     if not world or not isinstance(world, str):

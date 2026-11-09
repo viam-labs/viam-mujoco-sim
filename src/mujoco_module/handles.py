@@ -42,6 +42,9 @@ DEFAULT_MAX_JOINT_DEG_S = 180.0
 # Each component that others can be framed on adds "{name}/viam_frame": its
 # frame in Viam's frame system (an arm's end effector, a base's origin).
 VIAM_FRAME_SITE = "viam_frame"
+# "{arm}/arm_frame": the arm's own Viam frame, where its kinematic base sits
+# (base_offset is measured from it).
+ARM_FRAME_SITE = "arm_frame"
 DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S = 0.01
 DEFAULT_GRIP_FORCE_N = 5.0
 
@@ -120,6 +123,7 @@ class _ArmIds:
     dof: np.ndarray
     ctrl: np.ndarray
     end_site: int  # the arm's viam_frame site
+    arm_frame: int  # the arm's arm_frame site
 
 
 def _interpolate(points: Sequence[JointTrajectoryPoint], t: float) -> np.ndarray:
@@ -135,7 +139,9 @@ def _interpolate(points: Sequence[JointTrajectoryPoint], t: float) -> np.ndarray
 class ArmHandle:
     """An arm from an MJCF file and a Viam kinematics file. Its joints,
     actuators and home are inferred from the MJCF (robots.py); `attrs` are
-    the arm's attributes, over KNOWN_ASSETS[asset] when asset is set."""
+    the arm's attributes, over KNOWN_ASSETS[asset] when asset is set. With
+    attrs["parent"] (a base) the arm rides that component's viam_frame, and
+    position/orientation_wxyz are relative to it."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         attrs = {**KNOWN_ASSETS.get(str(attrs.get("asset")), {}), **attrs}
@@ -228,13 +234,14 @@ class ArmHandle:
         self._ids: _ArmIds | None = None
         self._ids_generation = -1
         self._callback_key = f"arm:{name}"
-        # The arm's Viam frame (its configured pose) and, base_offset on from
-        # it, where the MJCF's world goes.
+        self._parent: str | None = attrs.get("parent")
+        # The arm's Viam frame (its configured pose, relative to the parent's
+        # viam_frame or the world) and, base_offset on from it, where the
+        # MJCF's world goes.
         self._frame = robots.transform(
             [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))],
             [float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
         )
-        mount = self._frame @ base_offset
         excluded: list[tuple[str, str]] = []
         has_shapes = any(frame.geometry for frame in self.kinematics.frames.values())
         collision = attrs.get("collision") or ("kinematics" if has_shapes else "mesh")
@@ -255,11 +262,19 @@ class ArmHandle:
 
         arm_spec = spec
 
-        def build(spec: mujoco.MjSpec) -> None:
+        def build(spec: mujoco.MjSpec) -> bool | None:
+            placed = _mount(spec, self._parent, self._frame[:3, 3], robots.quat(self._frame))
+            if placed is None:
+                return False  # parent not configured (yet); calls say so
+            body, pos, quat = placed
+            at_frame = robots.transform(pos, quat)  # the arm's Viam frame, in the parent's body
+            at_mount = at_frame @ base_offset
             child = arm_spec.copy()  # the file isn't read again
             robots.apply_shapes(child, shapes, label)
-            frame = spec.worldbody.add_frame(pos=list(mount[:3, 3]), quat=list(robots.quat(mount)))
+            frame = body.add_frame(pos=list(at_mount[:3, 3]), quat=list(robots.quat(at_mount)))
             spec.attach(child, prefix=self._prefix, frame=frame)
+            # the arm's Viam frame, which end_pose is measured from
+            body.add_site(name=self._prefix + ARM_FRAME_SITE, pos=list(pos), quat=list(quat))
             # Viam's end-effector frame, which children of the arm's frame
             # (a wrist camera) are placed relative to.
             flange = spec.site(self._prefix + self.flange_site)
@@ -317,12 +332,22 @@ class ArmHandle:
             dof=np.array([joint.dofadr[0] for joint in joints]),
             ctrl=np.array([model.actuator(name).id for name in self._actuator_names]),
             end_site=model.site(self._prefix + VIAM_FRAME_SITE).id,
+            arm_frame=model.site(self._prefix + ARM_FRAME_SITE).id,
         )
+
+    def _in_scene(self) -> bool:
+        assert self._sim.model is not None
+        return mujoco.mj_name2id(self._sim.model, mujoco.mjtObj.mjOBJ_JOINT, self._joint_names[0]) >= 0
+
+    def _absent(self) -> RuntimeError:
+        return RuntimeError(f"arm {self.name!r}: parent {self._parent!r} has no viam_frame in the scene")
 
     def _now(self) -> tuple[mujoco.MjData, _ArmIds]:
         sim = self._sim
         assert sim.model is not None and sim.data is not None
         if self._ids is None or self._ids_generation != sim.generation:
+            if not self._in_scene():
+                raise self._absent()
             self._ids = self._resolve(sim.model)
             self._ids_generation = sim.generation
         return sim.data, self._ids
@@ -330,6 +355,14 @@ class ArmHandle:
     # -- control (sim thread) ---------------------------------------------
 
     def _on_step(self, dt: float) -> None:
+        # ids are stale from the moment the model changes, so the name lookup
+        # only runs after a rebuild (and every step while the arm is absent)
+        if self._ids_generation != self._sim.generation and not self._in_scene():
+            # parent not in the scene; init re-homes the arm when it's back
+            trajectory, self._trajectory = self._trajectory, None
+            if trajectory is not None:
+                _fail(trajectory.future, self._absent())
+            return
         data, ids = self._now()
         trajectory = self._trajectory
         try:
@@ -406,6 +439,7 @@ class ArmHandle:
             raise ValueError(f"expected {len(self._joint_names)} joint targets")
 
         def apply() -> None:
+            self._now()  # raises when the arm isn't in the scene
             if self._drop_trajectory() is not None:
                 self._hold_measured()
             self._target = targets
@@ -485,6 +519,8 @@ class ArmHandle:
 
     def stop(self) -> None:
         def stop() -> None:
+            if not self._in_scene():
+                return  # nothing to hold; Stop (session end, e-stop) must not fail
             if self._drop_trajectory() is not None:
                 self._hold_measured()
             else:  # measured qpos includes gravity sag; holding it would ratchet down
@@ -506,12 +542,13 @@ class ArmHandle:
 
     def get_end_pose(self) -> tuple[Vec3, Quat]:
         """Viam's end-effector frame (the flange with flange_offset) in the
-        arm's frame (metres, w-first quaternion)."""
+        arm's frame (metres, w-first quaternion), from the live arm_frame
+        site, so it holds while a base carries the arm."""
 
         def read() -> tuple[Vec3, Quat]:
             data, ids = self._now()
-            rotation = self._frame[:3, :3]
-            position = rotation.T @ (data.site_xpos[ids.end_site] - self._frame[:3, 3])
+            rotation = data.site_xmat[ids.arm_frame].reshape(3, 3)
+            position = rotation.T @ (data.site_xpos[ids.end_site] - data.site_xpos[ids.arm_frame])
             quat = np.zeros(4)
             mujoco.mju_mat2Quat(quat, (rotation.T @ data.site_xmat[ids.end_site].reshape(3, 3)).ravel())
             return (
@@ -1012,10 +1049,10 @@ class GripperHandle:
         if self._attached:
             flange = f"{arm}/{handle.flange_site}"
 
-            def build(spec: mujoco.MjSpec) -> None:
+            def build(spec: mujoco.MjSpec) -> bool | None:
                 site = spec.site(flange)
                 if site is None:
-                    return  # arm removed; the gripper comes back with it
+                    return False  # arm not in the scene; the gripper comes back with it
                 child = gripper_spec.copy()  # the file isn't read again
                 # attach keeps the scene's options; take the gripper's contact
                 # settings (the 2F-85's elliptic cones) where it sets them
@@ -1025,7 +1062,7 @@ class GripperHandle:
                         setattr(spec.option, key, getattr(child.option, key))
                 spec.attach(child, prefix=prefix, site=site)
 
-            sim.set_contribution(name, Contribution(build=build, late=True))
+            sim.set_contribution(name, Contribution(build=build))
         sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
 
     def close(self) -> None:
@@ -1227,10 +1264,10 @@ class CameraHandle:
         else:
             quat = _look_at(position, (0.0, 0.0, 0.0))
 
-        def build(spec: mujoco.MjSpec) -> None:
+        def build(spec: mujoco.MjSpec) -> bool | None:
             mount = _mount(spec, self.parent, position, quat)
             if mount is None:
-                return  # parent not configured (yet); render() says so
+                return False  # parent not configured (yet); render() says so
             body, pos, rot = mount
             body.add_camera(name=name, pos=list(pos), quat=list(rot), fovy=self.fov_deg)
             spec.visual.global_.offwidth = max(
@@ -1241,9 +1278,7 @@ class CameraHandle:
             )
 
         sizes = ((self.width, self.height), (self.depth_width, self.depth_height))
-        sim.set_contribution(
-            name, Contribution(build=build, late=bool(self.parent), render_sizes=sizes)
-        )
+        sim.set_contribution(name, Contribution(build=build, render_sizes=sizes))
 
     def close(self) -> None:
         self._sim.remove_contribution(self.name)
@@ -1339,14 +1374,14 @@ class LidarHandle:
         position = [float(v) for v in attrs.get("position", default_position)]
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
 
-        def build(spec: mujoco.MjSpec) -> None:
+        def build(spec: mujoco.MjSpec) -> bool | None:
             mount = _mount(spec, self.parent, position, quat)
             if mount is None:
-                return  # parent not configured (yet); scan() says so
+                return False  # parent not configured (yet); scan() says so
             body, pos, rot = mount
             body.add_site(name=name, pos=list(pos), quat=list(rot))
 
-        sim.set_contribution(name, Contribution(build=build, late=bool(self.parent)))
+        sim.set_contribution(name, Contribution(build=build))
 
     def close(self) -> None:
         self._sim.remove_contribution(self.name)
@@ -1672,17 +1707,17 @@ class PhotoEyeHandle:
         position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
 
-        def build(spec: mujoco.MjSpec) -> None:
+        def build(spec: mujoco.MjSpec) -> bool | None:
             mount = _mount(spec, self.parent, position, quat)
             if mount is None:
-                return  # parent not configured (yet); readings() says so
+                return False  # parent not configured (yet); readings() says so
             body, pos, rot = mount
             body.add_site(name=name, pos=list(pos), quat=list(rot))
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             self.blocked, self.distance_m, self.count = False, self.range_m, 0
 
-        sim.set_contribution(name, Contribution(build=build, init=init, late=bool(self.parent)))
+        sim.set_contribution(name, Contribution(build=build, init=init))
         sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
 
     def close(self) -> None:

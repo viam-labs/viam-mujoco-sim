@@ -233,13 +233,33 @@ def test_kinematics_is_vendored(cell):
     assert json.loads(data)["name"] == "lite6"
 
 
-def test_arm_frame_parent_must_be_world():
-    cfg = config("x", {"world": "sim-world", "asset": "lite6"})
+def test_arm_frame_parent_is_a_dependency():
+    cfg = config("x", {"world": "sim-world", "asset": "ur5e"})
     cfg.frame.parent = "world"
-    MujocoArm.validate_config(cfg)
-    cfg.frame.parent = "pick-arm"
-    with pytest.raises(ValueError, match="frame.parent must be"):
-        MujocoArm.validate_config(cfg)
+    assert MujocoArm.validate_config(cfg) == (["sim-world"], [])
+    cfg.frame.parent = "husky"
+    assert MujocoArm.validate_config(cfg) == (["sim-world", "husky"], [])
+
+
+def test_an_arm_framed_on_a_base_rides_it(running_sim):
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    husky = config("husky", {"world": "sim-world", "asset": "clearpath_husky"})
+    husky.frame.parent = "world"
+    husky.frame.translation.x = 1000  # off the origin, so a world-mounted arm can't pass
+    base = MujocoBase.new(husky, {})
+    cfg = config("arm", {"world": "sim-world", "asset": "ur5e"})
+    cfg.frame.parent = "husky"
+    cfg.frame.translation.y, cfg.frame.translation.z = 250, 385
+    arm = MujocoArm.new(cfg, {})
+    try:
+        frame = running_sim.run(lambda: running_sim.data.site("arm/arm_frame").xpos.copy())
+        assert frame == pytest.approx([1.0, 0.25, 0.385], abs=1e-6)
+        pose = run(arm.get_end_position())
+        # the UR5e's home end pose in its own frame, not the world's (+385 mm up)
+        assert (pose.x, pose.y, pose.z) == pytest.approx((-134, 492, 488), abs=5)
+    finally:
+        run(arm.close())
+        run(base.close())
 
 
 def test_camera_frame_parent_may_be_an_arm_but_not_aimed():
@@ -593,7 +613,10 @@ def test_rover_nav_example_validates():
 
 @pytest.mark.parametrize(
     "example",
-    ["rover-lidar.json", "rover-nav.json", "husky-lidar.json", "lite6-pick.json", "ur5e-pick.json", "depalletize.json"],
+    [
+        "rover-lidar.json", "rover-nav.json", "husky-lidar.json", "lite6-pick.json", "ur5e-pick.json",
+        "depalletize.json", "husky-ur5e.json",
+    ],
 )
 def test_example_obstacles_validate(example):
     import json
@@ -758,3 +781,65 @@ def test_depalletize_script_imports_and_builds_its_world_state():
     assert held.physical_object.HasField("center")  # RDK rejects a geometry without one
     # clear of the gripper's planner box, which ends at the tool point
     assert held.pose_in_observer_frame.pose.z - held.physical_object.box.dims_mm.z / 2 > 0
+
+def test_husky_ur5e_example_validates_and_matches_its_script():
+    import importlib.util
+    import json
+    import pathlib
+
+    examples = pathlib.Path(__file__).parent.parent / "examples"
+    cfg = json.loads((examples / "husky-ur5e.json").read_text())
+    components = {c["name"]: c for c in cfg["components"]}
+    models = {
+        "viam-labs:mujoco-sim:base": MujocoBase,
+        "viam-labs:mujoco-sim:arm": MujocoArm,
+        "viam-labs:mujoco-sim:gripper": MujocoGripper,
+        "viam-labs:mujoco-sim:movement_sensor": MujocoMovementSensor,
+    }
+    deps = {}
+    for item in cfg["components"]:
+        if item["model"] in models:
+            component = config(item["name"], item["attributes"])
+            if "frame" in item:
+                component.frame.parent = item["frame"]["parent"]
+            deps[item["name"]] = models[item["model"]].validate_config(component)[0]
+    assert deps == {
+        "husky": ["sim-world"],
+        "arm": ["sim-world", "husky"],  # built after the base it rides
+        "gripper": ["sim-world", "arm"],
+        "odometry": ["sim-world", "husky"],
+    }
+    assert components["arm"]["frame"]["translation"] == {"x": 0, "y": 250, "z": 385}  # on the top plate
+
+    spec = importlib.util.spec_from_file_location("mobile_pick", examples / "mobile_pick.py")
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+    for name, (center, size) in script.TABLES.items():
+        frame = components[name]["frame"]
+        t, g = frame["translation"], frame["geometry"]
+        assert ((t["x"], t["y"], t["z"]), (g["x"], g["y"], g["z"])) == (center, size)
+        assert center[2] * 2 == size[2] == script.TABLE_TOP_MM  # standing on the floor
+        # more than 2 m from the Husky's start, where RDK keeps it: out of the arm's reach there
+        nearest = [max(abs(c) - s / 2, 0) for c, s in zip(center[:2], size[:2])]
+        assert math.hypot(*nearest) > 2000
+    (block,) = components["sim-world"]["attributes"]["props"]
+    assert block["name"] == script.BLOCK and block["size"] * 1000 == pytest.approx(script.BLOCK_MM)
+    bx, by, bz = (v * 1000 for v in block["position"])
+    (ax, ay, _), (_, a_depth, _) = script.TABLES["table-a"]
+    a_edge = ay - a_depth / 2
+    assert (bx, by - a_edge) == (ax, 250)  # 250 mm in from the near edge
+    assert bz == pytest.approx(script.TABLE_TOP_MM + script.BLOCK_MM / 2, abs=0.5)
+    # the drives stop the bumper a few cm short of each table
+    assert 0 < a_edge - (script.TO_TABLE_A_MM + script.CHASSIS_FRONT_MM) < 60
+    stop_b = (-script.TO_TABLE_B_MM, script.TO_TABLE_A_MM - script.BACK_UP_MM, math.pi / 2)
+    (b_x, b_y, _), (b_depth, _, _) = script.TABLES["table-b"]
+    b_edge = b_x + b_depth / 2
+    assert 0 < (stop_b[0] - script.CHASSIS_FRONT_MM) - b_edge < 60
+    assert (b_y, script.PLACE_MM) == (stop_b[1], (b_edge - 250, b_y))
+    # seen from the Husky there, the place point is straight ahead, 530 mm past the arm's base
+    assert script.to_husky(*script.PLACE_MM, stop_b) == pytest.approx((0, 780))
+    table = script.box("table-b", *script.TABLES["table-b"], stop_b)
+    assert (table.center.x, table.center.y, table.center.theta) == pytest.approx((0, 780, -90))
+    assert table.label == "table-b-near"  # not the obstacle component's own geometry name
+    assert script.on_table_b(*script.PLACE_MM, script.TABLE_TOP_MM + script.BLOCK_MM / 2)
+    assert not script.on_table_b(bx, by, bz)
