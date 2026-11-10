@@ -128,6 +128,17 @@
       }
     },
     {
+      "name": "wrist-ft",
+      "api": "rdk:component:sensor",
+      "model": "viam-labs:mujoco-sim:force_torque",
+      "frame": {
+        "parent": "pick-arm"
+      },
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
       "name": "scene-cam",
       "api": "rdk:component:camera",
       "model": "viam-labs:mujoco-sim:camera",

@@ -8,6 +8,7 @@ generation changes (every rebuild); the gripper looks names up on each step.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import math
 import random
@@ -1327,38 +1328,43 @@ class CameraHandle:
 DEFAULT_LIDAR_RANGE_MIN_M = 0.15
 DEFAULT_LIDAR_RANGE_MAX_M = 12.0
 DEFAULT_LIDAR_RESOLUTION_DEG = 1.0
-MAX_LIDAR_RAYS = 3600
-LIDAR_RECAST_STEP_M = 1e-4  # a re-cast starts this far past the hit it skips
+MAX_LIDAR_RAYS = 3600  # per channel
+MAX_LIDAR_CHANNELS = 128
+MAX_LIDAR_TOTAL_RAYS = 65536  # channels x rays per channel; ~3.4 ms per 65,000-ray scan on a rover
 # Geom group 5 holds what no sensor should see (parked parcels); renderers
 # hide groups 3 to 5 by default, and rays get this mask.
 HIDDEN_GROUP = 5
 RAY_GROUPS = np.array([1, 1, 1, 1, 1, 0], np.uint8)
 
 
-def _cast_past(
-    model: mujoco.MjModel, data: mujoco.MjData, origin: np.ndarray, direction: np.ndarray,
-    own: set[int], geom: int, total: float, limit: float,
-) -> float:
-    """A ray that hit `geom` at `total` m, continued past every hit on the
-    `own` bodies: the first other hit's distance, or -1."""
-    found = np.zeros(1, np.int32)
-    while geom >= 0 and model.geom_bodyid[geom] in own and total <= limit:
-        total += LIDAR_RECAST_STEP_M
-        step = mujoco.mj_ray(
-            model, data, origin + total * direction, direction,
-            RAY_GROUPS, 1, int(model.geom_bodyid[geom]), found,
-        )
-        geom = int(found[0])
-        total = total + step if geom >= 0 else -1.0
-    return total
+def subtree_geoms(model: mujoco.MjModel, root: int) -> np.ndarray:
+    """The geoms on `root`'s body and every body below it."""
+    bodies = robots.subtree(model, root)
+    return np.flatnonzero(np.isin(model.geom_bodyid, bodies))
+
+
+@contextlib.contextmanager
+def hidden_geoms(model: mujoco.MjModel, geoms: np.ndarray):
+    """Rays skip `geoms` inside the block: they move to HIDDEN_GROUP, which
+    RAY_GROUPS leaves out, and get their groups back afterwards. A mounted
+    sensor never sees its own parent this way, in one ray call. Only for the
+    sim thread, which owns the model (and renders on the same thread)."""
+    saved = model.geom_group[geoms].copy()
+    model.geom_group[geoms] = HIDDEN_GROUP
+    try:
+        yield
+    finally:
+        model.geom_group[geoms] = saved
 
 
 class LidarHandle:
-    """A 2D scanning LIDAR: one ring of rays in the sensor frame's XY plane,
-    ray 0 along +X, counterclockwise about +Z. A scan samples one sim
-    instant. Mounted on the world or on a parent's viam_frame, like a camera;
-    a mounted lidar never sees its parent's body or the bodies below it (a
-    base's wheels and casters)."""
+    """A scanning LIDAR: `channels` rings of rays, ring elevations spread
+    evenly over vertical_fov_deg (one ring: their midpoint; the default is a
+    2D scan in the sensor frame's XY plane), ray 0 of each ring along +X,
+    counterclockwise about +Z. A scan samples one sim instant. Mounted on the
+    world or on a parent's viam_frame, like a camera; a mounted lidar never
+    sees its parent's body or the bodies below it (a base's wheels and
+    casters)."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         self._sim = sim
@@ -1369,7 +1375,13 @@ class LidarHandle:
         resolution = float(attrs.get("angular_resolution_deg", DEFAULT_LIDAR_RESOLUTION_DEG))
         count = max(1, round(360.0 / resolution))  # evenly spaced around the full circle
         theta = 2.0 * math.pi * np.arange(count) / count
-        self._rays = np.column_stack([np.cos(theta), np.sin(theta), np.zeros(count)])
+        channels = int(attrs.get("channels", 1))
+        low, high = (float(v) for v in attrs.get("vertical_fov_deg", (0.0, 0.0)))
+        elevations = np.radians(np.linspace(low, high, channels) if channels > 1 else [(low + high) / 2])
+        el, az = np.meshgrid(elevations, theta, indexing="ij")  # rows are rings
+        self._rays = np.column_stack(
+            [(np.cos(el) * np.cos(az)).ravel(), (np.cos(el) * np.sin(az)).ravel(), np.sin(el).ravel()]
+        )
         default_position = (0.0, 0.0, 0.0) if self.parent else (0.0, 0.0, 0.2)
         position = [float(v) for v in attrs.get("position", default_position)]
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
@@ -1403,20 +1415,13 @@ class LidarHandle:
             directions = (data.site_xmat[site].reshape(3, 3) @ self._rays.T).T
             geomid = np.zeros(count, np.int32)
             dist = np.zeros(count)
-            exclude = (int(model.site_bodyid[site]) or -1) if self.parent else -1  # body 0 is the world: excluding it would hide every static geom
-            mujoco.mj_multiRay(
-                model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
-                RAY_GROUPS, 1, exclude, geomid, dist, None, count, self.range_max_m,
-            )
-            if self.parent:
-                # mj_multiRay excludes one body; re-cast past hits on the rest of the parent's subtree
-                own = set(robots.subtree(model, int(model.site_bodyid[site])))
-                origin = data.site_xpos[site]
-                for ray in np.flatnonzero(geomid >= 0):
-                    dist[ray] = _cast_past(
-                        model, data, origin, directions[ray], own, int(geomid[ray]), float(dist[ray]),
-                        self.range_max_m,
-                    )
+            # the parent's subtree is hidden; body 0 is the world, whose subtree is everything
+            own = subtree_geoms(model, int(model.site_bodyid[site])) if self.parent else np.zeros(0, int)
+            with hidden_geoms(model, own):
+                mujoco.mj_multiRay(
+                    model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
+                    RAY_GROUPS, 1, -1, geomid, dist, None, count, self.range_max_m,
+                )
             return dist
 
         dist = self._sim.run(cast)
@@ -1701,7 +1706,7 @@ class PhotoEyeHandle:
         self.distance_m = self.range_m
         self.count = 0
         self._site = -1
-        self._own: set[int] = set()
+        self._own = np.zeros(0, int)  # the parent's subtree geoms, hidden from the beam
         self._generation = -1
         self._callback_key = f"photo_eye:{name}"
         position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
@@ -1732,7 +1737,7 @@ class PhotoEyeHandle:
             self._generation = self._sim.generation
             self._site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.name)
             parent = int(model.site_bodyid[self._site]) if self._site >= 0 and self.parent else 0
-            self._own = set(robots.subtree(model, parent)) if parent else set()
+            self._own = subtree_geoms(model, parent) if parent else np.zeros(0, int)
 
     def _on_step(self, _dt: float) -> None:
         model, data = self._sim.model, self._sim.data
@@ -1743,10 +1748,8 @@ class PhotoEyeHandle:
         origin = data.site_xpos[self._site].copy()
         direction = data.site_xmat[self._site].reshape(3, 3)[:, 0].copy()
         found = np.zeros(1, np.int32)
-        exclude = int(model.site_bodyid[self._site]) if self._own else -1
-        dist = mujoco.mj_ray(model, data, origin, direction, RAY_GROUPS, 1, exclude, found)
-        if self._own:
-            dist = _cast_past(model, data, origin, direction, self._own, int(found[0]), dist, self.range_m)
+        with hidden_geoms(model, self._own):
+            dist = mujoco.mj_ray(model, data, origin, direction, RAY_GROUPS, 1, -1, found)
         blocked = 0.0 <= dist <= self.range_m
         if blocked and not self.blocked:
             self.count += 1

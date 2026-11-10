@@ -113,6 +113,15 @@
       }
     },
     {
+      "name": "torso-imu",
+      "api": "rdk:component:movement_sensor",
+      "model": "viam-labs:mujoco-sim:imu",
+      "frame": { "parent": "husky", "translation": { "x": 0, "y": 0, "z": 300 } },
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
       "name": "scene-cam",
       "api": "rdk:component:camera",
       "model": "viam-labs:mujoco-sim:camera",

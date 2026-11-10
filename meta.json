@@ -38,8 +38,20 @@
     {
       "model": "viam-labs:mujoco-sim:lidar",
       "api": "rdk:component:camera",
-      "short_description": "A 2D LIDAR that serves point clouds",
+      "short_description": "A 2D or 3D LIDAR that serves point clouds",
       "markdown_link": "README.md#model-viam-labsmujoco-simlidar"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:imu",
+      "api": "rdk:component:movement_sensor",
+      "short_description": "An IMU: orientation, angular velocity and acceleration, with optional noise",
+      "markdown_link": "README.md#model-viam-labsmujoco-simimu"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:force_torque",
+      "api": "rdk:component:sensor",
+      "short_description": "A wrist force-torque sensor at an arm's flange, with optional noise",
+      "markdown_link": "README.md#model-viam-labsmujoco-simforce_torque"
     },
     {
       "model": "viam-labs:mujoco-sim:movement_sensor",

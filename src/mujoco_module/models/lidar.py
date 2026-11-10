@@ -1,17 +1,21 @@
-"""viam-labs:mujoco-sim:lidar - a 2D scanning LIDAR, served like Viam's rplidar
-module: a camera that only returns point clouds.
+"""viam-labs:mujoco-sim:lidar - a 2D or 3D scanning LIDAR, served like Viam's
+rplidar module: a camera that only returns point clouds.
 
 Attributes:
   world (string, required)       - name of the viam-labs:mujoco-sim:world component
   range_min_m (float)            - nearer hits are dropped (default 0.15)
   range_max_m (float)            - farther hits are dropped (default 12)
   angular_resolution_deg (float) - ray spacing, 0.1 to 360 (default 1)
+  channels (int)                 - rings of rays, 1 to 128 (default 1: 2D)
+  vertical_fov_deg ([min, max])  - lowest and highest ring elevation, degrees
+                                   from the scan plane, within +-90 (default
+                                   [0, 0]; one ring uses the midpoint)
   position ([x,y,z] m)           - fallback placement when no frame is set
                                    (default (0, 0, 0.2))
 
 Place it with the standard frame. frame.parent is "world" or another mujoco-sim
 component (a base or an arm). The scan plane is the frame's XY plane; ray 0
-points along +X.
+points along +X. channels x rays per ring is at most 65536.
 """
 
 import asyncio
@@ -32,7 +36,9 @@ from ..handles import (
     DEFAULT_LIDAR_RANGE_MAX_M,
     DEFAULT_LIDAR_RANGE_MIN_M,
     DEFAULT_LIDAR_RESOLUTION_DEG,
+    MAX_LIDAR_CHANNELS,
     MAX_LIDAR_RAYS,
+    MAX_LIDAR_TOTAL_RAYS,
     LidarHandle,
     encode_pcd,
 )
@@ -79,6 +85,27 @@ class MujocoLidar(Camera, EasyResource):
             raise ValueError(
                 f"{config.name}: angular_resolution_deg must be between "
                 f"{360.0 / MAX_LIDAR_RAYS} and 360"
+            )
+        channels = attrs.get("channels", 1)
+        # the range check first: it also rejects NaN and infinity, which int() can't take
+        if isinstance(channels, bool) or not isinstance(channels, (int, float)) \
+                or not 1 <= channels <= MAX_LIDAR_CHANNELS or channels != int(channels):
+            raise ValueError(f"{config.name}: channels must be a whole number from 1 to {MAX_LIDAR_CHANNELS}")
+        fov = attrs.get("vertical_fov_deg", [0, 0])
+        if (
+            not isinstance(fov, (list, tuple)) or len(fov) != 2
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) or not -90 <= v <= 90 for v in fov)
+        ):
+            raise ValueError(f"{config.name}: vertical_fov_deg must be [min, max] in degrees, each within +-90")
+        if fov[0] > fov[1] or (channels > 1 and fov[0] == fov[1]):
+            raise ValueError(
+                f"{config.name}: vertical_fov_deg min must be below max (equal only with one channel)"
+            )
+        rays = int(channels) * max(1, round(360.0 / resolution))
+        if rays > MAX_LIDAR_TOTAL_RAYS:
+            raise ValueError(
+                f"{config.name}: channels x rays per ring is {rays}; at most {MAX_LIDAR_TOTAL_RAYS} "
+                "(raise angular_resolution_deg or lower channels)"
             )
         return validate_sim_component(config, needs_asset=False, world_frame_only=False)
 

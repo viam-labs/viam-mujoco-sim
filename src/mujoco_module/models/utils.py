@@ -131,6 +131,34 @@ def positive_number(name: str, attrs: Dict[str, Any], key: str, default: float) 
     return value
 
 
+def non_negative_number(name: str, attrs: Dict[str, Any], key: str, default: float) -> float:
+    """attrs[key] (or default) as a finite float >= 0; ValueError otherwise."""
+    value = finite_number(name, attrs, key, default)
+    if value < 0:
+        raise ValueError(f"{name}: {key} must be a finite number >= 0")
+    return value
+
+
+def vector3(name: str, attrs: Dict[str, Any], key: str) -> None:
+    """ValueError unless attrs[key], when set, is 3 finite numbers."""
+    raw = attrs.get(key, [0, 0, 0])
+    if not isinstance(raw, (list, tuple)) or len(raw) != 3 or any(
+        isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in raw
+    ):
+        raise ValueError(f"{name}: {key} must be a list of 3 finite numbers")
+
+
+def whole_number(name: str, attrs: Dict[str, Any], key: str, default: int, minimum: int | None = None) -> int:
+    """attrs[key] (or default) as an int; ValueError unless it is a whole
+    number, and at least `minimum` when given."""
+    raw = attrs.get(key, default)
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw != int(raw):
+        raise ValueError(f"{name}: {key} must be a whole number")
+    if minimum is not None and raw < minimum:
+        raise ValueError(f"{name}: {key} must be {minimum} or more")
+    return int(raw)
+
+
 def frame_box(geometry: Geometry) -> Dict[str, Any]:
     """A box geometry as frame.geometry config (mm)."""
     d, c = geometry.box.dims_mm, geometry.center

@@ -843,3 +843,41 @@ def test_husky_ur5e_example_validates_and_matches_its_script():
     assert table.label == "table-b-near"  # not the obstacle component's own geometry name
     assert script.on_table_b(*script.PLACE_MM, script.TABLE_TOP_MM + script.BLOCK_MM / 2)
     assert not script.on_table_b(bx, by, bz)
+
+
+def test_meta_models_are_registered():
+    import json
+    import pathlib
+
+    from viam.resource.registry import Registry
+    from viam.resource.types import API, Model
+
+
+    meta = json.loads((pathlib.Path(__file__).parent.parent / "meta.json").read_text())
+    for entry in meta["models"]:
+        Registry.lookup_resource_creator(API.from_string(entry["api"]), Model.from_string(entry["model"]))
+
+
+@pytest.mark.parametrize("example,model", [
+    ("husky-ur5e.json", "viam-labs:mujoco-sim:imu"),
+    ("ur5e-pick.json", "viam-labs:mujoco-sim:force_torque"),
+])
+def test_example_sensors_validate(example, model):
+    import json
+    import pathlib
+
+    from google.protobuf.json_format import ParseDict
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.force_torque import MujocoForceTorque
+    from mujoco_module.models.imu import MujocoImu
+
+    cfg = json.loads((pathlib.Path(__file__).parent.parent / "examples" / example).read_text())
+    (item,) = [c for c in cfg["components"] if c["model"] == model]
+    component = ComponentConfig(name=item["name"], attributes=dict_to_struct(item["attributes"]))
+    ParseDict(item["frame"], component.frame)
+    cls = MujocoImu if model.endswith(":imu") else MujocoForceTorque
+    deps, _ = cls.validate_config(component)
+    assert deps[0] == "sim-world"
+    assert item["frame"]["parent"] in {c["name"] for c in cfg["components"]}

@@ -2,8 +2,9 @@
 
 A [Viam](https://www.viam.com) module that simulates robots in
 [MuJoCo](https://mujoco.org): arms and grippers (finger and suction), mobile
-bases, arms mounted on bases, RGB-D cameras, 2D LIDAR, odometry, obstacles,
-and a workcell kit (conveyors, parcel spawners, photo-eyes, scales). Bundled
+bases, arms mounted on bases, RGB-D cameras, 2D and 3D LIDAR, odometry, IMUs,
+wrist force-torque sensors, obstacles, and a workcell kit (conveyors, parcel
+spawners, photo-eyes, scales). Bundled
 robots cover common hardware, and your own MJCF or URDF models load the same
 way. Viam's motion planner, 3D scene viewer and SDKs work with it, and
 components are placed with the standard Viam frame.
@@ -21,8 +22,10 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF or URDF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
-| [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
+| [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D or 3D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
+| [`viam-labs:mujoco-sim:imu`](#model-viam-labsmujoco-simimu) | `movement_sensor` | An IMU on the world, a base or an arm: orientation, angular velocity and acceleration, with optional noise. |
+| [`viam-labs:mujoco-sim:force_torque`](#model-viam-labsmujoco-simforce_torque) | `sensor` | A wrist force-torque sensor at an arm's flange, with optional noise. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
 | [`viam-labs:mujoco-sim:scene`](#model-viam-labsmujoco-simscene) | `generic` | An MJCF scene file placed by its frame: simulated, planned against, and its free bodies movable as props. |
 | [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props, parcels, and the conveyor and scale shapes to the Viam app's 3D scene viewer. |
@@ -784,8 +787,9 @@ This one sits 120 mm ahead of the origin and 150 mm up:
 
 ## Model viam-labs:mujoco-sim:lidar
 
-A 2D LIDAR, like the rplidar module: it ray-casts a scan and serves it as a
-point cloud. It is a camera that returns only point clouds.
+A 2D LIDAR, like the rplidar module, or a multi-channel 3D one: it ray-casts a
+scan and serves it as a point cloud. It is a camera that returns only point
+clouds.
 
 ### Configuration
 
@@ -812,6 +816,8 @@ point cloud. It is a camera that returns only point clouds.
 | `range_min_m` | float | No | `0.15` | Nearer hits are dropped. |
 | `range_max_m` | float | No | `12` | Farther hits are dropped. |
 | `angular_resolution_deg` | float | No | `1` | Ray spacing, 0.1 to 360. Rays are spread evenly round the full circle. |
+| `channels` | int | No | `1` | Rings of rays, 1 to 128. More than 1 makes a 3D LIDAR. |
+| `vertical_fov_deg` | [min, max] | No | `[0, 0]` | The lowest and highest ring's elevation in degrees above the scan plane, each within ±90. Rings are spread evenly between them; one ring uses the midpoint. |
 | `position` | [x, y, z] | No | `[0, 0, 0.2]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -822,11 +828,27 @@ frame's XY plane, and ray 0 points along +X. A mounted LIDAR never sees the
 body it is mounted on (a base's chassis or an arm's last link) or anything
 attached below it, such as a base's wheels and casters or a gripper.
 
+A 3D LIDAR, like a 16-channel unit with a 30° vertical field of view:
+
+```json
+"attributes": {
+  "world": "sim-world",
+  "channels": 16,
+  "vertical_fov_deg": [-15, 15],
+  "angular_resolution_deg": 0.4,
+  "range_max_m": 100
+}
+```
+
+A scan casts `channels` × (360 / `angular_resolution_deg`) rays, at most
+65,536 (a config error above that). The scan runs on the sim thread: about
+65,000 rays take about 3.4 ms on a rover, longer where many rays hit meshes.
+
 ### Supported API
 
 | Method | Notes |
 |---|---|
-| `GetPointCloud` | Binary PCD with `x y z` in meters, in the LIDAR's frame. `z` is 0. Only hits are included. |
+| `GetPointCloud` | Binary PCD with `x y z` in meters, in the LIDAR's frame. `z` is 0 for a 2D LIDAR. Only hits are included. |
 | `GetProperties` | `supports_pcd` is true. |
 | `GetImages` | Not supported. |
 
@@ -885,6 +907,114 @@ Readings error until the configured base is in the scene.
 
 For SLAM and navigation with nav-stack, see
 [Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation).
+
+## Model viam-labs:mujoco-sim:imu
+
+An inertial measurement unit: orientation, angular velocity and linear
+acceleration, from MuJoCo's gyro and accelerometer at the sensor's frame.
+Readings are exact unless you add noise.
+
+### Configuration
+
+```json
+{
+  "name": "torso-imu",
+  "api": "rdk:component:movement_sensor",
+  "model": "viam-labs:mujoco-sim:imu",
+  "frame": {
+    "parent": "husky",
+    "translation": { "x": 0, "y": 0, "z": 300 }
+  },
+  "attributes": {
+    "world": "sim-world",
+    "gyro_noise_dps": 0.05,
+    "accel_noise_mps2": 0.02,
+    "seed": 1
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `orientation_noise_deg` | float | No | `0` | Each orientation is turned by a random rotation of about this many degrees (the standard deviation). |
+| `gyro_noise_dps` | float | No | `0` | Angular-velocity noise, a standard deviation in degrees per second on each axis. |
+| `gyro_bias_dps` | [x, y, z] | No | `[0, 0, 0]` | A constant angular-velocity offset, degrees per second. |
+| `accel_noise_mps2` | float | No | `0` | Acceleration noise, a standard deviation in m/s² on each axis. |
+| `accel_bias_mps2` | [x, y, z] | No | `[0, 0, 0]` | A constant acceleration offset, m/s². |
+| `seed` | int | No | `0` | Seeds the noise, so a run repeats; 0 or more. |
+| `position`, `orientation_wxyz`, `orientation_rpy_deg` | | No | `[0, 0, 0]`, identity | Placement used when no frame is set. |
+
+The frame's `parent` is `world`, a mujoco-sim base or an arm (its end
+effector), as for the LIDAR.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetOrientation` | The sensor frame's orientation in the world frame, as an orientation vector in degrees. |
+| `GetAngularVelocity` | Degrees per second, in the sensor's frame. |
+| `GetLinearAcceleration` | m/s² in the sensor's frame, including gravity as a real accelerometer reports it: about +9.81 on the axis pointing up when it is still. |
+| `GetReadings` | All three, from one physics step. |
+| `GetProperties` | Orientation, angular velocity and linear acceleration. |
+| `GetPosition`, `GetLinearVelocity`, `GetCompassHeading` | Not supported. |
+
+Readings error until the frame's parent is in the scene.
+
+## Model viam-labs:mujoco-sim:force_torque
+
+A six-axis force-torque sensor at an arm's flange, like a wrist F/T sensor
+between the arm and its gripper. It adds no length, mass or collision shape, so
+the gripper and the arm's kinematics don't change. It measures what the tool
+(the gripper, what it holds and what it touches) exerts on the flange, finger
+and suction grippers alike.
+
+### Configuration
+
+```json
+{
+  "name": "wrist-ft",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:force_torque",
+  "frame": { "parent": "pick-arm" },
+  "attributes": {
+    "world": "sim-world",
+    "force_noise_n": 0.1,
+    "torque_noise_nm": 0.005
+  }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `filter_s` | float | No | `0.02` | Low-pass filter time constant in seconds. `0` reads each physics step's raw value. |
+| `force_noise_n` | float | No | `0` | Force noise, a standard deviation in N on each axis. |
+| `torque_noise_nm` | float | No | `0` | Torque noise, a standard deviation in N·m on each axis. |
+| `seed` | int | No | `0` | Seeds the noise, so a run repeats; 0 or more. |
+
+Set the frame's `parent` to a mujoco-sim arm, with no translation or
+orientation: the sensor's frame is then the arm's end-effector frame, which is
+where the frame system and 3D scene put it.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | `force` `{x, y, z}` in N and `torque` `{x, y, z}` in N·m, in the arm's end-effector frame and about its origin, minus any tare; `tared`. A hanging gripper reads its weight along +Z, the direction out of the flange. |
+
+Readings error until the arm is in the scene.
+
+### DoCommand
+
+| Command | Returns |
+|---|---|
+| `tare` | `{"tared": true}`; later readings subtract the current one (the gripper's own weight, say). Reconfiguring the arm restarts the sensor, so tare again after. |
+| `untare` | `{"tared": false}` |
 
 ## Model viam-labs:mujoco-sim:obstacle
 
@@ -1519,7 +1649,8 @@ A simulated rover can map its world and navigate it with
 [`viam-labs:nav-stack`](https://github.com/viam-labs/nav-stack), as a real Viam
 Rover does. Viam's builtin motion service no longer plans for bases
 (`MoveOnMap` and `MoveOnGlobe` were removed from RDK in late 2025), and the
-builtin navigation service is GPS-only, so nav-stack is the path.
+builtin navigation service is GPS-only, so nav-stack is the path. It takes a
+2D scan: keep the LIDAR's `channels` at 1.
 [`examples/rover-nav.json`](examples/rover-nav.json) is the complete config
 these steps build.
 
@@ -1709,7 +1840,8 @@ with `scene-cam`, not the 3D scene view.
   with the base and shoulder, which Viam's planner can't see.
 - **Place components relative to `world`, or ride a base.** A base's frame
   must have parent `world`; an arm's is `world` or a base; the gripper's is
-  its arm; a camera's or LIDAR's is `world` or another mujoco-sim component.
+  its arm; a camera's, LIDAR's or IMU's is `world` or another mujoco-sim
+  component; a force-torque sensor's is its arm.
 - **The frame system doesn't follow a base.** RDK keeps a base at its
   configured pose; it doesn't know the sim base has driven. Planning in the
   base's (or a carried arm's) frame stays right, but world-frame geometry
