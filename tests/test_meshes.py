@@ -108,7 +108,7 @@ def test_bundled_bin_decomposes_into_pieces_covering_it(u_pieces):
 
 
 def test_missing_and_empty_files(tmp_path):
-    with pytest.raises(ValueError, match="cube: mesh file .*nope.stl not found"):
+    with pytest.raises(ValueError, match="cube: file .*nope.stl not found"):
         load_pieces("cube", parse_mesh("cube", str(tmp_path / "nope.stl")))
     (tmp_path / "empty.stl").write_bytes(b"")
     with pytest.raises(ValueError, match="cube: .*empty.stl"):

@@ -10,6 +10,7 @@ from mujoco_module.handles import BaseHandle
 from mujoco_module.models.obstacle import MujocoObstacle, obstacle_contribution
 from test_base import finish, pose
 from test_meshes import box_piece
+from test_textures import blue, grey, halves, look_down, red, untinted, write_image
 
 
 def config(geometry=None, parent="world", attrs=None, translation=(0, 0, 0), yaw_deg=None, frame=True):
@@ -154,5 +155,62 @@ def test_mesh_obstacle_geometries_are_its_pieces(running_sim, u_pieces, monkeypa
             running_sim.model.geom(i).name.startswith("table/obstacle/")
             for i in range(running_sim.model.ngeom)))
         assert count == len(geometries)
+    finally:
+        asyncio.run(obstacle.close())
+
+
+@pytest.mark.parametrize("mesh", [False, True])
+def test_textured_obstacle_shows_its_image_not_its_color(sim, mesh):
+    attrs = {"texture": "/unused.png", "color": [0.2, 0.8, 0.2]}
+    if mesh:
+        cfg = config(None, attrs={**attrs, "mesh": "/unused.stl"}, translation=(0, 0, 50))
+        contribution = obstacle_contribution(cfg, [box_piece((0.1, 0.1, 0.1))], halves())
+    else:
+        cube = Geometry(box=RectangularPrism(dims_mm=Vector3(x=100, y=100, z=100)))
+        contribution = obstacle_contribution(config(cube, attrs=attrs, translation=(0, 0, 50)), texture=halves())
+    sim.set_contribution("table", contribution)
+    look_down(sim, 0, 0, 0.5, 10)
+    rgb, _ = sim.render("cam", 64, 64)
+    assert any(red(p) for p in rgb[32]) and any(blue(p) for p in rgb[32])
+    assert rgb[..., 1].max() < 100
+
+
+@pytest.mark.parametrize("mesh", [False, True])
+def test_color_does_not_tint_a_textured_obstacle(sim, mesh):
+    attrs = {"texture": "/unused.png", "color": [0.2, 0.8, 0.2]}
+    if mesh:
+        cfg = config(None, attrs={**attrs, "mesh": "/unused.stl"}, translation=(0, 0, 50))
+        contribution = obstacle_contribution(cfg, [box_piece((0.1, 0.1, 0.1))], grey())
+    else:
+        cube = Geometry(box=RectangularPrism(dims_mm=Vector3(x=100, y=100, z=100)))
+        contribution = obstacle_contribution(config(cube, attrs=attrs, translation=(0, 0, 50)), texture=grey())
+    sim.set_contribution("table", contribution)
+    look_down(sim, 0, 0, 0.5, 10)
+    rgb, _ = sim.render("cam", 64, 64)
+    assert untinted(rgb[32, 32])
+
+
+def test_textured_obstacle_needs_its_texture_loaded():
+    cube = Geometry(box=RectangularPrism(dims_mm=Vector3(x=100, y=100, z=100)))
+    with pytest.raises(ValueError, match="table: a textured obstacle needs its texture loaded"):
+        obstacle_contribution(config(cube, attrs={"texture": "/unused.png"}))
+
+
+def test_validate_rejects_a_bad_texture():
+    with pytest.raises(ValueError, match=r"table: texture must be a \.png"):
+        MujocoObstacle.validate_config(config(BOX, attrs={"texture": "/a.gif"}))
+
+
+def test_obstacle_component_loads_its_texture(running_sim, tmp_path):
+    from mujoco_module.models.world import MujocoWorld
+
+    MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({"real_time": False})), {})
+    image = str(write_image(tmp_path / "t.png"))
+    obstacle = MujocoObstacle.new(config(BOX, attrs={"texture": image}), {})
+    try:
+        assert running_sim.run(
+            lambda: running_sim.model.geom("table/obstacle").matid[0]
+            == running_sim.model.material("table/obstacle/texture").id
+        )
     finally:
         asyncio.run(obstacle.close())

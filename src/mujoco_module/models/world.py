@@ -6,7 +6,7 @@ Attributes:
   props (list)        - movable objects: {name, type: "cube" | "sphere" |
                         "cylinder" | "capsule" | "mesh", size, scale, position,
                         orientation_wxyz, mass, color, fixed, static_friction,
-                        dynamic_friction (accepted, ignored)}. Each shape fills
+                        texture, dynamic_friction (accepted, ignored)}. Each shape fills
                         a box of size x scale. A mesh prop takes mesh (path,
                         assets-relative path or https URL), scale and
                         threshold, like the obstacle's; it's split into
@@ -18,6 +18,11 @@ Attributes:
                         else the geometry in the component's frame config.
                         Not dependencies: they are looked up after the world
                         starts, every 2 s for up to 60 s.
+  floor_texture (string) - a .png or .jpg image (path, assets-relative path or
+                        https URL) tiled across the floor. A prop's texture is
+                        the same kind of image, on each of its faces. Cameras
+                        see textures; the 3D viewer uses color.
+  floor_texture_size (float) - one floor tile's edge in meters (default 1)
 
 DoCommand: status, play, pause, reset, set_prop_pose, get_prop_pose,
 park_props, reimport. Shapes match the viam-labs:isaac-sim world.
@@ -40,7 +45,7 @@ from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
 
 from .. import FAMILY, NAMESPACE, robots
-from ..meshes import load_pieces
+from ..meshes import load_pieces, load_texture
 from ..shapes import GEOM_TYPES, geometry_shape, mj_size
 from ..sim import LOGGER, PROP_CONTACT_PRIORITY, PROP_SOLREF, Contribution, SimManager, WorldConfig
 from .obstacle import _pose_quat
@@ -163,8 +168,15 @@ class MujocoWorld(Generic, EasyResource):
             for prop in cfg.props
             if prop.mesh is not None
         }
+        textures = {
+            prop.name: load_texture(f"prop {prop.name}", prop.texture)
+            for prop in cfg.props
+            if prop.texture is not None
+        }
+        if cfg.floor_texture is not None:
+            textures["floor"] = load_texture("floor_texture", cfg.floor_texture)
         sim = SimManager.get()
-        sim.configure_world(cfg, pieces)
+        sim.configure_world(cfg, pieces, textures)
         self._import_names = _import_names(attrs)
         if self._import_names:
             # new() runs on the module's event loop; the components come later

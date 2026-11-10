@@ -28,7 +28,16 @@ import numpy as np
 from viam.logging import getLogger
 from viam.proto.common import Geometry
 
-from .meshes import MeshSource, Piece, add_pieces, parse_mesh
+from .meshes import (
+    UNTINTED_RGBA,
+    MeshSource,
+    Piece,
+    Texture,
+    add_pieces,
+    add_texture,
+    parse_mesh,
+    parse_texture,
+)
 from .shapes import GEOM_TYPES, mj_size, prop_shape
 
 LOGGER = getLogger("viam-mujoco-sim")
@@ -134,6 +143,7 @@ class PropSpec:
     fixed: bool
     friction: float
     mesh: MeshSource | None = None  # set for type "mesh"; shape is "mesh", geom_size ()
+    texture: str | None = None  # image source; the world loads it (meshes.load_texture)
 
     @classmethod
     def parse(cls, raw: Any) -> "PropSpec":
@@ -142,6 +152,8 @@ class PropSpec:
         if not isinstance(raw, Mapping) or not raw.get("name"):
             raise ValueError(f"every prop needs a name: {raw!r}")
         name = str(raw["name"])
+        if name == "floor":
+            raise ValueError("prop floor: the name floor is taken by the floor")
         size = _positive(raw.get("size", 0.05), f"prop {name}: size")
         kind = str(raw.get("type", "cube"))
         mesh = None
@@ -180,6 +192,7 @@ class PropSpec:
             fixed=_strict_bool(raw.get("fixed", False), f"prop {name}: fixed"),
             friction=friction,
             mesh=mesh,
+            texture=parse_texture(f"prop {name}", raw["texture"]) if "texture" in raw else None,
         )
 
 
@@ -188,6 +201,8 @@ class WorldConfig:
     physics_dt: float = 0.002
     real_time: bool = True
     props: tuple[PropSpec, ...] = ()
+    floor_texture: str | None = None  # image source; the world loads it
+    floor_texture_size: float = 1.0  # one tile's edge, meters
 
     @classmethod
     def from_attrs(cls, attrs: Mapping[str, Any]) -> "WorldConfig":
@@ -195,10 +210,19 @@ class WorldConfig:
         names = [prop.name for prop in props]
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate prop names in {names}")
+        floor_texture = None
+        if "floor_texture" in attrs:
+            floor_texture = parse_texture("floor_texture", attrs["floor_texture"])
+        elif "floor_texture_size" in attrs:
+            raise ValueError("floor_texture_size only applies with floor_texture")
         return cls(
             physics_dt=_positive(attrs.get("physics_dt", 0.002), "physics_dt"),
             real_time=_strict_bool(attrs.get("real_time", True), "real_time"),
             props=props,
+            floor_texture=floor_texture,
+            floor_texture_size=_positive(
+                attrs.get("floor_texture_size", 1.0), "floor_texture_size"
+            ),
         )
 
 
@@ -286,6 +310,7 @@ class SimManager:
         self._sim_thread_id: int | None = None
         self.cfg: WorldConfig | None = None
         self.prop_pieces: dict[str, list[Piece]] = {}
+        self.textures: dict[str, Texture] = {}  # by prop name, and "floor"
         self.model: mujoco.MjModel | None = None
         self.data: mujoco.MjData | None = None
         self.generation = 0
@@ -375,21 +400,33 @@ class SimManager:
             )
 
     def configure_world(
-        self, cfg: WorldConfig, pieces: Mapping[str, list[Piece]] | None = None
+        self,
+        cfg: WorldConfig,
+        pieces: Mapping[str, list[Piece]] | None = None,
+        textures: Mapping[str, Texture] | None = None,
     ) -> None:
-        """pieces: each mesh prop's convex pieces (meshes.load_pieces), by prop name."""
+        """pieces: each mesh prop's convex pieces (meshes.load_pieces), by prop name.
+        textures: each textured prop's image (meshes.load_texture), by prop name,
+        and the floor's as "floor"."""
         pieces = dict(pieces or {})
+        textures = dict(textures or {})
         missing = [p.name for p in cfg.props if p.mesh is not None and p.name not in pieces]
         if missing:
             raise ValueError(f"mesh pieces not loaded for props {missing}")
+        wanted = [p.name for p in cfg.props if p.texture is not None]
+        if cfg.floor_texture is not None:
+            wanted.append("floor")
+        unloaded = [name for name in wanted if name not in textures]
+        if unloaded:
+            raise ValueError(f"textures not loaded for {unloaded}")
 
         def configure() -> None:
-            old, old_pieces = self.cfg, self.prop_pieces
-            self.cfg, self.prop_pieces = cfg, pieces
+            old = self.cfg, self.prop_pieces, self.textures
+            self.cfg, self.prop_pieces, self.textures = cfg, pieces, textures
             try:
                 self._rebuild()
             except BaseException:
-                self.cfg, self.prop_pieces = old, old_pieces
+                self.cfg, self.prop_pieces, self.textures = old
                 raise
 
         self.run(configure)
@@ -438,12 +475,17 @@ class SimManager:
             dir=[0, 0, -1],
             type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         )
-        spec.worldbody.add_geom(
+        floor = spec.worldbody.add_geom(
             name="floor",
             type=mujoco.mjtGeom.mjGEOM_PLANE,
             size=[0, 0, 0.05],
             rgba=[0.3, 0.35, 0.4, 1],
         )
+        if self.cfg.floor_texture is not None:
+            floor.material = add_texture(
+                spec, "floor/texture", self.textures["floor"], repeat_m=self.cfg.floor_texture_size
+            )
+            floor.rgba = list(UNTINTED_RGBA)
         for prop in self.cfg.props:
             body = spec.worldbody.add_body(
                 name=prop.name,
@@ -460,6 +502,9 @@ class SimManager:
             }
             if not prop.fixed:
                 contact["contype"] = FREE_CONTYPE
+            if prop.texture is not None:
+                contact["material"] = add_texture(spec, f"{prop.name}/texture", self.textures[prop.name])
+                contact["rgba"] = list(UNTINTED_RGBA)
             if prop.mesh is not None:
                 add_pieces(spec, body, prop.name, self.prop_pieces[prop.name], mass=prop.mass, **contact)
                 continue

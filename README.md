@@ -99,12 +99,14 @@ viam-server starts it first. Sim time is paced to wall time by default.
 | `real_time` | bool | No | `true` | Pace sim time to wall time. `false` steps as fast as possible. |
 | `props` | list | No | `[]` | Movable objects in the scene; see below. |
 | `import_geometry` | list | No | `[]` | Names of components, of any module, whose geometry becomes fixed and physical; see [Importing geometry from other modules](#importing-geometry-from-other-modules). |
+| `floor_texture` | string | No | | A `.png` or `.jpg` image tiled across the floor: a path, an assets-relative path (the module bundles `textures/concrete.png` and `textures/cardboard.png`) or an https URL. |
+| `floor_texture_size` | float | No | `1` | One floor tile's edge in meters. Only with `floor_texture`. |
 
 Each prop:
 
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
-| `name` | string | Yes | | Unique prop name, used by the prop commands. |
+| `name` | string | Yes | | Unique prop name, used by the prop commands. `floor` is reserved. |
 | `type` | string | No | `"cube"` | `"cube"`, `"sphere"`, `"cylinder"`, `"capsule"` or `"mesh"`. Each fills a box of `size × scale`: a sphere needs a uniform scale; a cylinder's or capsule's diameter is `size × scale[0]` (equal to `scale[1]`) and its height `size × scale[2]`, tip to tip for a capsule. A capsule's height must exceed its diameter (`scale[2] > scale[0]`). |
 | `size` | float | No | `0.05` | Width in meters; see `type` for each shape. |
 | `mesh`, `threshold` | string, float | No | | `type` `mesh` only: `mesh` is a path, assets-relative path or https URL; `scale` (number or [x, y, z]) scales the vertices and `size` is ignored; mass is split across the convex pieces by volume. `threshold` is the CoACD concavity threshold, 0.01 to 1 (default `0.05`). |
@@ -113,6 +115,7 @@ Each prop:
 | `orientation_wxyz` | [w, x, y, z] | No | `[1, 0, 0, 0]` | Spawn orientation. |
 | `mass` | float | No | `0.05` | Mass in kg. |
 | `color` | [r, g, b] | No | `[0.7, 0.7, 0.7]` | RGB, 0 to 1. |
+| `texture` | string | No | | A `.png` or `.jpg` image on each face (projected onto a mesh): a path, an assets-relative path or an https URL. Cameras see the image untinted; `color` is still the 3D viewer's colour. |
 | `fixed` | bool | No | `false` | A fixed prop never moves. |
 | `static_friction` | float | No | `1.0` | Sliding friction, non-negative. |
 | `dynamic_friction` | float | No | | Accepted for compatibility; MuJoCo has one sliding coefficient, so it is ignored. |
@@ -871,6 +874,7 @@ configure it once.
 | `world` | string | Yes | | The world component's name. |
 | `color` | [r, g, b] | No | `[0.7, 0.7, 0.7]` | RGB, 0 to 1. |
 | `static_friction` | float | No | `1.0` | Sliding friction, non-negative. |
+| `texture` | string | No | | A `.png` or `.jpg` image on each face, as for props. Cameras see it; the 3D viewer uses `color`. |
 | `mesh` | string | No | | A mesh file (STL, OBJ or PLY) instead of `frame.geometry`: a path, an assets-relative path or an https URL. |
 | `scale` | float or [x, y, z] | No | `1` | Scales the mesh vertices. Mesh only. |
 | `threshold` | float | No | `0.05` | CoACD concavity threshold, 0.01 to 1; lower gives more, tighter pieces and a slower first load. Mesh only. |
@@ -1587,7 +1591,8 @@ with `scene-cam`, not the 3D scene view.
 - **No cylinder obstacles yet.** Viam's geometry API has no cylinder ([viamrobotics/api#894](https://github.com/viamrobotics/api/pull/894)), so use a capsule or box for a round post. Cylinder props work and appear in the scene viewer as meshes.
 - **First load of a mesh is slow.** CoACD can take seconds to minutes on a dense mesh, and the whole module is unresponsive meanwhile. viam-server gives a resource about a minute (`VIAM_RESOURCE_CONFIGURATION_TIMEOUT`). If a mesh obstacle times out, RDK builds its frame without geometry and **the planner plans straight through it** until the next reconfigure. Decimate heavy CAD first (a few thousand triangles is plenty) or raise the timeout. The result is cached in the module's data dir, so restart once the log says "decomposed … into N convex pieces".
 - **Mesh obstacles are missing from the `FrameSystemConfig` API.** RDK can't serialize a model built from geometries, so that call leaves them out (it blanks the part). The planner and the 3D scene viewer still see them (checked on viam-server v1.15).
-- **Mesh URLs are downloaded once.** To pick up a changed file, change the URL (e.g. add `?v=2`).
+- **Mesh and texture URLs are downloaded once** (they share the module's mesh cache). To pick up a changed file, change the URL (e.g. add `?v=2`).
+- **Textures are for cameras.** The 3D scene viewer draws props and obstacles in their `color`. Spawner parcels take no texture. Images larger than 2048 px are scaled down.
 - **Viam's planner collides meshes as surfaces.** A link entirely inside a piece, or a step that jumps past a thin wall, isn't caught. Keep walls at least 5 mm thick.
 - **Arm self-collision is partial.** Link pairs touching at home are excluded,
   and the bundled Lite6 also excludes its wrist-link pairs, whose convex hulls

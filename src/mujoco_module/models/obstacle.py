@@ -16,6 +16,9 @@ Attributes:
   threshold (float)         - CoACD concavity, 0.01 to 1 (default 0.05)
   color ([r, g, b])         - 0 to 1 (default [0.7, 0.7, 0.7])
   static_friction (float)   - sliding friction, >= 0 (default 1)
+  texture (string)          - a .png or .jpg image (path, assets-relative path or
+                              https URL) on each face. Cameras see it; the 3D
+                              viewer uses color.
 """
 
 import asyncio
@@ -33,7 +36,18 @@ from viam.resource.types import Model, ModelFamily
 from viam.spatialmath import Quaternion
 
 from .. import FAMILY, NAMESPACE
-from ..meshes import Piece, add_pieces, load_pieces, mesh_geometry, parse_mesh
+from ..meshes import (
+    UNTINTED_RGBA,
+    Piece,
+    Texture,
+    add_pieces,
+    add_texture,
+    load_pieces,
+    load_texture,
+    mesh_geometry,
+    parse_mesh,
+    parse_texture,
+)
 from ..shapes import GEOM_TYPES, geometry_shape, mj_size
 from ..sim import PROP_CONTACT_PRIORITY, PROP_SOLREF, Contribution, SimManager
 from .utils import finite_number, frame_pose, get_attrs, validate_sim_component
@@ -85,6 +99,7 @@ def _parse(config: ComponentConfig) -> dict[str, Any]:
     friction = finite_number(name, attrs, "static_friction", 1.0)
     if friction < 0:
         raise ValueError(f"{name}: static_friction must be non-negative")
+    texture = parse_texture(name, attrs["texture"]) if "texture" in attrs else None
     position, quat = frame_pose(config)
     center = config.frame.geometry.center
     return {
@@ -96,17 +111,21 @@ def _parse(config: ComponentConfig) -> dict[str, Any]:
         "center_quat": _pose_quat(center),
         "color": [float(c) for c in color],
         "friction": friction,
+        "texture": texture,
     }
 
 
 def obstacle_contribution(
-    config: ComponentConfig, pieces: list[Piece] | None = None
+    config: ComponentConfig, pieces: list[Piece] | None = None, texture: Texture | None = None
 ) -> Contribution:
     """A fixed body named <name>/obstacle: one geom from the frame geometry, or
-    one convex mesh geom per piece (<name>/obstacle/<i>) for a mesh obstacle."""
+    one convex mesh geom per piece (<name>/obstacle/<i>) for a mesh obstacle.
+    texture is the loaded image (meshes.load_texture) when the config has one."""
     spec = _parse(config)
     if spec["mesh"] is not None and not pieces:
         raise ValueError(f"{config.name}: a mesh obstacle needs its pieces loaded")
+    if spec["texture"] is not None and texture is None:
+        raise ValueError(f"{config.name}: a textured obstacle needs its texture loaded")
     body_name = f"{config.name}/obstacle"
     contact = {
         "rgba": [*spec["color"], 1.0],
@@ -116,9 +135,13 @@ def obstacle_contribution(
     }
 
     def build(mj: mujoco.MjSpec) -> None:
+        geom = dict(contact)
+        if texture is not None:
+            geom["material"] = add_texture(mj, f"{body_name}/texture", texture)
+            geom["rgba"] = list(UNTINTED_RGBA)
         body = mj.worldbody.add_body(name=body_name, pos=spec["position"], quat=spec["quat"])
         if pieces:
-            add_pieces(mj, body, body_name, pieces, **contact)
+            add_pieces(mj, body, body_name, pieces, **geom)
             return
         body.add_geom(
             name=body_name,
@@ -126,7 +149,7 @@ def obstacle_contribution(
             size=mj_size(spec["shape"]),
             pos=spec["center_pos"],
             quat=spec["center_quat"],
-            **contact,
+            **geom,
         )
 
     return Contribution(build=build)
@@ -162,6 +185,7 @@ class MujocoObstacle(Generic, EasyResource):
     ) -> None:
         spec = _parse(config)
         pieces = load_pieces(self.name, spec["mesh"]) if spec["mesh"] is not None else None
+        texture = load_texture(self.name, spec["texture"]) if spec["texture"] is not None else None
         if pieces:
             # the frame has no geometry, so RDK plans against these (several become a
             # zero-DoF model labelled <name>:piece<i>)
@@ -171,7 +195,7 @@ class MujocoObstacle(Generic, EasyResource):
             geometry.CopyFrom(config.frame.geometry)
             geometry.label = self.name
             geometries = [geometry]  # RDK uses the frame config's geometry; for direct callers
-        SimManager.get().set_contribution(self.name, obstacle_contribution(config, pieces))
+        SimManager.get().set_contribution(self.name, obstacle_contribution(config, pieces, texture))
         self._geometries = geometries
 
     async def close(self) -> None:

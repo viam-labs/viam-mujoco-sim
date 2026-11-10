@@ -4,6 +4,8 @@ MuJoCo collides a mesh as its convex hull, so a concave mesh (a bin) is split
 into convex pieces with CoACD. MuJoCo gets one mesh geom per piece, and Viam's
 planner gets the same pieces (see models/obstacle.py), so both collide against
 identical shapes. Decompositions are slow the first time and cached on disk.
+
+Texture images load here too, sharing the path, download and cache handling.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import coacd
 import mujoco
 import numpy as np
 import trimesh
+from PIL import Image, ImageOps
 from viam.logging import getLogger
 from viam.proto.common import Geometry, Mesh, Pose
 
@@ -39,10 +42,15 @@ CACHE_VERSION = 1
 
 ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 EXTENSIONS = (".stl", ".obj", ".ply")
+TEXTURE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+# ponytail: a fixed cap keeps GPU uploads and rebuilds fast; raise it, or make it
+# an attribute, if a close-up needs more detail
+MAX_TEXTURE_PX = 2048
 
 coacd.set_log_level("error")  # CoACD logs every step to stdout otherwise
 
 Piece = tuple[np.ndarray, np.ndarray]  # vertices (n, 3) float meters, faces (m, 3) int
+Texture = tuple[int, int, bytes]  # width, height, RGB bytes (row-major, top row first)
 
 
 @dataclass(frozen=True)
@@ -79,6 +87,18 @@ def parse_mesh(label: str, source: Any, scale: Any = 1, threshold: Any = 0.05) -
     if not (_number(threshold) and 0.01 <= threshold <= 1):
         raise ValueError(f"{label}: threshold must be between 0.01 and 1")
     return MeshSource(source, tuple(float(v) for v in values), float(threshold))
+
+
+def parse_texture(label: str, source: Any) -> str:
+    """Check a texture attribute's form only; nothing is read or downloaded."""
+    if not isinstance(source, str) or not source:
+        raise ValueError(f"{label}: texture must be a file path or an https URL")
+    scheme = urlparse(source).scheme
+    if scheme and scheme != "https":
+        raise ValueError(f"{label}: texture URLs must be https, got {scheme}:")
+    if extension(source) not in TEXTURE_EXTENSIONS:
+        raise ValueError(f"{label}: texture must be a .png, .jpg or .jpeg image, got {source!r}")
+    return source
 
 
 def pieces_ply(pieces: Sequence[Piece]) -> bytes:
@@ -140,6 +160,30 @@ def add_pieces(
         )
 
 
+# MuJoCo's default geom rgba: only at this value does a geom show its material's
+# colour, so a textured geom must use it or its rgba tints the image
+UNTINTED_RGBA = [0.5, 0.5, 0.5, 1.0]
+
+
+def add_texture(
+    spec: mujoco.MjSpec, name: str, texture: Texture, repeat_m: float | None = None
+) -> str:
+    """A 2D texture and a white material, both called name; returns name for a
+    geom's material. With repeat_m the image tiles in world units, one tile
+    repeat_m meters across (on a plane, a tile spans 2 / texrepeat meters)."""
+    width, height, rgb = texture
+    added = spec.add_texture(
+        name=name, type=mujoco.mjtTexture.mjTEXTURE_2D, width=width, height=height, nchannel=3
+    )
+    added.data = rgb
+    material = spec.add_material(name=name, rgba=[1, 1, 1, 1])
+    material.textures[mujoco.mjtTextureRole.mjTEXROLE_RGB] = name
+    if repeat_m is not None:
+        material.texuniform = True
+        material.texrepeat = [2 / repeat_m, 2 / repeat_m]
+    return name
+
+
 def cache_dir() -> Path:
     root = os.environ.get("VIAM_MODULE_DATA")
     base = Path(root) if root else Path.home() / ".cache" / "viam-mujoco-sim"
@@ -184,7 +228,7 @@ def _resolve(label: str, source: str) -> Path:
     if not path.is_absolute():
         path = ASSETS_DIR / path
     if not path.is_file():
-        raise ValueError(f"{label}: mesh file {path} not found")
+        raise ValueError(f"{label}: file {path} not found")
     return path
 
 
@@ -234,3 +278,15 @@ def load_pieces(label: str, mesh: MeshSource) -> list[Piece]:
     # written even if viam-server already timed the resource out: the retry hits it
     _write_atomic(cached, buffer.getvalue())
     return pieces
+
+
+def load_texture(label: str, source: str) -> Texture:
+    """The image as RGB, at most MAX_TEXTURE_PX on its long side."""
+    path = _resolve(label, source)
+    try:
+        with Image.open(path) as image:
+            rgb = ImageOps.exif_transpose(image).convert("RGB")
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        raise ValueError(f"{label}: can't read image {source}: {error}") from None
+    rgb.thumbnail((MAX_TEXTURE_PX, MAX_TEXTURE_PX))
+    return rgb.width, rgb.height, rgb.tobytes()

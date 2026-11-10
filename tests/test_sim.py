@@ -209,10 +209,11 @@ def test_mesh_props_parse_and_build(sim):
 
     # a rebuild that fails to compile leaves the previous world in place
     bad = WorldConfig.from_attrs({"props": [{"name": "x", "type": "mesh", "mesh": "/x.stl"}]})
-    old_cfg, old_pieces = sim.cfg, sim.prop_pieces
+    old_cfg, old_pieces, old_textures = sim.cfg, sim.prop_pieces, sim.textures
     with pytest.raises(ValueError):
         sim.configure_world(bad, {"x": []})
     assert sim.cfg is old_cfg and sim.prop_pieces is old_pieces
+    assert sim.textures is old_textures
 
 
 def test_mesh_prop_validation(sim):

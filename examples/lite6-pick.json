@@ -12,6 +12,8 @@
       "api": "rdk:component:generic",
       "model": "viam-labs:mujoco-sim:world",
       "attributes": {
+        "floor_texture": "textures/concrete.png",
+        "floor_texture_size": 1,
         "props": [
           {
             "name": "pick_block",
@@ -29,7 +31,8 @@
               0
             ],
             "static_friction": 2.0,
-            "dynamic_friction": 2.0
+            "dynamic_friction": 2.0,
+            "texture": "textures/cardboard.png"
           }
         ]
       }
