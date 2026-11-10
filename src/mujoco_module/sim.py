@@ -256,11 +256,16 @@ class Contribution:
     the others, and left out if that never appears. init runs on the first
     model the contribution is built into (again after it was left out), and
     on reset(). render_sizes are (width, height) renderers built and warmed
-    with each model, so a camera's first frame doesn't stall the step loop."""
+    with each model, so a camera's first frame doesn't stall the step loop.
+    replaces_floor leaves the world's floor out (a scene file brings its own);
+    props are movables the prop commands address by name (a scene's free
+    bodies: name, position, orientation_wxyz, fixed)."""
 
     build: Callable[[mujoco.MjSpec], bool | None]
     init: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None
     render_sizes: tuple[tuple[int, int], ...] = ()
+    replaces_floor: bool = False
+    props: tuple[Any, ...] = ()
 
 
 def _copy_state(
@@ -328,6 +333,7 @@ class SimManager:
         self._rtf_samples: deque[tuple[float, float]] = deque()
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._warned: set[str] = set()
+        self._floor_warned: list[str] = []  # the floor-replacing scenes last warned about
 
     # ------------------------------------------------------------------
     # threading
@@ -475,17 +481,23 @@ class SimManager:
             dir=[0, 0, -1],
             type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
         )
-        floor = spec.worldbody.add_geom(
-            name="floor",
-            type=mujoco.mjtGeom.mjGEOM_PLANE,
-            size=[0, 0, 0.05],
-            rgba=[0.3, 0.35, 0.4, 1],
-        )
-        if self.cfg.floor_texture is not None:
-            floor.material = add_texture(
-                spec, "floor/texture", self.textures["floor"], repeat_m=self.cfg.floor_texture_size
+        floored = sorted(n for n, c in self._contributions.items() if c.replaces_floor)
+        if floored and self.cfg.floor_texture is not None and self._floor_warned != floored:
+            LOGGER.warning("floor_texture is ignored: scene %s brings its own floor", ", ".join(floored))
+        self._floor_warned = floored if self.cfg.floor_texture is not None else []
+        if not floored:
+            floor = spec.worldbody.add_geom(
+                name="floor",
+                type=mujoco.mjtGeom.mjGEOM_PLANE,
+                size=[0, 0, 0.05],
+                rgba=[0.3, 0.35, 0.4, 1],
             )
-            floor.rgba = list(UNTINTED_RGBA)
+            if self.cfg.floor_texture is not None:
+                floor.material = add_texture(
+                    spec, "floor/texture", self.textures["floor"],
+                    repeat_m=self.cfg.floor_texture_size,
+                )
+                floor.rgba = list(UNTINTED_RGBA)
         for prop in self.cfg.props:
             body = spec.worldbody.add_body(
                 name=prop.name,
@@ -670,8 +682,17 @@ class SimManager:
 
         self.run(reset)
 
-    def _prop(self, name: str) -> PropSpec:
+    def scene_props(self) -> list[Any]:
+        """The props of the contributions in the current model (a scene's free
+        bodies). Sim thread."""
+        return [p for name in sorted(self._built) for p in self._contributions[name].props]
+
+    def _prop(self, name: str) -> Any:
+        """A config prop (PropSpec) or a scene prop, by name."""
         for prop in self.cfg.props if self.cfg is not None else ():
+            if prop.name == name:
+                return prop
+        for prop in self.scene_props():
             if prop.name == name:
                 return prop
         raise ValueError(f"unknown prop {name!r}")

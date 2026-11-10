@@ -24,6 +24,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
+| [`viam-labs:mujoco-sim:scene`](#model-viam-labsmujoco-simscene) | `generic` | An MJCF scene file placed by its frame: simulated, planned against, and its free bodies movable as props. |
 | [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props, parcels, and the conveyor and scale shapes to the Viam app's 3D scene viewer. |
 | [`viam-labs:mujoco-sim:conveyor`](#model-viam-labsmujoco-simconveyor) | `motor` | A belt conveyor that carries parcels by friction. |
 | [`viam-labs:mujoco-sim:spawner`](#model-viam-labsmujoco-simspawner) | `sensor` | Feeds box parcels of random classes onto a conveyor; `box-detect` compatible. |
@@ -943,11 +944,71 @@ flange:
 |---|---|
 | `GetGeometries` | The frame geometry, or one PLY per convex piece labelled `piece<i>`. |
 
+## Model viam-labs:mujoco-sim:scene
+
+Attaches a MuJoCo MJCF scene file (a room, a cell, a
+[Menagerie](https://github.com/google-deepmind/mujoco_menagerie) scene) into the
+world, placed by its frame. Cameras and physics see all of it, Viam's motion
+planner sees its fixed geometry, and its free bodies become props the world's
+prop commands move.
+
+### Configuration
+
+```json
+{
+  "name": "workbench",
+  "api": "rdk:component:generic",
+  "model": "viam-labs:mujoco-sim:scene",
+  "frame": { "parent": "world", "translation": { "x": 0, "y": 0, "z": 0 } },
+  "attributes": { "world": "sim-world", "mjcf": "scenes/workbench.xml" }
+}
+```
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `mjcf` | string | Yes | | The scene's `.xml` file: an absolute path, or a path relative to the module's `assets/` (the module bundles `scenes/workbench.xml`). Meshes and textures load relative to the file, as MuJoCo resolves them. |
+
+The frame's `parent` must be `world`, and it must have no `geometry` (RDK would
+plan against it instead of the scene). Its pose places the file's world origin.
+
+What comes from the file:
+
+- **Everything in its worldbody**: bodies, geoms, lights, and the materials,
+  textures and skybox they use. Every name gets the prefix `<name>/`
+  (`workbench/wall`). The world keeps its own `<option>`, `<size>`
+  and `<visual>` settings; the file's own angle units still apply to it.
+  Keyframes are dropped.
+- **The floor**: a colliding plane directly in the file's worldbody replaces the world's
+  floor, and the world's `floor_texture` is then ignored (logged). A plane on
+  a body, such as a wall, doesn't.
+- **Free bodies** become props named `<name>/<body>`
+  (`workbench/block_a`): `set_prop_pose`, `get_prop_pose` and `park_props`
+  move them, `reset` returns them to the file's pose, and the
+  [world state store](#model-viam-labsmujoco-simworld_state) shows them in the
+  3D scene. They grip and ride conveyors like config props. Every free body
+  needs a name.
+- **Passive joints** (hinge, slide, ball) simulate, with nothing driving
+  them.
+
+The motion planner gets every colliding geom of the fixed and jointed bodies,
+at the file's starting pose: boxes, spheres and capsules as they are, cylinders
+and meshes as convex meshes, ellipsoids as a box around them. Visual-only geoms
+(`contype` and `conaffinity` 0), planes and height fields are left out.
+
+A scene file can't have actuators, tendons, equality constraints, flexes,
+skins, plugins or mocap bodies: robots come from the arm, gripper and base
+components.
+
+[`examples/scene-pick.json`](examples/scene-pick.json) is a Lite6 picking the workbench blocks into the bin.
+
 ## Model viam-labs:mujoco-sim:world_state
 
 A world state store that publishes every movable (non-fixed) prop and every
 live [spawner](#model-viam-labsmujoco-simspawner) parcel with its live pose
-and shape, so they show up and move in the Viam app's 3D scene viewer. It also
+and shape, plus every [scene](#model-viam-labsmujoco-simscene)'s free bodies, so they show up and move in the Viam app's 3D scene viewer. It also
 publishes the exact shapes of every [conveyor](#model-viam-labsmujoco-simconveyor)
 (body and rails) and [scale](#model-viam-labsmujoco-simscale) platform: RDK
 never asks a motor or sensor for its geometries, so they can't reach the viewer
@@ -1592,6 +1653,8 @@ with `scene-cam`, not the 3D scene view.
 - **First load of a mesh is slow.** CoACD can take seconds to minutes on a dense mesh, and the whole module is unresponsive meanwhile. viam-server gives a resource about a minute (`VIAM_RESOURCE_CONFIGURATION_TIMEOUT`). If a mesh obstacle times out, RDK builds its frame without geometry and **the planner plans straight through it** until the next reconfigure. Decimate heavy CAD first (a few thousand triangles is plenty) or raise the timeout. The result is cached in the module's data dir, so restart once the log says "decomposed … into N convex pieces".
 - **Mesh obstacles are missing from the `FrameSystemConfig` API.** RDK can't serialize a model built from geometries, so that call leaves them out (it blanks the part). The planner and the 3D scene viewer still see them (checked on viam-server v1.15).
 - **Mesh and texture URLs are downloaded once** (they share the module's mesh cache). To pick up a changed file, change the URL (e.g. add `?v=2`).
+- **A scene's mesh is one convex hull.** MuJoCo collides a mesh as its convex hull and the planner gets the same hull, so a whole cell exported as one mesh blocks the workspace. Split it into convex parts first.
+- **Scene doors and drawers are planned where they start.** A hinged or sliding part that moves during a run stays at its starting pose for the planner.
 - **Textures are for cameras.** The 3D scene viewer draws props and obstacles in their `color`. Spawner parcels take no texture. Images larger than 2048 px are scaled down.
 - **Viam's planner collides meshes as surfaces.** A link entirely inside a piece, or a step that jumps past a thin wall, isn't caught. Keep walls at least 5 mm thick.
 - **Arm self-collision is partial.** Link pairs touching at home are excluded,

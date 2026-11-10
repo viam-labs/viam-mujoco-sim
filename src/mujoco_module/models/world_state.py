@@ -1,7 +1,8 @@
 """viam-labs:mujoco-sim:world_state - movable props for the 3D scene viewer.
 
 A world state store that publishes every non-fixed prop of the world, every
-live spawner parcel, and the conveyors' and scales' exact shapes, as
+scene file's free body (one transform per geom), every live spawner
+parcel, and the conveyors' and scales' exact shapes, as
 transforms with their live pose and shape: ADDED when one appears, UPDATED
 when it moves, REMOVED when a parcel returns to its pool or a conveyor or
 scale closes. Obstacles, arms and bases already reach the viewer through the
@@ -19,6 +20,7 @@ from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Self
 
 import mujoco
+import numpy as np
 from google.protobuf.field_mask_pb2 import FieldMask
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, Pose, PoseInFrame, ResourceName, Transform
@@ -35,6 +37,7 @@ from viam.utils import dict_to_struct, struct_to_dict
 
 from .. import FAMILY, NAMESPACE
 from ..meshes import mesh_geometry
+from ..scenes import geom_geometry, subtree_geoms
 from ..shapes import viewer_geometry
 from ..sim import SimManager
 
@@ -50,6 +53,29 @@ _Entry = tuple[
 
 
 _State = tuple[Pose, tuple[float, float, float, float]]
+
+
+def _geom_entry(
+    uid: bytes, label: str, model: mujoco.MjModel, data: mujoco.MjData, geom: int
+) -> _Entry:
+    """A scene prop's geom at its own pose (a body can hold several, each
+    offset and turned): the shape is built in the geom's frame and placed by
+    the transform."""
+    quat = np.zeros(4)
+    mujoco.mju_mat2Quat(quat, data.geom_xmat[geom])
+    w, x, y, z = (float(v) for v in quat)
+    pose = Quaternion(w, x, y, z).to_pose(*(float(v) * 1000.0 for v in data.geom_xpos[geom]))
+    material = int(model.geom_matid[geom])
+    rgba = model.geom_rgba[geom]
+    if material >= 0 and np.allclose(rgba, (0.5, 0.5, 0.5, 1.0)):
+        rgba = model.mat_rgba[material]
+    color = tuple(float(c) for c in rgba[:3])
+
+    def shape() -> tuple[Geometry, tuple[float, ...]]:
+        geometry = geom_geometry(model, None, geom, label)
+        return geometry, color
+
+    return uid, label, pose, (w, x, y, z), shape
 
 
 def _moved(old: _State, new: _State) -> bool:
@@ -130,6 +156,13 @@ class MujocoWorldState(WorldStateStore, EasyResource):
                 add(f"{name}#{dynamic.serial}", name, lambda name=name, dynamic=dynamic: (
                     viewer_geometry("box", dynamic.half_size, name), dynamic.color
                 ))
+            model, data = sim.model, sim.data
+            for prop in sim.scene_props():
+                for i, geom in enumerate(subtree_geoms(model, model.body(prop.name).id)):
+                    if model.geom_type[geom] == mujoco.mjtGeom.mjGEOM_HFIELD:
+                        continue
+                    label = prop.name if i == 0 else f"{prop.name}/{i}"
+                    out.append(_geom_entry(self._uuid(f"{prop.name}/{i}"), label, model, data, geom))
             for component, static in sim.static_shapes.items():
                 if mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_BODY, static.body) < 0:
                     continue  # the scene was rebuilt without it

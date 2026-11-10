@@ -1,0 +1,127 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {}
+    },
+    {
+      "name": "workbench",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:scene",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "mjcf": "scenes/workbench.xml"
+      }
+    },
+    {
+      "name": "bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 320.0,
+          "y": -220.0,
+          "z": 0.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "mesh": "meshes/bin.stl",
+        "color": [
+          0.3,
+          0.5,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "lite6",
+        "max_joint_deg_s": 30,
+        "max_joint_deg_s2": 60
+      }
+    },
+    {
+      "name": "pick-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "pick-arm",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 81.1
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "pick-arm",
+        "sensorless": true
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1200,
+          "y": 1200,
+          "z": 1000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [
+          0.3,
+          0,
+          0.15
+        ],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "world-state",
+      "api": "rdk:service:world_state_store",
+      "model": "viam-labs:mujoco-sim:world_state",
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "builtin",
+      "api": "rdk:service:motion",
+      "model": "rdk:builtin:builtin",
+      "attributes": {}
+    }
+  ]
+}

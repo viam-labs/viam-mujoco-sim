@@ -54,6 +54,12 @@
       "markdown_link": "README.md#model-viam-labsmujoco-simobstacle"
     },
     {
+      "model": "viam-labs:mujoco-sim:scene",
+      "api": "rdk:component:generic",
+      "short_description": "An MJCF scene file placed by its frame: simulated, planned against, its free bodies movable as props",
+      "markdown_link": "README.md#model-viam-labsmujoco-simscene"
+    },
+    {
       "model": "viam-labs:mujoco-sim:world_state",
       "api": "rdk:service:world_state_store",
       "short_description": "Streams movable props and parcels to the 3D scene viewer",
