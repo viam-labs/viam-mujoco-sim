@@ -58,6 +58,7 @@ class Scene:
     has_plane: bool
     geometries: tuple[Geometry, ...]  # planner geometry, scene frame, mm
     props: tuple[SceneProp, ...]
+    has_lights: bool = False  # any <light>: the world leaves its default sun out
 
 
 def copy_world_settings(world: mujoco.MjSpec, child: mujoco.MjSpec) -> None:
@@ -264,4 +265,4 @@ def load_scene(
             position=tuple(float(v) for v in spawn),
             orientation_wxyz=tuple(float(v) for v in orientation),
         ))
-    return Scene(spec, has_plane, tuple(geometries), tuple(props))
+    return Scene(spec, has_plane, tuple(geometries), tuple(props), has_lights=bool(spec.lights))

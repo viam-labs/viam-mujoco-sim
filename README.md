@@ -66,7 +66,7 @@ would for a real one.
 
 ## Model viam-labs:mujoco-sim:world
 
-Owns the MuJoCo scene: the floor, light, props and the step loop. Configure
+Owns the MuJoCo scene: the floor, lighting, props and the step loop. Configure
 exactly one; every other component names it in its `world` attribute, so
 viam-server starts it first. Sim time is paced to wall time by default.
 
@@ -102,6 +102,7 @@ viam-server starts it first. Sim time is paced to wall time by default.
 | `import_geometry` | list | No | `[]` | Names of components, of any module, whose geometry becomes fixed and physical; see [Importing geometry from other modules](#importing-geometry-from-other-modules). |
 | `floor_texture` | string | No | | A `.png` or `.jpg` image tiled across the floor: a path, an assets-relative path (the module bundles `textures/concrete.png` and `textures/cardboard.png`) or an https URL. |
 | `floor_texture_size` | float | No | `1` | One floor tile's edge in meters. Only with `floor_texture`. |
+| `lighting` | object | No | | Lights, headlight, skybox and render quality for cameras; see [Lighting](#lighting). |
 
 Each prop:
 
@@ -122,6 +123,47 @@ Each prop:
 | `dynamic_friction` | float | No | | Accepted for compatibility; MuJoCo has one sliding coefficient, so it is ignored. |
 
 Props are invisible to Viam's motion planner. For fixed scene geometry the planner should avoid, use [obstacles](#model-viam-labsmujoco-simobstacle).
+
+### Lighting
+
+`lighting` sets how cameras see the scene. Every key is optional; without it
+the world has one directional light straight down (the "sun"), MuJoCo's
+headlight, shadows, reflections, 4× anti-aliasing and a black sky.
+
+```json
+"lighting": {
+  "lights": [
+    {"type": "directional", "direction": [0.3, 0.2, -1], "color": [1, 0.95, 0.9]},
+    {"type": "spot", "position": [0.5, 0, 1.5], "direction": [0, 0, -1], "cutoff_deg": 40, "shadows": false}
+  ],
+  "headlight": 0.5,
+  "skybox": [[0.6, 0.75, 0.9], [0.2, 0.2, 0.25]]
+}
+```
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `lights` | list | the sun | The world's lights; setting it replaces the sun. `[]` leaves the world unlit except for the headlight and any scene lights. |
+| `keep_default_light` | bool | `false` | Keep the sun when a [scene file](#model-viam-labsmujoco-simscene) brings its own lights (it is dropped otherwise). Not with `lights`. |
+| `headlight` | float | `1` | Scales the light that follows each camera; 0 or more; `0` turns it off. |
+| `skybox` | [[r, g, b], [r, g, b]] | none (black sky) | A gradient sky, top color then bottom, 0 to 1. A skybox from a scene file (or a robot's MJCF) wins (logged). For an image sky, use a scene file. |
+| `shadows` | bool | `true` | Shadows on or off; off renders a little faster. |
+| `shadow_size` | int | `4096` | Shadow-map resolution, 1 to 16384; higher is sharper. |
+| `reflections` | bool | `true` | Reflections on or off; off renders a little faster. |
+| `antialias` | int | `4` | Multisample anti-aliasing samples, 0 to 16; 0 or 1 is off. |
+
+Each light:
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `type` | string | `"directional"` | `"directional"` (parallel rays, like the sun), `"spot"` or `"point"`. |
+| `position` | [x, y, z] | see description | Meters, in the world frame. A directional light's shadows are cast around its position, so by default it sits 3 m up along its ray through the world origin (`[0, 0, 3]` for a light straight down); set it above the cell when the cell is far from the origin. Other lights, and a directional light that doesn't point down, default to `[0, 0, 3]`. |
+| `direction` | [x, y, z] | `[0, 0, -1]` | Where it points; any length but zero. A point light ignores it. |
+| `color` | [r, g, b] | `[0.7, 0.7, 0.7]` | 0 to 1; also its brightness. |
+| `shadows` | bool | `true` | Whether it casts shadows. |
+| `cutoff_deg` | float | `45` | `"spot"` only: the cone's half-angle, up to 90. |
+
+Lights in a robot's MJCF (an arm, gripper or base) don't drop the sun.
 
 ### DoCommand
 
@@ -981,6 +1023,10 @@ What comes from the file:
   (`workbench/wall`). The world keeps its own `<option>`, `<size>`
   and `<visual>` settings; the file's own angle units still apply to it.
   Keyframes are dropped.
+- **Lights and sky**: a file with any light turns off the world's default sun
+  (unless the world sets `lighting.keep_default_light`; lights listed in
+  `lighting.lights` stay). A file's skybox replaces the world's
+  `lighting.skybox` (logged); with two such files, the first attached wins.
 - **The floor**: a colliding plane directly in the file's worldbody replaces the world's
   floor, and the world's `floor_texture` is then ignored (logged). A plane on
   a body, such as a wall, doesn't.

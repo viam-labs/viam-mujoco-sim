@@ -14,6 +14,12 @@
       "attributes": {
         "floor_texture": "textures/concrete.png",
         "floor_texture_size": 1,
+        "lighting": {
+          "lights": [
+            {"direction": [0.4, 0.3, -1], "color": [0.8, 0.75, 0.7]}
+          ],
+          "skybox": [[0.55, 0.7, 0.85], [0.25, 0.25, 0.3]]
+        },
         "props": [
           {
             "name": "pick_block",

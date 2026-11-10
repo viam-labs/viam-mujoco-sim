@@ -60,7 +60,9 @@ def scene_contribution(name: str, scene: Scene, position, quat) -> Contribution:
         frame = spec.worldbody.add_frame(pos=list(position), quat=list(quat))
         spec.attach(child, prefix=f"{name}/", frame=frame)
 
-    return Contribution(build=build, replaces_floor=scene.has_plane, props=scene.props)
+    return Contribution(
+        build=build, replaces_floor=scene.has_plane, brings_lights=scene.has_lights, props=scene.props
+    )
 
 
 class MujocoScene(Generic, EasyResource):

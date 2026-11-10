@@ -7,7 +7,7 @@ its own, but MjData is not thread-safe and GL contexts belong to the thread
 that created them, so a single owner needs no locks.
 
 The scene is rebuilt from scratch on every structural change: the world's
-floor, light and props, then each component's contribution. State carries
+floor, lighting and props, then each component's contribution. State carries
 across a rebuild by joint and actuator name.
 """
 
@@ -28,6 +28,7 @@ import numpy as np
 from viam.logging import getLogger
 from viam.proto.common import Geometry
 
+from . import lighting
 from .meshes import (
     UNTINTED_RGBA,
     MeshSource,
@@ -196,6 +197,123 @@ class PropSpec:
         )
 
 
+MAX_SHADOW_SIZE = 16384  # 32768 makes mujoco.Renderer fail (incomplete shadow framebuffer)
+MAX_ANTIALIAS = 16
+DEFAULT_LIGHT_HEIGHT_M = 3.0
+
+
+def _color(value: Any, label: str) -> tuple[float, ...]:
+    color = _vector(value, 3, label)
+    if any(not 0.0 <= item <= 1.0 for item in color):
+        raise ValueError(f"{label} must be 3 numbers from 0 to 1")
+    return color
+
+
+def _int_in(value: Any, low: int, high: int, label: str) -> int:
+    number = _finite(value, label)
+    if number != int(number):
+        raise ValueError(f"{label} must be a whole number")
+    if not low <= number <= high:
+        raise ValueError(f"{label} must be from {low} to {high}")
+    return int(number)
+
+
+@dataclass(frozen=True)
+class LightSpec:
+    type: str = "directional"  # a key of lighting.LIGHT_TYPES
+    position: tuple[float, ...] = (0.0, 0.0, DEFAULT_LIGHT_HEIGHT_M)
+    direction: tuple[float, ...] = (0.0, 0.0, -1.0)  # MuJoCo normalizes it
+    color: tuple[float, ...] = (0.7, 0.7, 0.7)  # diffuse; MuJoCo's default
+    shadows: bool = True
+    cutoff_deg: float = 45.0  # spot only
+
+    @classmethod
+    def parse(cls, raw: Any, label: str) -> "LightSpec":
+        if not isinstance(raw, Mapping):
+            raise ValueError(f"{label} must be an object")
+        kind = raw.get("type", "directional")
+        if kind not in lighting.LIGHT_TYPES:
+            raise ValueError(f'{label}.type must be "directional", "spot" or "point", got {kind!r}')
+        direction = _vector(raw.get("direction", [0, 0, -1]), 3, f"{label}.direction")
+        if not any(direction):
+            raise ValueError(f"{label}.direction must not be all zeros")
+        cutoff = 45.0
+        if "cutoff_deg" in raw:
+            if kind != "spot":
+                raise ValueError(f'{label}.cutoff_deg only applies to type "spot"')
+            cutoff = _finite(raw["cutoff_deg"], f"{label}.cutoff_deg")
+            if not 0.0 < cutoff <= 90.0:
+                raise ValueError(f"{label}.cutoff_deg must be in (0, 90]")
+        if "position" in raw:
+            position = _vector(raw["position"], 3, f"{label}.position")
+        elif kind == "directional" and direction[2] < 0.0:
+            # a directional light's shadow map is centred on its position: put
+            # it 3 m up the ray that reaches the world origin
+            scale = DEFAULT_LIGHT_HEIGHT_M / -direction[2]
+            position = tuple(-item * scale for item in direction)
+            if not all(math.isfinite(item) for item in position):
+                position = (0.0, 0.0, DEFAULT_LIGHT_HEIGHT_M)
+        else:
+            position = (0.0, 0.0, DEFAULT_LIGHT_HEIGHT_M)
+        return cls(
+            type=kind,
+            position=position,
+            direction=direction,
+            color=_color(raw.get("color", [0.7, 0.7, 0.7]), f"{label}.color"),
+            shadows=_strict_bool(raw.get("shadows", True), f"{label}.shadows"),
+            cutoff_deg=cutoff,
+        )
+
+
+@dataclass(frozen=True)
+class LightingConfig:
+    """The world's `lighting` attribute (applied by lighting.py). Defaults
+    render as the world did before it existed."""
+
+    lights: tuple[LightSpec, ...] | None = None  # None: the default sun
+    keep_default_light: bool = False
+    headlight: float = 1.0  # scales MuJoCo's headlight; 0 turns it off
+    skybox: tuple[tuple[float, ...], tuple[float, ...]] | None = None  # (top, bottom) rgb
+    shadows: bool = True
+    shadow_size: int = 4096
+    reflections: bool = True
+    antialias: int = 4
+
+    @classmethod
+    def parse(cls, raw: Any) -> "LightingConfig":
+        if not isinstance(raw, Mapping):
+            raise ValueError("lighting must be an object")
+        lights = None
+        if "lights" in raw:
+            if not isinstance(raw["lights"], (list, tuple)):
+                raise ValueError("lighting.lights must be a list")
+            if "keep_default_light" in raw:
+                raise ValueError("lighting.keep_default_light only applies without lighting.lights")
+            lights = tuple(
+                LightSpec.parse(light, f"lighting.lights[{index}]")
+                for index, light in enumerate(raw["lights"])
+            )
+        skybox = None
+        if "skybox" in raw:
+            value = raw["skybox"]
+            if not isinstance(value, (list, tuple)) or len(value) != 2:
+                raise ValueError("lighting.skybox must be two colors, [[r, g, b], [r, g, b]] (top, bottom)")
+            skybox = (_color(value[0], "lighting.skybox[0]"), _color(value[1], "lighting.skybox[1]"))
+        headlight = _finite(raw.get("headlight", 1.0), "lighting.headlight")
+        if headlight < 0.0:
+            raise ValueError("lighting.headlight must be non-negative")
+        return cls(
+            lights=lights,
+            keep_default_light=_strict_bool(raw.get("keep_default_light", False), "lighting.keep_default_light"),
+            headlight=headlight,
+            skybox=skybox,
+            shadows=_strict_bool(raw.get("shadows", True), "lighting.shadows"),
+            shadow_size=_int_in(raw.get("shadow_size", 4096), 1, MAX_SHADOW_SIZE, "lighting.shadow_size"),
+            reflections=_strict_bool(raw.get("reflections", True), "lighting.reflections"),
+            antialias=_int_in(raw.get("antialias", 4), 0, MAX_ANTIALIAS, "lighting.antialias"),
+        )
+
+
 @dataclass(frozen=True)
 class WorldConfig:
     physics_dt: float = 0.002
@@ -203,6 +321,7 @@ class WorldConfig:
     props: tuple[PropSpec, ...] = ()
     floor_texture: str | None = None  # image source; the world loads it
     floor_texture_size: float = 1.0  # one tile's edge, meters
+    lighting: LightingConfig = LightingConfig()
 
     @classmethod
     def from_attrs(cls, attrs: Mapping[str, Any]) -> "WorldConfig":
@@ -222,6 +341,9 @@ class WorldConfig:
             floor_texture=floor_texture,
             floor_texture_size=_positive(
                 attrs.get("floor_texture_size", 1.0), "floor_texture_size"
+            ),
+            lighting=LightingConfig.parse(
+                {} if attrs.get("lighting") is None else attrs["lighting"]
             ),
         )
 
@@ -258,6 +380,7 @@ class Contribution:
     on reset(). render_sizes are (width, height) renderers built and warmed
     with each model, so a camera's first frame doesn't stall the step loop.
     replaces_floor leaves the world's floor out (a scene file brings its own);
+    brings_lights leaves the default sun out (a scene file with lights);
     props are movables the prop commands address by name (a scene's free
     bodies: name, position, orientation_wxyz, fixed)."""
 
@@ -265,6 +388,7 @@ class Contribution:
     init: Callable[[mujoco.MjModel, mujoco.MjData], None] | None = None
     render_sizes: tuple[tuple[int, int], ...] = ()
     replaces_floor: bool = False
+    brings_lights: bool = False
     props: tuple[Any, ...] = ()
 
 
@@ -334,6 +458,7 @@ class SimManager:
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._warned: set[str] = set()
         self._floor_warned: list[str] = []  # the floor-replacing scenes last warned about
+        self._skybox_warned: list[str] = []  # the skyboxes last warned about
 
     # ------------------------------------------------------------------
     # threading
@@ -475,11 +600,8 @@ class SimManager:
         spec = mujoco.MjSpec()
         spec.option.timestep = self.cfg.physics_dt
         spec.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
-        spec.worldbody.add_light(
-            name="sun",
-            pos=[0, 0, 3],
-            dir=[0, 0, -1],
-            type=mujoco.mjtLightType.mjLIGHT_DIRECTIONAL,
+        lighting.apply(
+            spec, self.cfg.lighting, any(c.brings_lights for c in self._contributions.values())
         )
         floored = sorted(n for n, c in self._contributions.items() if c.replaces_floor)
         if floored and self.cfg.floor_texture is not None and self._floor_warned != floored:
@@ -537,6 +659,10 @@ class SimManager:
                 break  # what's left waits for a parent that isn't configured
             built |= done
             waiting = {name: c for name, c in waiting.items() if name not in done}
+        skyboxes = lighting.add_skybox(spec, self.cfg.lighting)
+        if skyboxes and self._skybox_warned != skyboxes:
+            LOGGER.warning("lighting.skybox is ignored: %s is already in the scene", ", ".join(skyboxes))
+        self._skybox_warned = skyboxes
         return spec, built
 
     def _rebuild(self) -> None:
@@ -759,6 +885,8 @@ class SimManager:
         renderer = self._renderers.get((width, height))
         if renderer is None:
             renderer = mujoco.Renderer(self.model, height=height, width=width)
+            assert self.cfg is not None
+            lighting.set_render_flags(renderer.scene, self.cfg.lighting)
             self._renderers[(width, height)] = renderer
         return renderer
 

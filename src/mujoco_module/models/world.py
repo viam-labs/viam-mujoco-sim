@@ -23,6 +23,13 @@ Attributes:
                         the same kind of image, on each of its faces. Cameras
                         see textures; the 3D viewer uses color.
   floor_texture_size (float) - one floor tile's edge in meters (default 1)
+  lighting (object)   - how cameras see the scene: lights ({type:
+                        "directional" | "spot" | "point", position,
+                        direction, color, shadows, cutoff_deg}; replaces the
+                        default sun), keep_default_light, headlight, skybox
+                        ([[r,g,b] top, [r,g,b] bottom]), shadows, shadow_size,
+                        reflections, antialias. A scene file with lights
+                        drops the default sun. See the README.
 
 DoCommand: status, play, pause, reset, set_prop_pose, get_prop_pose,
 park_props, reimport. Shapes match the viam-labs:isaac-sim world.
