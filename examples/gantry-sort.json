@@ -1,0 +1,73 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {"name": "red_1", "type": "cube", "size": 0.06, "position": [-0.075, -0.27, 0.43], "mass": 0.3, "color": [0.8, 0.2, 0.2]},
+          {"name": "blue_1", "type": "cube", "size": 0.06, "position": [0.075, -0.27, 0.43], "mass": 0.3, "color": [0.2, 0.35, 0.8]},
+          {"name": "red_2", "type": "cube", "size": 0.06, "position": [-0.075, -0.09, 0.43], "mass": 0.3, "color": [0.8, 0.2, 0.2]},
+          {"name": "blue_2", "type": "cube", "size": 0.06, "position": [0.075, -0.09, 0.43], "mass": 0.3, "color": [0.2, 0.35, 0.8]},
+          {"name": "red_3", "type": "cube", "size": 0.06, "position": [-0.075, 0.09, 0.43], "mass": 0.3, "color": [0.8, 0.2, 0.2]},
+          {"name": "blue_3", "type": "cube", "size": 0.06, "position": [0.075, 0.09, 0.43], "mass": 0.3, "color": [0.2, 0.35, 0.8]},
+          {"name": "red_4", "type": "cube", "size": 0.06, "position": [-0.075, 0.27, 0.43], "mass": 0.3, "color": [0.8, 0.2, 0.2]},
+          {"name": "blue_4", "type": "cube", "size": 0.06, "position": [0.075, 0.27, 0.43], "mass": 0.3, "color": [0.2, 0.35, 0.8]}
+        ]
+      }
+    },
+    {
+      "name": "table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 0, "y": 0, "z": 200}, "geometry": {"type": "box", "x": 1000, "y": 800, "z": 400}},
+      "attributes": {"world": "sim-world", "color": [0.55, 0.45, 0.35]}
+    },
+    {
+      "name": "red-bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": -350, "y": 0, "z": 400}},
+      "attributes": {"world": "sim-world", "mesh": "meshes/bin.stl", "scale": [2, 2, 1.5], "color": [0.8, 0.3, 0.3]}
+    },
+    {
+      "name": "blue-bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 350, "y": 0, "z": 400}},
+      "attributes": {"world": "sim-world", "mesh": "meshes/bin.stl", "scale": [2, 2, 1.5], "color": [0.3, 0.45, 0.8]}
+    },
+    {
+      "name": "gantry",
+      "api": "rdk:component:gantry",
+      "model": "viam-labs:mujoco-sim:gantry",
+      "frame": {"parent": "world", "translation": {"x": -500, "y": -400, "z": 1050}},
+      "attributes": {"world": "sim-world", "lengths_mm": [1000, 800, 500], "max_speed_mm_s": 500}
+    },
+    {
+      "name": "cup",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {"parent": "gantry", "translation": {"x": 0, "y": 0, "z": 130}, "geometry": {"type": "box", "x": 90, "y": 90, "z": 130, "translation": {"x": 0, "y": 0, "z": -65}}},
+      "attributes": {"world": "sim-world", "mount": "gantry", "asset": "robotiq_epick"}
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {"parent": "world", "translation": {"x": 2000, "y": -1800, "z": 1800}},
+      "attributes": {"world": "sim-world", "target": [0, 0, 0.5], "width": 1280, "height": 720}
+    }
+  ],
+  "services": [
+    {"name": "world-state", "api": "rdk:service:world_state_store", "model": "viam-labs:mujoco-sim:world_state", "attributes": {"world": "sim-world"}}
+  ]
+}

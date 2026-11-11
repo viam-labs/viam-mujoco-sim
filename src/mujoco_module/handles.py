@@ -1123,7 +1123,7 @@ class GripperHandle:
         label = f"gripper {name}"
         handle = sim.run(lambda: sim.arms.get(arm))
         if handle is None:
-            raise RuntimeError(f"arm {arm!r} is not in the scene; configure the arm first")
+            raise RuntimeError(f"mount {arm!r} is not in the scene; configure the arm or gantry first")
         mjcf = attrs.get("mjcf")
         # an arm's own gripper drives a body below its last joint; another limb's
         # actuators don't count. An arm on its own file falls back to every
@@ -1134,7 +1134,7 @@ class GripperHandle:
         self._robot: str | None = handle.robot
         if mjcf is None:
             model, prefix = handle.model, handle.file_prefix
-            where = f"arm {arm} ({f'robot {handle.robot}' if handle.robot else handle.mjcf})"
+            where = f"mount {arm} ({f'robot {handle.robot}' if handle.robot else handle.mjcf})"
             named = attrs.get("actuator")
             actuator = robots.gripper_actuator(
                 model, where, exclude=handle.actuators, name=named,

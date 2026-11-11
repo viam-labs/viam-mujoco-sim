@@ -19,8 +19,9 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 |---|---|---|
 | [`viam-labs:mujoco-sim:world`](#model-viam-labsmujoco-simworld) | `generic` | Owns the scene, props and step loop. Configure exactly one. |
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame on the world or a base, with joint control. |
-| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF or URDF gripper. |
-| [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
+| [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85 or ePick, or your own MJCF or URDF gripper, on an arm or a gantry. |
+| [`viam-labs:mujoco-sim:gantry`](#model-viam-labsmujoco-simgantry) | `gantry` | An XYZ Cartesian gantry generated from its travel, planned by the motion service like an arm. |
+| [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's or gantry's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, TIAGo++'s base, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D or 3D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
@@ -65,6 +66,8 @@ de-palletizing cell (see [De-palletizing](#de-palletizing)), and
 with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), and
 [`examples/conveyor-pick.json`](examples/conveyor-pick.json) a UR5e picking
 parcels off the running belt (see [Conveyor pick](#conveyor-pick)), and
+[`examples/gantry-sort.json`](examples/gantry-sort.json) an XYZ gantry
+sorting blocks into bins (see [Gantry sort](#gantry-sort)), and
 [`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
 between two tables (see [Mobile manipulation](#mobile-manipulation)), and
 [`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
@@ -466,9 +469,9 @@ millimetres into an obstacle; where it is fatter, the arm stops short. Set
 
 ## Model viam-labs:mujoco-sim:gripper
 
-A gripper on a mujoco-sim arm, driven by one actuator: the arm MJCF's own
+A gripper on a mujoco-sim arm or [gantry](#model-viam-labsmujoco-simgantry), driven by one actuator: the arm MJCF's own
 (the Lite6's), a bundled gripper, or your own gripper MJCF, which is attached
-at the arm's `flange_site`. It is binary: `Grab` and `Open` latch the command
+at the arm's `flange_site` (a gantry's column foot). It is binary: `Grab` and `Open` latch the command
 and return before the jaws move, like the real
 Lite6 gripper. A suction gripper (an `<adhesion>` actuator) has no jaws: `Grab` turns the
 vacuum on and `Open` turns it off. Adhesion pulls only through the cup's
@@ -503,7 +506,7 @@ streams them.
   },
   "attributes": {
     "world": "sim-world",
-    "arm": "pick-arm",
+    "mount": "pick-arm",
     "sensorless": true
   }
 }
@@ -517,8 +520,8 @@ fingertip center: use the TCP value from the table above, or for your own
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `arm` | string | Yes | | The arm this gripper belongs to. |
-| `asset` | string | No | `"lite6_gripper"` | A bundled gripper, see above. An attached gripper on an arm whose MJCF already has one (the `lite6`) is an error. |
+| `mount` | string | Yes | | The arm or gantry this gripper is on. `arm` is accepted as its older name; set one of the two. |
+| `asset` | string | No | `"lite6_gripper"` | A bundled gripper, see above. An attached gripper on an arm whose MJCF already has one (the `lite6`) is an error. On a gantry set `asset` or `mjcf`: the default is the Lite6's own gripper. |
 | `mjcf` | string | No | | Instead of `asset`: your gripper's MJCF (`.xml`) or URDF (`.urdf`), attached at the arm's flange site; a path like the arm's `mjcf`. An MJCF needs exactly one actuator, and its root bodies and jaw joint must be named; a suction gripper has an `<adhesion>` actuator on its cup body instead of a jaw. A URDF needs exactly one movable joint that isn't a `<mimic>`, with `<limit effort>` and a range: the module drives it with a position servo sized like a URDF arm's, and `<mimic>` fingers follow it. Use an MJCF for other designs. |
 | `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | A `.urdf` `mjcf`'s meshes, as for the arm. |
 | `actuator` | string | No | inferred | The gripper's actuator. |
@@ -553,11 +556,83 @@ Its top-level answer is the latched grip when `sensorless` is true, and
 `firm_grasp` otherwise. To wait for a grasp, poll until `meta.firm_grasp` is
 true.
 
+## Model viam-labs:mujoco-sim:gantry
+
+An XYZ Cartesian gantry: a bridge rides two side beams along x, a carriage
+rides the bridge along y, and a column hangs from the carriage and moves
+down. The module generates its MuJoCo model and its Viam kinematics from the
+travel, posts and beams included, so the motion service plans it like an arm
+and the 3D scene shows it. A gripper, camera or force-torque sensor mounts
+on its column as it would on an arm's end effector.
+
+### Configuration
+
+```json
+{
+  "name": "gantry",
+  "api": "rdk:component:gantry",
+  "model": "viam-labs:mujoco-sim:gantry",
+  "frame": { "parent": "world", "translation": { "x": -500, "y": -400, "z": 1050 } },
+  "attributes": { "world": "sim-world", "lengths_mm": [1000, 800, 500], "max_speed_mm_s": 500 }
+}
+```
+
+The frame is the tool point with every axis at 0: the near corner of the
+travel (least x and y) with the column fully raised. Its parent must be
+`world`, it can't be rotated yet, and its `z` must leave the column 100 mm
+above the floor at full travel (at least `lengths_mm` z + 100). Positions are
+mm from there, each from 0 to its length; **z grows downward**. Four posts
+stand at the corners, 100 mm outside the travel, from the floor up to the
+side beams.
+
+The tool frame points down (orientation vector (0, 0, -1), theta 0), so a
+gripper uses the frame it would use on an arm (the ePick: `"translation":
+{"z": 130}`) with `"mount"` set to the gantry:
+
+```json
+{
+  "name": "cup",
+  "api": "rdk:component:gripper",
+  "model": "viam-labs:mujoco-sim:gripper",
+  "frame": {
+    "parent": "gantry",
+    "translation": { "x": 0, "y": 0, "z": 130 },
+    "geometry": { "type": "box", "x": 90, "y": 90, "z": 130, "translation": { "x": 0, "y": 0, "z": -65 } }
+  },
+  "attributes": { "world": "sim-world", "mount": "gantry", "asset": "robotiq_epick" }
+}
+```
+
+The tool can't turn: a motion-service goal for something on the gantry must
+point straight down, or no plan reaches it.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `lengths_mm` | [x, y, z] | Yes | | Each axis's travel in mm. |
+| `max_speed_mm_s` | float | No | `500` | Each axis's top speed. |
+| `max_accel_mm_s2` | float | No | `2000` | Each axis's acceleration. |
+| `move_timeout_sec` | float | No | `30` | How long a move may take to settle, after its path ends, before it fails. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetPosition` | [x, y, z] mm. |
+| `MoveToPosition` | A straight line: every axis arrives at once, none faster than its speed (`speeds_mm_per_sec`, capped at `max_speed_mm_s`; `max_speed_mm_s` when empty, as the motion service sends, which RDK logs as "speedMmPerSec is nil") or `max_accel_mm_s2`. Returns once within 1 mm and still. A position outside the travel fails before anything moves. A newer move or `Stop` makes it fail as superseded. |
+| `GetLengths` | `lengths_mm`. |
+| `Home` | True at once: the sim always knows where the axes are. |
+| `Stop` | Holds where it is. |
+| `IsMoving` | True while a `MoveToPosition` is running. |
+| `GetKinematics` | The generated kinematics: three prismatic joints and the structure's boxes. |
+
 ## Model viam-labs:mujoco-sim:camera
 
 An RGB-D camera rendered offscreen. Place it on the world with its standard
-frame and aim it at a point with `target`, or mount it on an arm's end effector
-by making the arm its frame parent.
+frame and aim it at a point with `target`, or mount it on an arm's (or a
+gantry's) end effector by making the arm (or gantry) its frame parent.
 
 ### Configuration
 
@@ -1175,7 +1250,7 @@ TIAGo++'s upper body (`tiago`, riding the `pal_tiago_base` base; see
   "api": "rdk:component:gripper",
   "model": "viam-labs:mujoco-sim:gripper",
   "frame": { "parent": "left-arm" },
-  "attributes": { "world": "sim-world", "arm": "left-arm", "asset": "aloha" }
+  "attributes": { "world": "sim-world", "mount": "left-arm", "asset": "aloha" }
 }
 ```
 
@@ -1820,6 +1895,35 @@ one is headed, so the arm doesn't stop. `stream` moves smoothly, but
 trajex replans its timing whenever the target's speed changes, so it lags
 most on the descent and grips further from the middle.
 
+## Gantry sort
+
+[`examples/gantry-sort.json`](examples/gantry-sort.json) is a table under a
+1000 x 800 x 500 mm gantry with an ePick on its column, eight 60 mm blocks on
+the table (`red_1`..`red_4`, `blue_1`..`blue_4`) and a bin for each colour.
+[`examples/gantry_sort.py`](examples/gantry_sort.py) moves every block into
+its colour's bin:
+
+```sh
+uv run python examples/gantry_sort.py <machine address> <api key id> <api key> [--direct]
+```
+
+It resets the world, then for each block reads its pose with the world's
+`get_prop_pose`, goes over it, down to its top, grabs, checks the cup holds
+it, carries it over a free quarter of its bin, lowers it and lets go. At the
+end it checks every block is in its bin. By default each move is
+`motion.move` on the gripper, with the other blocks as obstacles and the held
+block as a transform on the gripper; the planner moves the gantry's three
+axes. With `--direct` the same moves are `gantry.move_to_position` calls, the
+world point turned into axis positions by the script. On a MacBook both sort
+all eight in about 44 s.
+
+Give a `--direct` run a few seconds before starting the next one. A client
+that drove the gantry itself leaves it in its session's care: when that
+session expires, a moment after the script exits, viam-server stops the
+gantry, and a move the next run has started fails as superseded. A
+motion-service run doesn't hand the gantry to its session, so it leaves
+nothing behind.
+
 ## Mobile base, SLAM and navigation
 
 A simulated rover can map its world and navigate it with
@@ -2015,7 +2119,7 @@ offset is zero:
 { "name": "head-cam", "api": "rdk:component:camera", "model": "viam-labs:mujoco-sim:camera",
   "frame": { "parent": "head" }, "attributes": { "world": "sim-world" } },
 { "name": "left-gripper", "api": "rdk:component:gripper", "model": "viam-labs:mujoco-sim:gripper",
-  "frame": { "parent": "left-arm" }, "attributes": { "world": "sim-world", "arm": "left-arm", "asset": "tiago" } }
+  "frame": { "parent": "left-arm" }, "attributes": { "world": "sim-world", "mount": "left-arm", "asset": "tiago" } }
 ```
 
 It starts at its `home` keyframe: torso at 175 mm, upper arms down with the

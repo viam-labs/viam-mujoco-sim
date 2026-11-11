@@ -1,6 +1,9 @@
 import pytest
+from viam.proto.app.robot import ComponentConfig
+from viam.utils import dict_to_struct
 
 from mujoco_module.handles import ArmHandle, GripperHandle
+from mujoco_module.models.gripper import MujocoGripper
 
 
 @pytest.fixture
@@ -46,7 +49,7 @@ def test_grasp_holds_and_lifts_block(sim, cell):
 
 
 def test_gripper_requires_attached_arm(sim):
-    with pytest.raises(RuntimeError, match="configure the arm first"):
+    with pytest.raises(RuntimeError, match="configure the arm or gantry first"):
         GripperHandle(sim, "pick-gripper", "missing-arm", {})
 
 
@@ -386,3 +389,18 @@ def test_suction_model_reports_vacuum_and_keeps_it_on_stop(running_sim, tmp_path
     assert status.is_holding_something is False
     asyncio.run(gripper.open())
     assert asyncio.run(gripper.is_holding_something()).meta["vacuum"] == 0.0
+
+
+def test_a_gripper_names_its_mount_once():
+    def deps(attrs):
+        return MujocoGripper.validate_config(ComponentConfig(name="g", attributes=dict_to_struct(attrs)))[0]
+
+    assert deps({"world": "w", "mount": "gantry"}) == ["w", "gantry"]
+    assert deps({"world": "w", "arm": "pick-arm"}) == ["w", "pick-arm"]  # its older name
+    for attrs, message in (
+        ({"world": "w"}, 'set "mount"'),
+        ({"world": "w", "mount": "gantry", "arm": "gantry"}, "not both"),
+        ({"world": "w", "mount": ""}, '"mount" must be'),
+    ):
+        with pytest.raises(ValueError, match=message):
+            deps(attrs)

@@ -1,8 +1,9 @@
-"""viam-labs:mujoco-sim:gripper - a gripper on a mujoco-sim arm.
+"""viam-labs:mujoco-sim:gripper - a gripper on a mujoco-sim arm or gantry.
 
 Attributes:
   world (string, required)  - name of the viam-labs:mujoco-sim:world component
-  arm (string, required)    - the viam-labs:mujoco-sim:arm it is on
+  mount (string, required)  - the viam-labs:mujoco-sim arm or gantry it is on
+                              ("arm" is accepted as its older name)
   asset (string)            - "lite6_gripper": the arm MJCF's own gripper (default),
                               or "robotiq_2f85" / "robotiq_epick" (suction), a
                               bundled MJCF attached like mjcf
@@ -52,6 +53,18 @@ from ..sim import GRIPPER_ASSETS, SimManager
 from .utils import finite_number, get_attrs, positive_number, validate_sim_component
 
 
+def _mount(name: str, attrs: dict) -> str:
+    """The arm or gantry the gripper is on: `mount`, or `arm` (its older name)."""
+    if "mount" in attrs and "arm" in attrs:
+        raise ValueError(f'{name}: set "mount" or its older name "arm", not both')
+    if "mount" not in attrs and "arm" not in attrs:
+        raise ValueError(f'{name}: set "mount" to the mujoco-sim arm or gantry this gripper is on')
+    mount = attrs.get("mount", attrs.get("arm"))
+    if not mount or not isinstance(mount, str):
+        raise ValueError(f'{name}: "mount" must be the name of a mujoco-sim arm or gantry')
+    return mount
+
+
 class MujocoGripper(Gripper, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "gripper")
 
@@ -77,9 +90,7 @@ class MujocoGripper(Gripper, EasyResource):
             config, needs_asset=False, world_frame_only=False
         )
         attrs = get_attrs(config)
-        arm = attrs.get("arm")
-        if not arm or not isinstance(arm, str):
-            raise ValueError(f'{config.name}: set "arm" to the arm this gripper is part of')
+        mount = _mount(config.name, attrs)
         if attrs.get("asset", "lite6_gripper") not in GRIPPER_ASSETS:
             raise ValueError(f"{config.name}: asset must be one of {sorted(GRIPPER_ASSETS)}")
         if "mjcf" in attrs:
@@ -98,7 +109,7 @@ class MujocoGripper(Gripper, EasyResource):
             if key in attrs:
                 finite_number(config.name, attrs, key, 0.0)
         positive_number(config.name, attrs, "grip_force_n", DEFAULT_GRIP_FORCE_N)
-        return [*world, arm], []
+        return [*world, mount], []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
@@ -107,7 +118,7 @@ class MujocoGripper(Gripper, EasyResource):
         attrs = get_attrs(config)
         self._sensorless = bool(attrs.get("sensorless", False))
         self._closed = False
-        self._handle = GripperHandle(SimManager.get(), self.name, str(attrs["arm"]), attrs)
+        self._handle = GripperHandle(SimManager.get(), self.name, _mount(self.name, attrs), attrs)
 
     async def close(self) -> None:
         if self._handle is not None:

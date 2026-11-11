@@ -18,9 +18,15 @@
       "markdown_link": "README.md#model-viam-labsmujoco-simarm"
     },
     {
+      "model": "viam-labs:mujoco-sim:gantry",
+      "api": "rdk:component:gantry",
+      "short_description": "An XYZ Cartesian gantry, generated from its travel, that the motion service plans like an arm",
+      "markdown_link": "README.md#model-viam-labsmujoco-simgantry"
+    },
+    {
       "model": "viam-labs:mujoco-sim:gripper",
       "api": "rdk:component:gripper",
-      "short_description": "A gripper on a mujoco-sim arm: the Lite6's, a Robotiq 2F-85 or ePick, or your own MJCF or URDF",
+      "short_description": "A gripper on a mujoco-sim arm or gantry: the Lite6's, a Robotiq 2F-85 or ePick, or your own MJCF or URDF",
       "markdown_link": "README.md#model-viam-labsmujoco-simgripper"
     },
     {
