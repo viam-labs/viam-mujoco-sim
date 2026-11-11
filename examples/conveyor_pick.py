@@ -13,9 +13,10 @@ takes to turn into motion. --csv writes every tick.
 The modes, all fed the same goal every tick:
 
 - teleop: the motion service's teleop DoCommands (teleop_start, teleop_move,
-  teleop_stop). RDK plans each goal (IK and collision checks against the
-  belt's rails) in the background and plays the newest plan without waiting
-  for the arm to stop.
+  teleop_stop). RDK plans each goal in the background and plays the newest
+  plan without waiting for the arm to stop. RDK v1.15's teleop plans
+  without the world_state obstacles it is given (the belt's rails here):
+  only the frame system's own geometry is checked.
 - stream: the motion service's TempStreamArmJointPositions session, which
   times a stream of joint targets for the arm. It takes joints, not poses, so
   this script solves IK itself, on the module's own UR5e kinematics; there

@@ -1796,7 +1796,7 @@ The modes send the same goals three ways:
 
 | Mode | API | Rate | Lookahead |
 |---|---|---|---|
-| `teleop` | The motion service's `teleop_start`, `teleop_move` and `teleop_stop` DoCommands. RDK plans each goal in the background, with the belt's rails as obstacles, and runs the newest plan with `MoveThroughJointPositions` and `waitAtEnd` false. | 10 Hz | 0.4 s |
+| `teleop` | The motion service's `teleop_start`, `teleop_move` and `teleop_stop` DoCommands. RDK plans each goal in the background and runs the newest plan with `MoveThroughJointPositions` and `waitAtEnd` false. | 10 Hz | 0.4 s |
 | `stream` | The motion service's `TempStreamArmJointPositions` session, which times a stream of joint targets with trajex. It takes joints, not poses, so the script solves IK itself on the module's UR5e kinematics, and nothing checks for collisions. Released viam-server builds refuse the session: it needs a build with the `viam_rdk_cgo_have_cxx20_rt` tag. | 20 Hz | 0.5 s |
 | `move` | The motion service's `Move` (the arm leaves `MoveToPosition` to it), once per goal. Each call plans, runs and waits for the arm to stop. | as fast as `Move` returns | 1.0 s |
 
@@ -1811,7 +1811,9 @@ On a MacBook, one parcel each (viam-server v1.15.0, built with trajex):
 | `stream` | 0.3 m/s | 1.5 s | 2.8 s | 4.5, -29.9, 2.6 | 145 mm |
 | `move` | 0.3 m/s | never | | | |
 
-`move` stops between goals, about 1 s per goal at 0.1 m/s and 1.4 s at
+RDK v1.15's teleop plans without the `world_state` obstacles it is given (the
+script's belt rails), so only the frame system's own geometry is checked, and
+`stream` checks nothing. `move` stops between goals, about 1 s per goal at 0.1 m/s and 1.4 s at
 0.3 m/s; the parcel crosses the reach in under 3 s at 0.3 m/s, too few goals
 to lock on. `teleop` holds tightest: each plan starts from where the last
 one is headed, so the arm doesn't stop. `stream` moves smoothly, but
