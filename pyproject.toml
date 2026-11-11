@@ -10,7 +10,7 @@ dependencies = [
     "numpy>=1.26.0",
     "pillow>=11.2.1",
     "trimesh>=5.2.0",
-    "viam-sdk>=0.85.1",
+    "viam-sdk>=0.85.2",
 ]
 
 [dependency-groups]

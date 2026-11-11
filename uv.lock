@@ -848,7 +848,7 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26.0" },
     { name = "pillow", specifier = ">=11.2.1" },
     { name = "trimesh", specifier = ">=5.2.0" },
-    { name = "viam-sdk", specifier = ">=0.85.1" },
+    { name = "viam-sdk", specifier = ">=0.85.2" },
 ]
 
 [package.metadata.requires-dev]
