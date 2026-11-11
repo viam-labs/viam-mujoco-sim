@@ -1,0 +1,217 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "block",
+            "type": "cube",
+            "position": [-0.2, 2.5, 0.47],
+            "size": 0.04,
+            "mass": 0.05,
+            "color": [1, 0, 0],
+            "static_friction": 1.5,
+            "dynamic_friction": 1.5
+          }
+        ]
+      }
+    },
+    {
+      "name": "table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {"x": 0, "y": 2650, "z": 225},
+        "geometry": {"type": "box", "x": 800, "y": 500, "z": 450}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [0.55, 0.45, 0.35]
+      }
+    },
+    {
+      "name": "shelf",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {"x": -2650, "y": 1300, "z": 400},
+        "geometry": {"type": "box", "x": 500, "y": 800, "z": 800}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [0.35, 0.45, 0.55]
+      }
+    },
+    {
+      "name": "tiago-base",
+      "api": "rdk:component:base",
+      "model": "viam-labs:mujoco-sim:base",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "pal_tiago_base"
+      }
+    },
+    {
+      "name": "tiago",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:robot",
+      "frame": {
+        "parent": "tiago-base",
+        "translation": {"x": 0, "y": 0, "z": 0}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "tiago"
+      }
+    },
+    {
+      "name": "torso",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "tiago"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "tiago",
+        "asset": "tiago_torso"
+      }
+    },
+    {
+      "name": "left-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "torso",
+        "translation": {"x": 0, "y": 0, "z": 0}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "tiago",
+        "asset": "tiago_arm_left",
+        "max_joint_deg_s": 60
+      }
+    },
+    {
+      "name": "right-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "torso",
+        "translation": {"x": 0, "y": 0, "z": 0}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "tiago",
+        "asset": "tiago_arm_right",
+        "max_joint_deg_s": 60
+      }
+    },
+    {
+      "name": "head",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "torso",
+        "translation": {"x": 0, "y": 0, "z": 0}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "tiago",
+        "asset": "tiago_head"
+      }
+    },
+    {
+      "name": "left-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "left-arm"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "left-arm",
+        "asset": "tiago"
+      }
+    },
+    {
+      "name": "right-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "right-arm"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "right-arm",
+        "asset": "tiago"
+      }
+    },
+    {
+      "name": "head-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "head"
+      },
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "odometry",
+      "api": "rdk:component:movement_sensor",
+      "model": "viam-labs:mujoco-sim:movement_sensor",
+      "attributes": {
+        "world": "sim-world",
+        "base": "tiago-base"
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {"x": 1500, "y": -1500, "z": 3000}
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [-1.2, 1.6, 0.5],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "world-state",
+      "api": "rdk:service:world_state_store",
+      "model": "viam-labs:mujoco-sim:world_state",
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "builtin",
+      "api": "rdk:service:motion",
+      "model": "rdk:builtin:builtin",
+      "attributes": {}
+    }
+  ]
+}

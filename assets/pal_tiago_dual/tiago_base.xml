@@ -1,0 +1,72 @@
+<mujoco model="tiago_base">
+  <compiler angle="radian" meshdir="./assets/" />
+  <option integrator="implicitfast" />
+  <default>
+    <geom type="mesh" contype="0" group="1" />
+    <default class="arm">
+      <joint frictionloss="1" />
+      <geom contype="1" />
+    </default>
+    <default class="wheel">
+      <geom condim="6" />
+    </default>
+    <default class="position">
+      <general input="pos" biastype="affine" biasprm="0 -1 1" />
+    </default>
+  </default>
+  <asset>
+    <material name="black" rgba="0 0 0 1" />
+    <material name="gray10" rgba="0.1 0.1 0.1 1" />
+    <material name="gray25" rgba="0.25098 0.25098 0.25098 1" />
+    <material name="gray75" rgba="0.75294 0.75294 0.75294 1" />
+    <material name="mercury" rgba="0.9 0.9 0.9 1" />
+    <material name="white" />
+    <mesh name="sick_tim551" content_type="model/stl" file="sensors/sick_tim551.stl" />
+    <mesh name="base_link" content_type="model/stl" file="base/base_link.stl" />
+    <mesh name="base_dock_link" content_type="model/stl" file="base/base_dock_link.stl" />
+    <mesh name="antenna" content_type="model/stl" file="objects/antenna.stl" />
+    <mesh name="wheel_link_right" content_type="model/stl" file="wheels/wheel_link.stl" />
+    <mesh name="wheel_link_left" content_type="model/stl" file="wheels/wheel_link.stl" scale="1 1 -1" />
+  </asset>
+  <worldbody>
+    <body name="base_link">
+      <inertial pos="-0.00511 -0.00037 0.13715" mass="59.5385" diaginertia="2.326 2.585 3.471" />
+      <geom pos="0 0 0.0762" quat="1 0 0 0" mass="0" material="gray75" mesh="base_link" />
+      <geom pos="-0.27512 0.18297 0.20864" quat="0 -0.382683 -0.92388 0" mass="0" material="gray10" mesh="sick_tim551" />
+      <geom pos="0.27512 -0.18297 0.20864" quat="0 -0.92388 0.382683 0" mass="0" material="gray10" mesh="sick_tim551" />
+      <geom pos="0.3535 0 0.1358" mass="0" material="gray25" mesh="base_dock_link" />
+      <geom pos="-0.2015 -0.13 0.2927" mass="0" material="black" mesh="antenna" />
+      <geom pos="-0.2015 0.13 0.2927" mass="0" material="black" mesh="antenna" />
+      <body name="wheel_front_right_link" childclass="wheel" pos="0.244 -0.223175 0.0762" quat="0.707107 -0.707107 0 0">
+        <inertial pos="0 0 -0.000226" mass="0.997903" diaginertia="0.000634 0.000634 0.001139" />
+        <joint name="wheel_front_right_joint" />
+        <geom quat="1 0 0 0" conaffinity="0" mass="0" material="gray10" mesh="wheel_link_right" />
+        <geom size="0.0762 0.025" type="cylinder" group="3" mass="0" />
+      </body>
+      <body name="wheel_front_left_link" childclass="wheel" pos="0.244 0.223175 0.0762" quat="0.707107 -0.707107 0 0">
+        <inertial pos="0 0 -0.000226" mass="0.997903" diaginertia="0.000634 0.000634 0.001139" />
+        <joint name="wheel_front_left_joint" />
+        <geom quat="1 0 0 0" conaffinity="0" mass="0" material="gray10" mesh="wheel_link_left" />
+        <geom size="0.0762 0.025" type="cylinder" group="3" mass="0" />
+      </body>
+      <body name="wheel_rear_right_link" childclass="wheel" pos="-0.244 -0.223175 0.0762" quat="0.707107 -0.707107 0 0">
+        <inertial pos="0 0 -0.000226" mass="0.997903" diaginertia="0.000634 0.000634 0.001139" />
+        <joint name="wheel_rear_right_joint" />
+        <geom quat="1 0 0 0" conaffinity="0" mass="0" material="gray10" mesh="wheel_link_right" />
+        <geom size="0.0762 0.025" type="cylinder" group="3" mass="0" />
+      </body>
+      <body name="wheel_rear_left_link" childclass="wheel" pos="-0.244 0.223175 0.0762" quat="0.707107 -0.707107 0 0">
+        <inertial pos="0 0 -0.000226" mass="0.997903" diaginertia="0.000634 0.000634 0.001139" />
+        <joint name="wheel_rear_left_joint" />
+        <geom quat="1 0 0 0" conaffinity="0" mass="0" material="gray10" mesh="wheel_link_left" />
+        <geom size="0.0762 0.025" type="cylinder" group="3" mass="0" />
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <general name="wheel_front_right_joint_velocity" joint="wheel_front_right_joint" ctrlrange="-5 5" forcerange="-400 400" input="vel" biastype="affine" gainprm="2000" biasprm="0 0 -2000" />
+    <general name="wheel_front_left_joint_velocity" joint="wheel_front_left_joint" ctrlrange="-5 5" forcerange="-400 400" input="vel" biastype="affine" gainprm="2000" biasprm="0 0 -2000" />
+    <general name="wheel_rear_right_joint_velocity" joint="wheel_rear_right_joint" ctrlrange="-5 5" forcerange="-400 400" input="vel" biastype="affine" gainprm="2000" biasprm="0 0 -2000" />
+    <general name="wheel_rear_left_joint_velocity" joint="wheel_rear_left_joint" ctrlrange="-5 5" forcerange="-400 400" input="vel" biastype="affine" gainprm="2000" biasprm="0 0 -2000" />
+  </actuator>
+</mujoco>

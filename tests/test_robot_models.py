@@ -28,6 +28,11 @@ def test_validate():
     assert MujocoRobot.validate_config(config("aloha", {"asset": "aloha"})) == (["sim-world"], [])
     arm = config("left-arm", {"robot": "aloha", "asset": "aloha_left"}, parent="aloha")
     assert MujocoArm.validate_config(arm)[0] == ["sim-world", "aloha"]
+    # a robot rides a base, and a limb is framed on another arm (a torso): both are dependencies
+    assert MujocoRobot.validate_config(config("tiago", {"asset": "tiago"}, parent="tiago-base")) == (
+        ["sim-world", "tiago-base"], [])
+    limb = config("left-arm", {"robot": "tiago", "asset": "tiago_arm_left"}, parent="torso")
+    assert MujocoArm.validate_config(limb)[0] == ["sim-world", "torso"]
 
 
 @pytest.mark.parametrize("cls,cfg,message", [
@@ -35,14 +40,13 @@ def test_validate():
     (MujocoRobot, config("r", {"asset": "aloha", "mjcf": "x.xml"}), "set asset"),
     (MujocoRobot, config("r", {"asset": "panda"}), "asset must be one of"),
     (MujocoRobot, config("r", {"mjcf": "robot.urdf"}), "URDF robot files aren't supported yet"),
-    (MujocoRobot, config("r", {"asset": "aloha"}, parent="husky"), "on a base is not supported yet"),
     (MujocoArm, config("a", {"robot": "aloha", "mjcf": "x.xml"}, parent="aloha"), "set robot, or mjcf/asset, not both"),
     (MujocoArm, config("a", {"robot": "aloha", "asset": "ur5e"}, parent="aloha"), "set robot, or mjcf/asset, not both"),
     (MujocoArm, config("a", {"robot": "aloha"}, parent="aloha"), "needs joints"),
     (MujocoArm, config("a", {"robot": "aloha", "joints": ["j"]}, parent="aloha"), "needs kinematics_url"),
     (MujocoArm, config("a", {"robot": "aloha", "asset": "aloha_left", "collision": "kinematics"}, parent="aloha"),
      'collision "kinematics" is not supported'),
-    (MujocoArm, config("a", {"robot": "aloha", "asset": "aloha_left"}), 'needs frame.parent "aloha"'),
+    (MujocoArm, config("a", {"robot": "aloha", "asset": "aloha_left"}), 'needs frame.parent "aloha" or another of its arms'),
     (MujocoArm, config("a", {"asset": "aloha_left"}), "is a limb of a robot file; set robot"),
 ])
 def test_validate_rejects(cls, cfg, message):

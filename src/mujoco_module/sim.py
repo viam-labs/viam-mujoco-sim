@@ -78,6 +78,30 @@ ROBOT_LIMB_ASSETS: dict[str, dict[str, Any]] = {
         "flange_offset": {"orientation": {"o_x": 1, "o_y": 0, "o_z": 0, "theta": 0}},
     }
     for side in ("left", "right")
+} | {
+    # TIAGo++ (robot asset "tiago"): the torso is an arm, framed on the robot;
+    # the arms and head are framed on the torso. Kinematics written here by
+    # pal_tiago_dual/make_kinematics.py
+    "tiago_torso": {
+        "joints": ["torso_lift_joint"],
+        "flange_site": "torso_frame",
+        "kinematics_url": "pal_tiago_dual/tiago_torso_kinematics.json",
+        "home_keyframe": "home",
+    },
+    "tiago_head": {
+        "joints": ["head_1_joint", "head_2_joint"],
+        "flange_site": "head_camera",
+        "kinematics_url": "pal_tiago_dual/tiago_head_kinematics.json",
+        "home_keyframe": "home",
+    },
+} | {
+    f"tiago_arm_{side}": {
+        "joints": [f"arm_{side}_{i}_joint" for i in range(1, 8)],
+        "flange_site": f"gripper_{side}_grasp",
+        "kinematics_url": f"pal_tiago_dual/tiago_arm_{side}_kinematics.json",
+        "home_keyframe": "home",
+    }
+    for side in ("left", "right")
 }
 # Bundled grippers: default attributes for the gripper's `asset`. No mjcf
 # means the arm MJCF's own gripper.
@@ -89,6 +113,8 @@ GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
     "robotiq_epick": {"mjcf": "robotiq_epick/epick.xml"},
     # ALOHA's integrated fingers: ctrl 0.037 opens them, 0.002 closes them
     "aloha": {"open": 0.037, "closed": 0.002},
+    # TIAGo's coupled fingers: ctrl 0 closes them (the default open), 0.045 opens them
+    "tiago": {"open": 0.045, "closed": 0.0},
 }
 
 MAX_SUBSTEPS = 50

@@ -54,7 +54,12 @@ Attributes:
 Place it with the standard frame. frame.parent is "world" or another
 mujoco-sim component with a Viam frame, usually a base: the arm then rides
 it, mounted at the frame's offset from the base's frame, and is built after
-it (frame.parent is a dependency).
+it (frame.parent is a dependency). An arm bound to a robot is framed on the
+robot or on another arm bound to it (a limb on a torso arm).
+
+Joint values are degrees, and mm for a slide joint (a torso lift), which
+moves at up to 100 mm/s and is in place within 1 mm; the *_radians
+DoCommands stay SI (rad, or m for a slide).
 """
 
 import asyncio
@@ -73,6 +78,7 @@ from typing import (
     cast,
 )
 
+import numpy as np
 from typing_extensions import Self
 from viam.components import KinematicsReturn
 from viam.components.arm import Arm, JointPositions, KinematicsFileFormat, Mesh, Pose
@@ -91,37 +97,45 @@ from ..handles import (
 )
 from ..sim import ROBOT_LIMB_ASSETS, SimManager
 from viam.spatialmath import Quaternion
-from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, frame_parent, get_attrs, validate_sim_component
 
 _DEFAULT_TOLERANCE_DEG = 0.5
 _DEFAULT_CONTROL_FREQ_HZ = 50.0
 _MAX_CONTROL_FREQ_HZ = 1000.0
 _DEFAULT_MAX_STEP_DEG = 2.0
 _MAX_MAX_STEP_DEG = 30.0
+_SLIDE_TOLERANCE_M = 0.001
+_SLIDE_MAX_STEP_M = 0.01
+_DEGREES = 180.0 / math.pi
+_MM = 1000.0
 
 
-def _finite_radians(values_deg: Sequence[float], what: str) -> List[float]:
-    radians = [math.radians(float(v)) for v in values_deg]
-    if not all(math.isfinite(v) for v in radians):
+def _finite_si(values: Sequence[float], scale: np.ndarray, what: str) -> List[float]:
+    """Viam joint values (degrees, mm for a slide) in SI (rad, m); `scale` per joint."""
+    if len(values) != len(scale):
+        raise ValueError(f"{what} needs {len(scale)} values, got {len(values)}")
+    si = [float(v) / float(k) for v, k in zip(values, scale)]
+    if not all(math.isfinite(v) for v in si):
         raise ValueError(f"{what} must be finite")
-    return radians
+    return si
 
 
 def _densify(
     start: Sequence[float],
     waypoints: Sequence[Sequence[float]],
-    max_step_rad: float,
+    max_step_rad: float | np.ndarray,
 ) -> List[List[float]]:
     """Linearly interpolate targets between consecutive waypoints so no single
-    step moves any joint by more than `max_step_rad`. First segment runs from
-    `start` (the arm's current joint positions) to `waypoints[0]`; the last
-    emitted target equals `waypoints[-1]` exactly."""
+    step moves any joint by more than `max_step_rad` (one value, or one per
+    joint). First segment runs from `start` (the arm's current joint
+    positions) to `waypoints[0]`; the last emitted target equals
+    `waypoints[-1]` exactly."""
     out: List[List[float]] = []
     prev: List[float] = list(start)
     for wp in waypoints:
         target = list(wp)
-        max_delta = max((abs(a - b) for a, b in zip(prev, target)), default=0.0)
-        n = max(1, math.ceil(max_delta / max_step_rad))
+        steps = np.abs(np.subtract(prev, target)) / max_step_rad
+        n = max(1, math.ceil(float(steps.max(initial=0.0))))
         for k in range(1, n + 1):
             t = k / n
             out.append(target[:] if k == n else [a + t * (b - a) for a, b in zip(prev, target)])
@@ -216,15 +230,9 @@ def _validate_limb(config: ComponentConfig, attrs: Mapping[str, Any]) -> None:
             raise ValueError(f"{name}: an arm in a robot file needs {key}")
     if merged.get("collision") == "kinematics":
         raise ValueError(f'{name}: collision "kinematics" is not supported for an arm in a robot file yet')
-    if _frame_parent(config) != robot:
-        raise ValueError(f'{name}: an arm in robot {robot!r} needs frame.parent "{robot}"')
-
-
-def _frame_parent(config: ComponentConfig) -> str | None:
-    """The component the arm is framed on, None for the world."""
-    if config.HasField("frame") and config.frame.parent not in ("", "world"):
-        return config.frame.parent
-    return None
+    # the robot or another of its arms: only the arm's construction can tell which
+    if frame_parent(config) is None:
+        raise ValueError(f'{name}: an arm in robot {robot} needs frame.parent "{robot}" or another of its arms')
 
 
 class MujocoArm(Arm, EasyResource):
@@ -235,9 +243,12 @@ class MujocoArm(Arm, EasyResource):
         self._handle: Optional[ArmHandle] = None
         self._attrs: Dict[str, Any] = {}
         self._move_timeout = 30.0
-        self._tolerance_rad = math.radians(_DEFAULT_TOLERANCE_DEG)
+        # per joint, set at reconfigure: Viam units per SI unit (deg/rad, mm/m),
+        # and the convergence tolerance and densify step in SI
+        self._scale = np.array([])
+        self._tolerance_rad = np.array([])
         self._control_period = 1.0 / _DEFAULT_CONTROL_FREQ_HZ
-        self._max_step_rad = math.radians(_DEFAULT_MAX_STEP_DEG)
+        self._max_step_rad = np.array([])
         self._moving_count = 0
 
     @classmethod
@@ -298,7 +309,7 @@ class MujocoArm(Arm, EasyResource):
         _number(attrs, "path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG, config.name, 0.0)
         _number(attrs, "robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ, config.name, 0.0, _MAX_CONTROL_FREQ_HZ)
         _number(attrs, "path_max_step_deg", _DEFAULT_MAX_STEP_DEG, config.name, 0.0, _MAX_MAX_STEP_DEG)
-        parent = _frame_parent(config)
+        parent = frame_parent(config)
         return ([*deps, parent] if parent else deps), []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
@@ -306,20 +317,22 @@ class MujocoArm(Arm, EasyResource):
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
         attrs = apply_frame_to_attrs(config, get_attrs(config))
-        if parent := _frame_parent(config):
+        if parent := frame_parent(config):
             attrs["parent"] = parent
         self._move_timeout = float(attrs.get("move_timeout_sec", 30.0))
-        self._tolerance_rad = math.radians(
-            float(attrs.get("path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG))
-        )
         self._control_period = 1.0 / float(
             attrs.get("robot_control_freq_hz", _DEFAULT_CONTROL_FREQ_HZ)
         )
-        self._max_step_rad = math.radians(
-            float(attrs.get("path_max_step_deg", _DEFAULT_MAX_STEP_DEG))
-        )
         self._attrs = attrs
         self._handle = ArmHandle(SimManager.get(), self.name, attrs)
+        slides = self._handle.slides
+        self._scale = np.where(slides, _MM, _DEGREES)
+        self._tolerance_rad = np.where(slides, _SLIDE_TOLERANCE_M, math.radians(
+            float(attrs.get("path_tolerance_delta_deg", _DEFAULT_TOLERANCE_DEG))
+        ))
+        self._max_step_rad = np.where(slides, _SLIDE_MAX_STEP_M, math.radians(
+            float(attrs.get("path_max_step_deg", _DEFAULT_MAX_STEP_DEG))
+        ))
 
     async def close(self) -> None:
         if self._handle is not None:
@@ -345,7 +358,7 @@ class MujocoArm(Arm, EasyResource):
         self,
         handle: ArmHandle,
         targets: Sequence[float],
-        tolerance_rad: float,
+        tolerance_rad: np.ndarray,
         timeout_s: float,
     ) -> bool:
         """Block until the sim thread reports the joints within tolerance.
@@ -364,20 +377,22 @@ class MujocoArm(Arm, EasyResource):
             return False
         return True
 
-    @staticmethod
     def _stuck_joint_detail(
-        current: Sequence[float], targets: Sequence[float], tolerance_rad: float
+        self, current: Sequence[float], targets: Sequence[float], tolerance_rad: np.ndarray
     ) -> str:
+        """The joints out of tolerance, in Viam units (degrees, mm for a slide)."""
         return ", ".join(
-            f"j{index}: at {math.degrees(actual):.1f} want {math.degrees(target):.1f}"
-            for index, (actual, target) in enumerate(zip(current, targets))
-            if abs(actual - target) > tolerance_rad
+            f"j{index}: at {actual * scale:.1f} want {target * scale:.1f}"
+            for index, (actual, target, tolerance, scale) in enumerate(
+                zip(current, targets, tolerance_rad, self._scale)
+            )
+            if abs(actual - target) > tolerance
         )
 
     async def move_to_joint_positions(
         self, positions: JointPositions, **kwargs
     ) -> None:
-        targets = _finite_radians(positions.values, "joint positions")
+        targets = _finite_si(positions.values, self._scale, "joint positions")
         handle = self._h()
         self._moving_count += 1
         try:
@@ -406,7 +421,7 @@ class MujocoArm(Arm, EasyResource):
         allows in one tick; otherwise drives would cut corners past
         intermediate waypoints they cannot reach in one tick."""
         handle = self._h()
-        raw = [_finite_radians(wp.values, "joint positions") for wp in positions]
+        raw = [_finite_si(wp.values, self._scale, "joint positions") for wp in positions]
         if not raw:
             return
 
@@ -415,8 +430,8 @@ class MujocoArm(Arm, EasyResource):
             start = await asyncio.to_thread(handle.get_joint_positions)
             # never push targets faster than the joint limit: the rate-limited
             # servo would chase the newest target and cut corners off the plan
-            limit = min(handle.dynamics_metadata()["max_velocity_rad_s"])
-            stream = _densify(start, raw, min(self._max_step_rad, limit * self._control_period))
+            limit = np.array(handle.dynamics_metadata()["max_velocity_rad_s"])
+            stream = _densify(start, raw, np.minimum(self._max_step_rad, limit * self._control_period))
 
             loop = asyncio.get_running_loop()
             push_start = loop.time()
@@ -466,7 +481,7 @@ class MujocoArm(Arm, EasyResource):
                     JointTrajectoryPoint(
                         time_s=(point.time - batch_start).total_seconds(),
                         positions=tuple(
-                            _finite_radians(point.positions, "joint positions")
+                            _finite_si(point.positions, self._scale, "joint positions")
                         ),
                     )
                 )
@@ -493,25 +508,26 @@ class MujocoArm(Arm, EasyResource):
                     if started:
                         await asyncio.to_thread(handle.stop_trajectory)
                 actual = await asyncio.to_thread(handle.get_joint_positions)
-                error_deg = max(
+                # Viam units: degrees, mm for a slide
+                error = max(
                     (
-                        abs(math.degrees(want - got))
-                        for want, got in zip(expected, actual)
+                        abs(want - got) * scale
+                        for want, got, scale in zip(expected, actual, self._scale)
                     ),
                     default=0.0,
                 )
                 self.logger.info(
-                    "%s: trajectory complete expected=%s actual=%s max_error_deg=%.2f",
+                    "%s: trajectory complete expected=%s actual=%s max_error=%.2f",
                     self.name,
-                    [round(math.degrees(value), 2) for value in expected],
-                    [round(math.degrees(value), 2) for value in actual],
-                    error_deg,
+                    [round(value * scale, 2) for value, scale in zip(expected, self._scale)],
+                    [round(value * scale, 2) for value, scale in zip(actual, self._scale)],
+                    error,
                 )
             yield Arm.TrajectoryUpdate()
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
-        radians = await asyncio.to_thread(self._h().get_joint_positions)
-        return JointPositions(values=[math.degrees(r) for r in radians])
+        si = await asyncio.to_thread(self._h().get_joint_positions)
+        return JointPositions(values=[value * scale for value, scale in zip(si, self._scale)])
 
     async def stop(self, **kwargs) -> None:
         await asyncio.to_thread(self._h().stop)

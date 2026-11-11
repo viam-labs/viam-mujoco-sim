@@ -1,7 +1,8 @@
 """viam-labs:mujoco-sim:robot - a robot file whose limbs are separate arms.
 
 The robot loads an MJCF file once and attaches it under "<name>/" at its
-frame (parent "world"). Arms bind to it with `robot` and their `joints`
+frame: parent "world", or a mujoco-sim component with a viam_frame (a base:
+the robot rides it, and drops out with its arms while the base is away). Arms bind to it with `robot` and their `joints`
 (each its own chain, with its own kinematics_url); grippers bind to those
 arms as usual. Each arm's frame must be its chain base's pose in the file,
 relative to the robot (the arm's config error says what to paste). The robot
@@ -10,7 +11,7 @@ for geometries: the file's fixed parts other than the limbs' chain bases.
 
 Attributes:
   world (string, required) - name of the viam-labs:mujoco-sim:world component
-  asset (string)           - a bundled robot: "aloha"
+  asset (string)           - a bundled robot: "aloha", or "tiago" (on a pal_tiago_base base)
   mjcf (string)            - your own .xml robot file (path, assets-relative); one of asset, mjcf
   home_keyframe (string)   - the keyframe for undriven joints (default: the file's first)
 """
@@ -29,7 +30,7 @@ from viam.resource.types import Model, ModelFamily
 from .. import FAMILY, NAMESPACE, robots
 from ..robot_file import ROBOT_ASSETS, RobotHandle
 from ..sim import SimManager
-from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, frame_parent, get_attrs, validate_sim_component
 
 
 def _source(config: ComponentConfig, attrs: Mapping[str, Any]) -> str:
@@ -64,17 +65,18 @@ class MujocoRobot(Generic, EasyResource):
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
-        if config.HasField("frame") and config.frame.parent not in ("", "world"):
-            raise ValueError(
-                f'{config.name}: a robot is placed on the world (frame.parent "world"); '
-                "on a base is not supported yet"
-            )
         _source(config, get_attrs(config))
-        return validate_sim_component(config, needs_asset=False)
+        # a robot is placed on the world or on a mujoco-sim component with a
+        # viam_frame (a base); another parent never appears, so the robot waits
+        deps, _ = validate_sim_component(config, needs_asset=False, world_frame_only=False)
+        parent = frame_parent(config)
+        return ([*deps, parent] if parent else deps), []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]) -> None:
         attrs = apply_frame_to_attrs(config, get_attrs(config))
+        if parent := frame_parent(config):
+            attrs["parent"] = parent
         self._handle = RobotHandle(SimManager.get(), self.name, attrs)
 
     async def close(self) -> None:

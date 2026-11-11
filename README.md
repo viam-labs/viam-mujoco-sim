@@ -21,13 +21,13 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame on the world or a base, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85, or your own MJCF or URDF gripper. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's end effector. |
-| [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
+| [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, TIAGo++'s base, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D or 3D LIDAR on the world, a base or an arm; point clouds only. |
 | [`viam-labs:mujoco-sim:movement_sensor`](#model-viam-labsmujoco-simmovement_sensor) | `movement_sensor` | Wheel odometry for a mujoco-sim base, with optional drift. |
 | [`viam-labs:mujoco-sim:imu`](#model-viam-labsmujoco-simimu) | `movement_sensor` | An IMU on the world, a base or an arm: orientation, angular velocity and acceleration, with optional noise. |
 | [`viam-labs:mujoco-sim:force_torque`](#model-viam-labsmujoco-simforce_torque) | `sensor` | A wrist force-torque sensor at an arm's flange, with optional noise. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
-| [`viam-labs:mujoco-sim:robot`](#model-viam-labsmujoco-simrobot) | `generic` | A robot file with several limbs, such as the bundled ALOHA bimanual cell; each limb is a mujoco-sim arm. |
+| [`viam-labs:mujoco-sim:robot`](#model-viam-labsmujoco-simrobot) | `generic` | A robot file with several limbs, such as the bundled ALOHA bimanual cell or TIAGo++'s torso, arms and head on its base; each limb is a mujoco-sim arm. |
 | [`viam-labs:mujoco-sim:scene`](#model-viam-labsmujoco-simscene) | `generic` | An MJCF scene file placed by its frame: simulated, planned against, and its free bodies movable as props. |
 | [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props, parcels, and the conveyor and scale shapes to the Viam app's 3D scene viewer. |
 | [`viam-labs:mujoco-sim:conveyor`](#model-viam-labsmujoco-simconveyor) | `motor` | A belt conveyor that carries parcels by friction. |
@@ -67,7 +67,9 @@ with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), an
 between two tables (see [Mobile manipulation](#mobile-manipulation)), and
 [`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
 arms from one robot file passing a block across a table (see
-[Model viam-labs:mujoco-sim:robot](#model-viam-labsmujoco-simrobot)). With an
+[Model viam-labs:mujoco-sim:robot](#model-viam-labsmujoco-simrobot)), and
+[`examples/tiago-pick.json`](examples/tiago-pick.json) a TIAGo++ carrying a
+block from a low table to a shelf (see [Semi-humanoid: TIAGo++](#semi-humanoid-tiago)). With an
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
@@ -298,7 +300,7 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `asset` | string | One of `asset`, `mjcf`, `robot` | | A bundled arm: `"lite6"` or `"ur5e"`; with `robot`, a bundled limb: `"aloha_left"` or `"aloha_right"`. Its defaults apply; any attribute below set in config wins. |
+| `asset` | string | One of `asset`, `mjcf`, `robot` | | A bundled arm: `"lite6"` or `"ur5e"`; with `robot`, a bundled limb: `"aloha_left"`, `"aloha_right"`, `"tiago_torso"`, `"tiago_arm_left"`, `"tiago_arm_right"` or `"tiago_head"`. Its defaults apply; any attribute below set in config wins. |
 | `robot` | string | One of `asset`, `mjcf`, `robot` | | A [`viam-labs:mujoco-sim:robot`](#model-viam-labsmujoco-simrobot) this arm is a limb of. The arm then drives `joints` in that robot's file and attaches no file of its own. |
 | `mjcf` | string | One of `asset`, `mjcf` | | Your arm's MJCF (`.xml`) or URDF (`.urdf`) file: an absolute path, `~/...`, or a path relative to the module's `assets/`. See [From a URDF](#from-a-urdf). |
 | `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | A `.urdf` `mjcf`'s meshes: absolute, `~`, or relative to the file. `package://` paths are looked up there by file name. |
@@ -325,6 +327,14 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `depth_height` | int | No | half of `height` | Depth image and point cloud height in pixels. |
 
 The frame's `parent` is `world` or a base; see [Mounting on a base](#mounting-on-a-base).
+An arm with `robot` is framed on its robot or on another arm of it; see
+[Limbs](#limbs).
+
+Joint values are degrees, and millimetres for a slide joint (TIAGo's torso
+lift). A slide joint moves at up to 100 mm/s (fixed: `max_joint_deg_s` is for
+hinges), counts as arrived within 1 mm and slower than 1 mm/s, and pushed
+targets step at most 10 mm. The `*_radians` DoCommands stay SI: radians, and
+metres for a slide.
 
 ### Mounting on a base
 
@@ -357,7 +367,7 @@ as it drives, so plan arm moves in the base's frame; see
 
 | Method | Notes |
 |---|---|
-| `GetJointPositions` | Degrees. |
+| `GetJointPositions` | Degrees (mm for a slide joint). |
 | `MoveToJointPositions` | Returns when the arm arrives, or fails after `move_timeout_sec`. |
 | `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. |
 | `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time. |
@@ -371,9 +381,9 @@ as it drives, so plan arm moves in the base's frame; see
 
 | Command | Fields | Returns |
 |---|---|---|
-| `dynamics_metadata` | | `{source, joint_names, max_velocity_rad_s, max_acceleration_rad_s2}`; the last only when `max_joint_deg_s2` is set. |
-| `get_joint_positions_radians` | | `{values: [radians, one per joint]}` |
-| `set_joint_targets_radians` | `values`: radians, one per joint | `{"accepted": true}`; latches the target and returns at once. |
+| `dynamics_metadata` | | `{source, joint_names, max_velocity_rad_s, max_acceleration_rad_s2}` (m/s for a slide joint); the last only when `max_joint_deg_s2` is set. |
+| `get_joint_positions_radians` | | `{values: [radians (m for a slide), one per joint]}` |
+| `set_joint_targets_radians` | `values`: radians (m for a slide), one per joint | `{"accepted": true}`; latches the target and returns at once. |
 
 ### Your own arm
 
@@ -468,6 +478,7 @@ contacts, so a violent move can tear the object off.
 | `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | box 150 × 80 × 170 mm at `z: -73` (fingers open along x) |
 | `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | box 90 × 90 × 130 mm at `z: -65` |
 | `aloha` | ALOHA's own, in its robot file (open and closed swapped to match its actuator) | `aloha_left`, `aloha_right` | 0 mm (the arm's end effector is the gripper) | none: the arm's kinematics carry it |
+| `tiago` | TIAGo++'s own, two coupled fingers on one actuator, in its robot file (open 45 mm a finger; open and closed swapped) | `tiago_arm_left`, `tiago_arm_right` | 0 mm (the arm's end effector is between the fingertips) | none: the arm's kinematics carry it |
 
 Give the gripper's frame that geometry so the planner keeps the whole gripper
 clear of obstacles; without it, a path can pass the arm but clip the gripper.
@@ -627,6 +638,7 @@ the wheels turning to match, or through its wheels on the floor.
 |---|---|
 | `viam_rover` | A Viam Rover 2 with the dimensions from Viam's rover fragment: 381 mm wheel circumference, 356 mm track, two drive wheels and a rear caster. 0.762 m/s, 245 °/s. |
 | `clearpath_husky` | A Clearpath Husky A200 from Clearpath's `husky_description` (BSD): four wheels, skid-steer, 990 x 571 mm, 56.6 kg. Clearpath's control limits: 1.0 m/s, 115 °/s (2.0 rad/s), 3.0 m/s², 6.0 rad/s². |
+| `pal_tiago_base` | TIAGo++'s base (PAL Robotics, from the MuJoCo Menagerie, Apache-2.0), for the `tiago` robot to ride: 63.5 kg, 0.381 m/s and 98 °/s from its wheels' limits, `drive: ideal`. Its four omni wheels drive as a diff-drive: no sideways motion. |
 
 ### Configuration
 
@@ -681,6 +693,11 @@ yard with a LIDAR on its top plate, odometry and an overview camera.
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
+
+A base carrying a robot or an arm keeps its own mass and yaw inertia: the
+ideal drive is sized from the base's file alone. TIAGo's 28 kg upper body
+(three times the base's yaw inertia) still drives and turns within its move
+timeouts; a much heavier load may lag.
 
 The frame's `parent` must be `world`. The base's frame is on the floor under
 the chassis origin, +Y forward, +Z up, as in Viam's base frame, whatever axes
@@ -1130,7 +1147,9 @@ robot loads the MJCF file once; each limb is a
 and the limb's `joints`, and grippers, cameras and sensors mount on those arms
 as on any other. The module bundles
 [ALOHA](https://github.com/google-deepmind/mujoco_menagerie/tree/main/aloha)
-(two ViperX 300 arms with grippers, BSD-3-Clause, Trossen Robotics).
+(two ViperX 300 arms with grippers, BSD-3-Clause, Trossen Robotics) and
+TIAGo++'s upper body (`tiago`, riding the `pal_tiago_base` base; see
+[Semi-humanoid: TIAGo++](#semi-humanoid-tiago)).
 
 ### Configuration
 
@@ -1170,11 +1189,15 @@ left arm set the block down in the middle and the right arm carry it on.
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `asset` | string | One of `asset`, `mjcf` | | A bundled robot: `"aloha"`. |
+| `asset` | string | One of `asset`, `mjcf` | | A bundled robot: `"aloha"` or `"tiago"`. |
 | `mjcf` | string | One of `asset`, `mjcf` | | Your robot's `.xml` MJCF file: an absolute path, `~/...`, or a path relative to the module's `assets/`. URDF robot files aren't supported yet. |
 | `home_keyframe` | string | No | the file's first keyframe | Sets the joints no arm or gripper drives. |
 
-The robot's frame parent is `world` (on a base isn't supported yet). The file
+The robot's frame parent is `world` or a mujoco-sim base (any mujoco-sim
+component with a Viam frame): the robot then rides it at the frame's offset
+from the base's frame, and is built after it. While the base is missing, the
+robot, its arms and grippers are out of the scene and their calls error, as
+for an arm on a base. The file
 can have actuators, tendons and equality constraints; mocap bodies, plugins,
 flexes, skins and free joints are errors. Its names in the scene get the
 prefix `<name>/`.
@@ -1187,13 +1210,18 @@ Each arm with `robot` set takes:
 - `kinematics_url`: its Viam kinematics, base to flange, with joint limits
   equal to the file's ranges;
 - `flange_site`, `home_keyframe`, `base_offset`, `flange_offset` and the speed
-  limits, as for any arm. The `aloha_left` and `aloha_right` presets set
-  them.
+  limits, as for any arm. The `aloha_left`, `aloha_right` and `tiago_*`
+  presets set them.
 
-The arm's frame parent must be the robot, and its translation and orientation
-must be the pose of its chain base (the body its first joint hangs from) in
-the file. That body must be fixed to the robot. A wrong frame is a config
-error that gives the values to paste. An arm in a robot file uses the file's
+The arm's frame parent is the robot, or another arm of the same robot (a
+torso). On the robot, its translation and orientation must be the pose of its
+chain base (the body its first joint hangs from) in the file, and that body
+must be fixed to the robot. On another arm, they must be the chain base's pose
+relative to that arm's end effector, and the chain base must be fixed to the
+body that end effector is on: a jointed torso is its own arm (TIAGo's lift is
+a 1-joint prismatic arm), and the limbs above it are framed on it, so RDK's
+frame chain moves them with the torso as the sim does. A wrong frame is a
+config error that gives the values to paste. An arm in a robot file uses the file's
 own collision geoms (`collision: "kinematics"` isn't supported yet), and two
 arms can't share a joint. A gripper on the arm finds its actuator below the
 arm's last joint (an `actuator` you name must be one of those), as for an arm
@@ -1203,7 +1231,7 @@ with its gripper in its own MJCF.
 
 | Method | Notes |
 |---|---|
-| `GetGeometries` | The file's fixed parts, in the robot's frame, except the bodies a limb hangs from (its arm's kinematics carry those). ALOHA has none. |
+| `GetGeometries` | The file's fixed parts, in the robot's frame, except the bodies a limb hangs from (its arm's kinematics carry those). ALOHA and TIAGo have none (TIAGo's column is the torso arm's). |
 
 If the robot is removed, its arms and grippers error until it's back; then the
 arms return to their home and the grippers keep their last command.
@@ -1904,6 +1932,55 @@ obstacle components are in the frame system too, but placed relative to where
 RDK keeps the Husky: more than 2 m away, out of the arm's reach. Watch it
 with `scene-cam`, not the 3D scene view.
 
+## Semi-humanoid: TIAGo++
+
+`tiago` is TIAGo++'s upper body as a robot file riding the `pal_tiago_base`
+base, made from the
+[MuJoCo Menagerie's `pal_tiago_dual`](https://github.com/google-deepmind/mujoco_menagerie/tree/main/pal_tiago_dual)
+(Apache-2.0, PAL Robotics; see [`assets/pal_tiago_dual/README.md`](assets/pal_tiago_dual/README.md)).
+Its limbs are four arms: the torso lift (`tiago_torso`, one slide joint,
+0–350 mm) framed on the robot, and the two 7-joint arms (`tiago_arm_left`,
+`tiago_arm_right`) and the 2-joint head (`tiago_head`, pan and tilt, its end
+effector the head camera: +Z along the view) framed on the torso. Every frame
+offset is zero:
+
+```json
+{ "name": "tiago-base", "api": "rdk:component:base", "model": "viam-labs:mujoco-sim:base",
+  "frame": { "parent": "world" }, "attributes": { "world": "sim-world", "asset": "pal_tiago_base" } },
+{ "name": "tiago", "api": "rdk:component:generic", "model": "viam-labs:mujoco-sim:robot",
+  "frame": { "parent": "tiago-base" }, "attributes": { "world": "sim-world", "asset": "tiago" } },
+{ "name": "torso", "api": "rdk:component:arm", "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "tiago" }, "attributes": { "world": "sim-world", "robot": "tiago", "asset": "tiago_torso" } },
+{ "name": "left-arm", "api": "rdk:component:arm", "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "torso" }, "attributes": { "world": "sim-world", "robot": "tiago", "asset": "tiago_arm_left" } },
+{ "name": "head", "api": "rdk:component:arm", "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "torso" }, "attributes": { "world": "sim-world", "robot": "tiago", "asset": "tiago_head" } },
+{ "name": "head-cam", "api": "rdk:component:camera", "model": "viam-labs:mujoco-sim:camera",
+  "frame": { "parent": "head" }, "attributes": { "world": "sim-world" } },
+{ "name": "left-gripper", "api": "rdk:component:gripper", "model": "viam-labs:mujoco-sim:gripper",
+  "frame": { "parent": "left-arm" }, "attributes": { "world": "sim-world", "arm": "left-arm", "asset": "tiago" } }
+```
+
+It starts at its `home` keyframe: torso at 175 mm, upper arms down with the
+forearms and grippers forward (each arm `[-6.9, 81.4, 81.4, 126.6, -6.3,
+-54.4, 106.6]` degrees), head level. The arms are mirror images, so the same
+joint values are mirror poses. The kinematics files' shapes don't touch
+across limbs at home (RDK would ignore such a pair for the whole plan): the
+torso's column starts above the base's box and its shell is narrowed to clear
+the arms' shoulders. The base's box reaches up to TIAGo's antennas, so the
+torso can't plan below about 60 mm.
+
+[`examples/tiago-pick.json`](examples/tiago-pick.json) puts it 2 m from a
+450 mm table with a block on it, with an 800 mm shelf to the left, odometry,
+`world_state` and the builtin motion service.
+[`examples/tiago_pick.py`](examples/tiago_pick.py) drives to the table, tilts
+the head down and saves a head-camera image, picks the block with the left
+gripper, drives to the shelf and puts it there, planning in the `tiago-base`
+frame as `mobile_pick.py` does. The torso is in the left gripper's frame
+chain, so the motion service moves it with the arm: down to reach the table,
+up to reach the shelf (the script prints the torso before and after each
+move).
+
 ## Things to know
 
 - **Config edits reset the cell.** viam-server rebuilds a module resource on any
@@ -1931,8 +2008,9 @@ with `scene-cam`, not the 3D scene view.
   overlap at reachable wrist angles. The gripper and links 3–6 still collide
   with the base and shoulder, which Viam's planner can't see.
 - **Place components relative to `world`, or ride a base.** A base's frame
-  must have parent `world`; an arm's is `world` or a base; the gripper's is
-  its arm; a camera's, LIDAR's or IMU's is `world` or another mujoco-sim
+  must have parent `world`; a robot's is `world` or a base; an arm's is
+  `world` or a base, or for a limb its robot or another arm of it; the
+  gripper's is its arm; a camera's, LIDAR's or IMU's is `world` or another mujoco-sim
   component; a force-torque sensor's is its arm.
 - **The frame system doesn't follow a base.** RDK keeps a base at its
   configured pose; it doesn't know the sim base has driven. Planning in the

@@ -76,6 +76,13 @@ def apply_frame_to_attrs(
     return attrs
 
 
+def frame_parent(config: ComponentConfig) -> Optional[str]:
+    """The component a component is framed on, None for the world."""
+    if config.HasField("frame") and config.frame.parent not in ("", "world"):
+        return config.frame.parent
+    return None
+
+
 def validate_sim_component(
     config: ComponentConfig, needs_asset: bool = True, world_frame_only: bool = True
 ) -> Tuple[Sequence[str], Sequence[str]]:

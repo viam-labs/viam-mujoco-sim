@@ -338,7 +338,7 @@ def test_camera_on_the_rover_looks_forward(rover_cell):
 @pytest.mark.parametrize(
     "attrs, message",
     [
-        ({}, r"asset must be one of \['clearpath_husky', 'viam_rover'\], got None; or set mjcf"),
+        ({}, r"asset must be one of \['clearpath_husky', 'pal_tiago_base', 'viam_rover'\], got None; or set mjcf"),
         ({"asset": "jetbot"}, "asset must be one of"),
         ({"asset": "viam_rover", "mjcf": "viam_rover/rover.xml"}, "set asset or mjcf, not both"),
         ({"mjcf": ""}, "mjcf must be a file path"),

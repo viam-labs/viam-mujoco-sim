@@ -1,0 +1,67 @@
+{
+  "name": "tiago_torso",
+  "kinematic_param_type": "SVA",
+  "links": [
+    {
+      "id": "base",
+      "parent": "world",
+      "translation": {
+        "x": 0.0,
+        "y": -62.0,
+        "z": 866.2
+      },
+      "geometry": {
+        "x": 200.0,
+        "y": 180.0,
+        "z": 352.0,
+        "translation": {
+          "x": 0.0,
+          "y": -62.0,
+          "z": 645.2
+        }
+      }
+    },
+    {
+      "id": "torso_lift_link",
+      "parent": "torso_lift_joint",
+      "translation": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 0.0,
+          "y": 0.0,
+          "z": 1.0,
+          "th": 90.0
+        }
+      },
+      "geometry": {
+        "x": 212.0,
+        "y": 401.0,
+        "z": 464.0,
+        "translation": {
+          "x": 0.0,
+          "y": 38.55,
+          "z": -229.0
+        }
+      }
+    }
+  ],
+  "joints": [
+    {
+      "id": "torso_lift_joint",
+      "type": "prismatic",
+      "parent": "base",
+      "axis": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "min": 0.0,
+      "max": 350.0
+    }
+  ]
+}

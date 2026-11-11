@@ -2,7 +2,8 @@
 
 The robot loads an MJCF file, checks it and keeps a standalone compile of it,
 which its arms read their joints, actuators, home and chain from. Its build
-attaches the file under "<robot>/" at its frame on the world. Arms bind to a
+attaches the file under "<robot>/" at its frame on the world or on its parent's
+viam_frame (a base it rides). Arms bind to a
 joint subset (ArmHandle with `robot`) and grippers to an arm; each claims the
 file names it drives in sim.robot_claims[robot], and the robot's init sets
 only what nobody claims, from its home keyframe.
@@ -18,7 +19,7 @@ import numpy as np
 from viam.proto.common import Geometry
 
 from . import robots
-from .handles import VIAM_FRAME_SITE
+from .handles import VIAM_FRAME_SITE, _mount
 from .scenes import geom_geometry, _label
 from .sim import Contribution, SimManager
 
@@ -27,6 +28,9 @@ from .sim import Contribution, SimManager
 ROBOT_ASSETS: dict[str, dict[str, Any]] = {
     # mujoco_menagerie@370c439 aloha (BSD-3-Clause, Trossen Robotics)
     "aloha": {"mjcf": "trossen_aloha/aloha.xml"},
+    # TIAGo++'s upper body, made by make_tiago.py from mujoco_menagerie@370c439
+    # pal_tiago_dual (Apache-2.0, PAL Robotics); rides the pal_tiago_base base
+    "tiago": {"mjcf": "pal_tiago_dual/tiago_upper.xml"},
 }
 REJECTED = ("flexes", "skins", "plugins")
 _FREE = mujoco.mjtJoint.mjJNT_FREE
@@ -54,7 +58,8 @@ def check_robot_file(label: str, spec: mujoco.MjSpec) -> None:
 
 class RobotHandle:
     """One robot file in the scene, under "<name>/", at `position` /
-    `orientation_wxyz` on the world."""
+    `orientation_wxyz` on the world, or with attrs["parent"] relative to that
+    component's viam_frame (it rides a base, and waits for it)."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
         attrs = {**ROBOT_ASSETS.get(str(attrs.get("asset")), {}), **attrs}
@@ -87,15 +92,20 @@ class RobotHandle:
         position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
         self.origin = robots.transform(position, quat)
+        parent = attrs.get("parent")
         file_spec = spec
 
-        def build(spec: mujoco.MjSpec) -> None:
+        def build(spec: mujoco.MjSpec) -> bool | None:
+            placed = _mount(spec, parent, position, quat)
+            if placed is None:
+                return False  # parent not in the scene; the robot's arms say so
+            body, pos, rot = placed
             child = file_spec.copy()  # the file isn't read again
             for key, value in options.items():
                 setattr(spec.option, key, value)
-            frame = spec.worldbody.add_frame(pos=position, quat=quat)
+            frame = body.add_frame(pos=list(pos), quat=list(rot))
             spec.attach(child, prefix=self.prefix, frame=frame)
-            spec.worldbody.add_site(name=self.prefix + VIAM_FRAME_SITE, pos=position, quat=quat)
+            body.add_site(name=self.prefix + VIAM_FRAME_SITE, pos=list(pos), quat=list(rot))
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             self._home(model, data)
@@ -185,8 +195,9 @@ def release_claims(sim: SimManager, robot: str, owner: str) -> None:
             del claims[name]
 
 
-def frame_error(expected: np.ndarray, label: str, has_offset: bool = False) -> str:
-    """How to configure an arm's frame at `expected` (in its robot's frame)."""
+def frame_error(expected: np.ndarray, label: str, has_offset: bool = False, parent: str | None = None) -> str:
+    """How to configure an arm's frame at `expected` (in its robot's frame, or
+    in its parent arm's end effector's)."""
     from viam.spatialmath import Quaternion
 
     w, x, y, z = robots.quat(expected)
@@ -195,6 +206,7 @@ def frame_error(expected: np.ndarray, label: str, has_offset: bool = False) -> s
     return (
         f'{label}: set frame.translation to {{"x": {t[0]:.1f}, "y": {t[1]:.1f}, "z": {t[2]:.1f}}} and '
         f'frame.orientation to {{"type": "ov_degrees", "value": {{"x": {ov.o_x:.4f}, "y": {ov.o_y:.4f}, '
-        f'"z": {ov.o_z:.4f}, "th": {np.degrees(ov.theta):.2f}}}}}: its chain base\'s pose in the robot file'
+        f'"z": {ov.o_z:.4f}, "th": {np.degrees(ov.theta):.2f}}}}}: its chain base\'s pose '
+        + (f"relative to arm {parent}'s end effector" if parent else "in the robot file")
         + (" with base_offset taken off (check base_offset first if that isn't the frame you meant)" if has_offset else "")
     )

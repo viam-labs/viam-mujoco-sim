@@ -41,6 +41,9 @@ Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]  # (w, x, y, z), MuJoCo's order
 
 DEFAULT_MAX_JOINT_DEG_S = 180.0
+# ponytail: a fixed slide-joint speed cap; a max_joint_mm_s attribute when someone asks
+SLIDE_MAX_M_S = 0.1
+SLIDE_MOVING_M_S = 0.001  # a slide joint is still moving above this
 # an arm in a robot file must be framed at its chain base within these
 ROBOT_FRAME_TOLERANCE_M = 0.001
 ROBOT_FRAME_TOLERANCE_DEG = 0.1
@@ -71,6 +74,9 @@ BASE_ASSETS: dict[str, dict[str, Any]] = {
         "max_linear_accel_mps2": 3.0,
         "max_angular_accel_rad_s2": 6.0,
     },
+    # TIAGo++'s base, made by pal_tiago_dual/make_tiago.py from mujoco_menagerie@370c439;
+    # its omni wheels drive as a diff-drive. Speeds from the wheels' ctrlrange.
+    "pal_tiago_base": {"mjcf": "pal_tiago_dual/tiago_base.xml", "drive": "ideal"},
 }
 BASE_JOINTS = ("x", "y", "yaw")
 BASE_TAU_S = 0.005  # velocity actuators settle on a new command in ~5 ms
@@ -150,7 +156,9 @@ class ArmHandle:
 
     With attrs["robot"] the arm is a limb of that robot's file
     (robot_file.RobotHandle): it attaches nothing, reads the robot's model,
-    and drives `joints`; its frame must be its chain base's pose in the file.
+    and drives `joints`; its frame (parent the robot, or another arm bound to
+    it: a torso) must be its chain base's pose in the file, relative to that
+    parent's end effector for an arm.
     File names (joints, actuators, bodies, flange_site) carry file_prefix
     (the robot's "<robot>/", else the arm's own "<arm>/"); the Viam-facing
     sites keep the arm's name ("<arm>/viam_frame", "<arm>/arm_frame")."""
@@ -253,41 +261,63 @@ class ArmHandle:
             [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))],
             [float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
         )
+        # Viam's end effector in the flange site's body: the flange site with flange_offset
+        # (from the compiled model: the spec's quat ignores euler/axisangle/xyaxes/zaxis)
+        self.end_offset = robots.transform(site.pos, site.quat) @ flange_offset
         # an arm in a robot file: its frame is its chain base's (the first joint's parent body)
         chain_base = 0
         if holder is not None:
             chain_base = int(self.model.body_parentid[self.model.jnt_bodyid[self.joints[0]]])
             self.chain_base = self.model.body(chain_base).name
-            if self.model.body_weldid[chain_base] != 0:
+            parent = attrs.get("parent")
+            # framed on the robot (its root) or on another of its arms (that arm's end effector)
+            above = sim.run(lambda: sim.arms.get(parent)) if parent != self.robot else None
+            if parent and parent != self.robot and above is None:
+                raise ValueError(f"{label}: arm {parent!r} is not in the scene; configure it first")
+            if parent != self.robot and (above is None or above.robot != self.robot):
                 raise ValueError(
-                    f"{label}: {self.chain_base} moves relative to robot {self.robot}; an arm's base "
-                    "must be fixed to the robot (no joint between them)"
+                    f'{label}: an arm in robot {self.robot} needs frame.parent "{self.robot}" or another of its arms'
                 )
-            if attrs.get("parent") != self.robot:
-                raise ValueError(f'{label}: an arm in robot {self.robot!r} needs frame.parent "{self.robot}"')
             data = mujoco.MjData(self.model)
             mujoco.mj_kinematics(self.model, data)
+            reference, parent_end = 0, np.eye(4)
+            if above is not None:
+                reference = int(self.model.site(above.flange_site).bodyid[0])
+                parent_end = robots.transform(data.xpos[reference], data.xquat[reference]) @ above.end_offset
+            if self.model.body_weldid[chain_base] != self.model.body_weldid[reference]:
+                if above is None:
+                    raise ValueError(
+                        f"{label}: {self.chain_base} moves relative to robot {self.robot}; an arm's base "
+                        "must be fixed to the robot (no joint between them)"
+                    )
+                raise ValueError(
+                    f"{label}: {self.chain_base} moves relative to {self.model.body(reference).name} (where arm "
+                    f"{parent}'s end effector is); an arm's base must be fixed to its parent arm's last link"
+                )
             base = robots.transform(data.xpos[chain_base], data.xquat[chain_base])
-            expected = base @ np.linalg.inv(base_offset)
+            expected = np.linalg.inv(parent_end) @ base @ np.linalg.inv(base_offset)
             metres, degrees = robots.pose_error(self._frame, expected)
             if metres > ROBOT_FRAME_TOLERANCE_M or degrees > ROBOT_FRAME_TOLERANCE_DEG:
                 from .robot_file import frame_error
 
-                raise ValueError(frame_error(expected, label, has_offset="base_offset" in attrs))
+                raise ValueError(frame_error(
+                    expected, label, has_offset="base_offset" in attrs, parent=parent if above else None
+                ))
         robots.check_frames(
             self.model, self.kinematics, self.joints, self.model.site(self.flange_site).id,
             self._home, base_offset, flange_offset, label, base_body=chain_base,
         )
-        self._max_rad_s = math.radians(
-            float(attrs.get("max_joint_deg_s", DEFAULT_MAX_JOINT_DEG_S))
+        # per joint, SI: rad for hinges, m for slides (a torso lift)
+        self.slides = self.model.jnt_type[self.joints] == mujoco.mjtJoint.mjJNT_SLIDE
+        self._max_rad_s = np.where(
+            self.slides, SLIDE_MAX_M_S, math.radians(float(attrs.get("max_joint_deg_s", DEFAULT_MAX_JOINT_DEG_S)))
         )
         acceleration = attrs.get("max_joint_deg_s2")
         self._max_rad_s2 = math.radians(float(acceleration)) if acceleration else None
-        self._velocity_threshold = float(
-            attrs.get(
-                "is_moving_velocity_threshold_rad_s",
-                DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S,
-            )
+        self._velocity_threshold = np.where(
+            self.slides,
+            SLIDE_MOVING_M_S,
+            float(attrs.get("is_moving_velocity_threshold_rad_s", DEFAULT_IS_MOVING_VELOCITY_THRESHOLD_RAD_S)),
         )
         # None until init (new arm) or the first step (replaced arm) sets it
         self._target: np.ndarray | None = None
@@ -326,7 +356,7 @@ class ArmHandle:
             base = spec.body(self.file_prefix + self.chain_base)
             base.add_site(name=self._prefix + ARM_FRAME_SITE, pos=list(arm_site[:3, 3]), quat=list(robots.quat(arm_site)))
             flange = spec.site(self.file_prefix + self.flange_site)
-            end = robots.transform(site.pos, site.quat) @ flange_offset
+            end = self.end_offset
             flange.parent.add_site(
                 name=self._prefix + VIAM_FRAME_SITE, pos=list(end[:3, 3]), quat=list(robots.quat(end))
             )
@@ -347,8 +377,7 @@ class ArmHandle:
             # Viam's end-effector frame, which children of the arm's frame
             # (a wrist camera) are placed relative to.
             flange = spec.site(self.file_prefix + self.flange_site)
-            # from the compiled model: the spec's quat ignores euler/axisangle/xyaxes/zaxis
-            end = robots.transform(site.pos, site.quat) @ flange_offset
+            end = self.end_offset
             flange.parent.add_site(
                 name=self._prefix + VIAM_FRAME_SITE, pos=list(end[:3, 3]), quat=list(robots.quat(end))
             )
@@ -546,11 +575,12 @@ class ArmHandle:
         self._sim.run(apply)
 
     def wait_for_joint_targets(
-        self, targets: Sequence[float], tolerance_rad: float
+        self, targets: Sequence[float], tolerance_rad: float | np.ndarray
     ) -> Future:
-        """Resolve once every joint is within tolerance of its target and slower
-        than the is-moving threshold. Checked once per physics step on the sim
-        thread; cancelling the future removes the check."""
+        """Resolve once every joint is within tolerance (one value, or one per
+        joint) of its target and slower than the is-moving threshold. Checked
+        once per physics step on the sim thread; cancelling the future removes
+        the check."""
         future: Future = Future()
         key = f"arm-wait:{self.name}:{id(future)}"
         wanted = np.asarray([float(value) for value in targets])
@@ -633,9 +663,10 @@ class ArmHandle:
         result: dict[str, Any] = {
             "source": "mujoco-rate-limited-position-servo",
             "joint_names": list(self.joint_names()),
-            "max_velocity_rad_s": [self._max_rad_s] * count,
+            "max_velocity_rad_s": self._max_rad_s.tolist(),  # m/s for a slide
         }
         if self._max_rad_s2 is not None:
+            # ponytail: slides share the hinge value (metadata only, nothing enforces it); split it if anything starts to
             result["max_acceleration_rad_s2"] = [self._max_rad_s2] * count
         return result
 

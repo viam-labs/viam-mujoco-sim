@@ -1,10 +1,15 @@
 import json
+import math
 
+import mujoco
+import numpy as np
 import pytest
 
-from mujoco_module.handles import ArmHandle, CameraHandle
+from mujoco_module import robots
+from mujoco_module.handles import ArmHandle, BaseHandle, CameraHandle
 from mujoco_module.robot_file import RobotHandle
 from mujoco_module.sim import WorldConfig
+from test_base import finish, settle
 
 # A fixed torso with two 2-joint chains (shoulder about z, elbow about y), and
 # a slide gripper on the left one. Both chains hang from the torso, their
@@ -235,3 +240,236 @@ def test_two_arms_racing_for_one_chain_leave_one(running_sim, torso):
     assert "is already" in str(results[loser])
     assert sim.run(lambda: (sorted(sim.arms), sim.contributes(loser))) == ([winners[0]], False)
 
+
+
+# ---- a robot on a base, an arm on an arm --------------------------------------
+
+# The fixture with a slide "torso" between the root and the limbs: the lift
+# carries both chains, so their chain base is the lift; its flange site is
+# 100 mm above it. Its box sits in the torso's and collides with nothing.
+LIFTED = (
+    TORSO.replace(
+        '<geom type="box" size="0.1 0.1 0.1" mass="5"/>',
+        '<geom type="box" size="0.1 0.1 0.1" mass="5"/>\n      <body name="lift">'
+        '<joint name="lift" type="slide" axis="0 0 1" range="0 0.3" damping="200"/>'
+        '<geom type="box" size="0.05 0.05 0.05" mass="1" contype="0" conaffinity="0"/><site name="lift/top" pos="0 0 0.1"/>',
+        1,
+    )
+    .replace("    </body>\n  </worldbody>", "    </body></body>\n  </worldbody>")
+    .replace("  <actuator>\n", '  <actuator>\n    <position name="lift" joint="lift" ctrlrange="0 0.3" kp="5000"/>\n')
+    .replace('qpos="0.5', 'qpos="0 0.5').replace('ctrl="0.5', 'ctrl="0 0.5')
+)
+LIFT_SVA = {
+    "name": "lift", "kinematic_param_type": "SVA",
+    "links": [{"id": "base", "parent": "world"}, {"id": "top", "parent": "lift", "translation": {"x": 0, "y": 0, "z": 100}}],
+    "joints": [{"id": "lift", "type": "prismatic", "parent": "base", "axis": {"x": 0, "y": 0, "z": 1}, "min": 0, "max": 300}],
+}
+# a box on two wheels for the robot to ride (forward +x, as a ROS base)
+BOX_BASE = """
+<mujoco>
+  <worldbody>
+    <body name="chassis">
+      <geom type="box" size="0.2 0.15 0.05" pos="0 0 0.1" mass="10"/>
+      <body name="left" pos="0 0.17 0.05"><joint name="left" axis="0 1 0"/>
+        <geom type="cylinder" size="0.05 0.02" euler="1.5708 0 0" mass="0.5"/></body>
+      <body name="right" pos="0 -0.17 0.05"><joint name="right" axis="0 1 0"/>
+        <geom type="cylinder" size="0.05 0.02" euler="1.5708 0 0" mass="0.5"/></body>
+    </body>
+  </worldbody>
+</mujoco>
+"""
+ON_BASE = [0, 0, 0.1]  # the robot's frame on the base: its torso box clears the chassis
+ON_LIFT = [0, 0, -0.1]  # a limb's frame on the lift arm: the lift body, 100 mm below its flange
+
+
+@pytest.fixture
+def lifted(torso):
+    (torso / "lifted.xml").write_text(LIFTED)
+    (torso / "lift.json").write_text(json.dumps(LIFT_SVA))
+    (torso / "base.xml").write_text(BOX_BASE)
+    return torso
+
+
+def lifted_robot(sim, path, **extra):
+    return RobotHandle(sim, "bot", {"mjcf": str(path / "lifted.xml"), **extra})
+
+
+def lift(path, **extra):
+    return {
+        "robot": "bot", "parent": "bot", "position": TORSO_POSE, "joints": ["lift"],
+        "flange_site": "lift/top", "kinematics_url": str(path / "lift.json"), **extra,
+    }
+
+
+def box_base(sim, path):
+    return BaseHandle(sim, "base", {"mjcf": str(path / "base.xml"), "max_linear_mps": 0.5, "max_angular_dps": 90})
+
+
+def contacts(sim):
+    """Body-name pairs in contact."""
+    model = sim.model
+    return [{model.body(model.geom_bodyid[g]).name for g in (c.geom1, c.geom2)} for c in sim.data.contact[: sim.data.ncon]]
+
+
+def test_a_robot_rides_its_base(sim, lifted):
+    sim.configure_world(WorldConfig.from_attrs({"props": []}))
+    base = box_base(sim, lifted)
+    robot(sim, lifted, parent="base", position=ON_BASE)  # the fixed-torso file
+    left = ArmHandle(sim, "left-arm", limb(lifted, "left"))
+    sim.advance(0.5)
+    assert not [pair for pair in contacts(sim) if any(n.startswith("base/") for n in pair) and any(n.startswith("bot/") for n in pair)]
+    start, start_quat = left.get_end_pose()
+
+    def relative(name):
+        frame = sim.data.site(name)
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, frame.xmat)
+        return robots.transform(frame.xpos, quat)
+
+    before = np.linalg.inv(relative("base/viam_frame")) @ relative("bot/viam_frame")
+    assert before[:3, 3] == pytest.approx(ON_BASE, abs=1e-9)
+    mount = sim.data.site("bot/viam_frame").xpos.copy()
+    finish(sim, base.move_straight(0.5, 0.3)).result()
+    finish(sim, base.spin(math.radians(90), math.radians(60))).result()
+    settle(sim)
+    assert np.linalg.norm(sim.data.site("bot/viam_frame").xpos - mount) > 0.4  # it went with the base
+    after = np.linalg.inv(relative("base/viam_frame")) @ relative("bot/viam_frame")
+    assert after == pytest.approx(before, abs=1e-6)
+    position, quat = left.get_end_pose()  # in the arm's own frame: unchanged
+    assert position == pytest.approx(start, abs=1e-3)
+    assert abs(np.dot(quat, start_quat)) == pytest.approx(1.0, abs=1e-5)
+
+
+def test_the_robot_and_its_arms_drop_out_with_the_base(sim, lifted):
+    sim.configure_world(WorldConfig.from_attrs({"props": []}))
+    base = box_base(sim, lifted)
+    lifted_robot(sim, lifted, parent="base", position=ON_BASE)
+    torso = ArmHandle(sim, "torso", lift(lifted))
+    left = ArmHandle(sim, "left-arm", limb(lifted, "left", parent="torso", position=ON_LIFT))
+    base.close()
+    assert mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_BODY, "bot/torso") < 0
+    for arm in (torso, left):
+        with pytest.raises(RuntimeError, match="robot 'bot' is not in the scene"):
+            arm.get_joint_positions()
+    box_base(sim, lifted)
+    assert left.get_joint_positions() == pytest.approx([0.0, 0.0])  # back, at home
+
+
+def test_an_arm_on_an_arm(sim, lifted):
+    lifted_robot(sim, lifted)
+    torso = ArmHandle(sim, "torso", lift(lifted))
+    with pytest.raises(ValueError, match=(
+        r'set frame.translation to \{"x": 0.0, "y": 0.0, "z": -100.0\}.*relative to arm torso\'s end effector'
+    )):
+        ArmHandle(sim, "left-arm", limb(lifted, "left", parent="torso", position=[0, 0, 0]))
+    left = ArmHandle(sim, "left-arm", limb(lifted, "left", parent="torso", position=ON_LIFT))
+    right = ArmHandle(sim, "right-arm", limb(lifted, "right", parent="torso", position=ON_LIFT))
+    claims = sim.robot_claims["bot"]
+    assert (claims["joint:lift"], claims["joint:left/shoulder"], claims["joint:right/shoulder"]) == (
+        "torso", "left-arm", "right-arm")
+    # the torso moves the limb's frame in the world; its end position, in that frame, stays
+    sim.advance(0.5)
+    start, _ = left.get_end_pose()
+    end = sim.data.site("left-arm/viam_frame").xpos.copy()
+    torso.set_joint_targets([0.1])
+    sim.advance(2.0)
+    assert torso.get_joint_positions() == pytest.approx([0.1], abs=1e-3)
+    assert sim.data.site("left-arm/viam_frame").xpos - end == pytest.approx([0, 0, 0.1], abs=1e-3)
+    assert left.get_end_pose()[0] == pytest.approx(start, abs=1e-4)
+    assert right.get_joint_positions() == pytest.approx([0.0, 0.0], abs=1e-3)
+
+
+def test_a_limb_must_hang_from_its_parent_arms_last_link(sim, torso):
+    robot(sim, torso)
+    ArmHandle(sim, "right-arm", limb(torso, "right"))
+    with pytest.raises(ValueError, match=r"torso moves relative to right/fore \(where arm right-arm's end effector is\)"):
+        ArmHandle(sim, "left-arm", limb(torso, "left", parent="right-arm"))
+
+
+def test_a_parent_arm_must_be_bound_to_the_same_robot(sim, torso):
+    robot(sim, torso)
+    RobotHandle(sim, "bot2", {"mjcf": str(torso / "torso.xml"), "position": [2, 0, 0]})
+    ArmHandle(sim, "other", {**limb(torso, "right"), "robot": "bot2", "parent": "bot2"})
+    with pytest.raises(ValueError, match='an arm in robot bot needs frame.parent "bot" or another of its arms'):
+        ArmHandle(sim, "left-arm", limb(torso, "left", parent="other"))
+
+
+def test_a_parent_arm_must_be_in_the_scene(sim, torso):
+    robot(sim, torso)
+    with pytest.raises(ValueError, match="arm 'right-arm' is not in the scene; configure it first"):
+        ArmHandle(sim, "left-arm", limb(torso, "left", parent="right-arm"))
+
+
+# ---- slide joints -------------------------------------------------------------
+
+
+def test_a_slide_joint_moves_at_up_to_100_mm_s(sim, lifted):
+    lifted_robot(sim, lifted)
+    torso = ArmHandle(sim, "torso", lift(lifted))
+    assert torso.dynamics_metadata()["max_velocity_rad_s"] == [0.1]  # m/s
+    torso.set_joint_targets([0.12])
+    sim.advance(0.5)
+    assert torso.get_joint_positions()[0] == pytest.approx(0.05, abs=0.005)
+    sim.advance(1.5)
+    assert torso.get_joint_positions() == pytest.approx([0.12], abs=1e-3)
+    hinged = ArmHandle(sim, "left-arm", limb(lifted, "left", parent="torso", position=ON_LIFT))
+    assert hinged.dynamics_metadata()["max_velocity_rad_s"] == pytest.approx([math.pi] * 2)  # unchanged
+
+
+def test_a_slide_joint_reads_mm(running_sim, lifted):
+    import asyncio
+
+    from viam.components.arm import JointPositions
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.arm import MujocoArm
+    from mujoco_module.models.robot import MujocoRobot
+    from mujoco_module.models.world import MujocoWorld
+    from test_robot_models import config
+
+    MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({})), {})
+    bot = MujocoRobot.new(config("bot", {"mjcf": str(lifted / "lifted.xml")}), {})
+    attrs = {k: v for k, v in lift(lifted).items() if k not in ("parent", "position")}
+    torso = MujocoArm.new(config("torso", attrs, parent="bot", translation={"x": 0, "y": 0, "z": 500}), {})
+    left = MujocoArm.new(config("left-arm", {k: v for k, v in limb(lifted, "left").items() if k not in ("parent", "position")},
+                                parent="torso", translation={"x": 0, "y": 0, "z": -100}), {})
+
+    async def run():
+        assert torso._tolerance_rad.tolist() == [0.001]  # 1 mm
+        assert left._tolerance_rad == pytest.approx([math.radians(0.5)] * 2)  # a hinge arm's, unchanged
+        await torso.move_to_joint_positions(JointPositions(values=[120]))
+        assert (await torso.get_joint_positions()).values == pytest.approx([120], abs=1)
+        assert (await torso.do_command({"command": "get_joint_positions_radians"}))["values"] == pytest.approx([0.12], abs=1e-3)
+        await left.move_to_joint_positions(JointPositions(values=[20, -10]))
+        assert (await left.get_joint_positions()).values == pytest.approx([20, -10], abs=0.5)
+        for component in (left, torso, bot):
+            await component.close()
+
+    asyncio.run(run())
+
+
+def test_a_slide_joint_moves_through_mm_waypoints(running_sim, lifted):
+    import asyncio
+
+    from viam.components.arm import JointPositions
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.arm import MujocoArm
+    from mujoco_module.models.robot import MujocoRobot
+    from mujoco_module.models.world import MujocoWorld
+    from test_robot_models import config
+
+    MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({})), {})
+    bot = MujocoRobot.new(config("bot", {"mjcf": str(lifted / "lifted.xml")}), {})
+    attrs = {k: v for k, v in lift(lifted).items() if k not in ("parent", "position")}
+    torso = MujocoArm.new(config("torso", attrs, parent="bot", translation={"x": 0, "y": 0, "z": 500}), {})
+
+    async def run():
+        await torso.move_through_joint_positions([JointPositions(values=[60]), JointPositions(values=[120])])
+        assert (await torso.get_joint_positions()).values == pytest.approx([120], abs=1)
+        for component in (torso, bot):
+            await component.close()
+
+    asyncio.run(run())

@@ -35,6 +35,10 @@ This product includes third-party material:
   trimesh.load_mesh(path).simplify_quadric_decimation(face_count=5000).
   assets/clearpath_husky/husky.xml is written for this module from the same package's
   urdf/husky.urdf.xacro (dimensions) and its expanded URDF (inertials).
+- assets/pal_tiago_dual/assets/ (TIAGo++ meshes) from google-deepmind/mujoco_menagerie at
+  commit 370c43965323c0944b433b202aac5058b5f907a9 (pal_tiago_dual), Apache-2.0, PAL Robotics.
+  See assets/pal_tiago_dual/LICENSE. tiago_base.xml and tiago_upper.xml are derived from its
+  tiago_dual_position.xml by assets/pal_tiago_dual/make_tiago.py.
 - src/mujoco_module/models/arm.py, src/mujoco_module/models/utils.py, src/main.py,
   env.sh and run.nodetect.sh are adapted from viam-modules/viam-isaac-sim, Apache-2.0,
   Copyright Viam; modified for MuJoCo.

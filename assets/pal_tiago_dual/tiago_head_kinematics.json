@@ -1,0 +1,78 @@
+{
+  "name": "tiago_head",
+  "kinematic_param_type": "SVA",
+  "links": [
+    {
+      "id": "base",
+      "parent": "world",
+      "translation": {
+        "x": 182.0,
+        "y": 0.0,
+        "z": 0.0
+      }
+    },
+    {
+      "id": "head_1_link",
+      "parent": "head_1_joint",
+      "translation": {
+        "x": 5.0,
+        "y": 0.0,
+        "z": 98.0
+      }
+    },
+    {
+      "id": "head_2_link",
+      "parent": "head_2_joint",
+      "translation": {
+        "x": 112.0,
+        "y": 0.0,
+        "z": 90.0
+      },
+      "orientation": {
+        "type": "ov_degrees",
+        "value": {
+          "x": 1.0,
+          "y": -0.0,
+          "z": 0.0,
+          "th": -90.0
+        }
+      },
+      "geometry": {
+        "x": 187.0,
+        "y": 259.81,
+        "z": 173.37,
+        "translation": {
+          "x": 14.5,
+          "y": -0.01,
+          "z": 38.32
+        }
+      }
+    }
+  ],
+  "joints": [
+    {
+      "id": "head_1_joint",
+      "type": "revolute",
+      "parent": "base",
+      "axis": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 1.0
+      },
+      "min": -75.0002,
+      "max": 75.0002
+    },
+    {
+      "id": "head_2_joint",
+      "type": "revolute",
+      "parent": "head_1_link",
+      "axis": {
+        "x": 0.0,
+        "y": -1.0,
+        "z": 0.0
+      },
+      "min": -60.0001,
+      "max": 45.0
+    }
+  ]
+}
