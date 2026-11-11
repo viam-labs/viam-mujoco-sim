@@ -561,6 +561,16 @@ class ArmHandle:
 
         return self._sim.run(read)
 
+    def get_commanded_positions(self) -> list[float]:
+        """Where the servos are being driven now (on a trajectory, its current
+        point): measured positions trail it."""
+
+        def read() -> list[float]:
+            data, ids = self._now()
+            return [float(value) for value in data.ctrl[ids.ctrl]]
+
+        return self._sim.run(read)
+
     def set_joint_targets(self, positions: Sequence[float]) -> None:
         targets = np.asarray([float(value) for value in positions])
         if targets.shape != (len(self._joint_names),):
@@ -638,6 +648,30 @@ class ArmHandle:
 
         self._sim.run(start)
         return future
+
+    def extend_trajectory(self, points: Sequence[JointTrajectoryPoint]) -> Future:
+        """Append points, timed from the end of what came before, to the running
+        trajectory (same future), or start one from the commanded pose when none is
+        running (the first batch of a stream, or after it ran dry)."""
+        if not points:
+            raise ValueError("trajectory needs at least one point")
+        if any(b.time_s < a.time_s for a, b in itertools.pairwise(points)) or points[0].time_s < 0:
+            raise ValueError("trajectory times must be non-negative and non-decreasing")
+        running = self._sim.run(lambda: self._trajectory)
+        if running is None:
+            return self.start_trajectory(points)
+
+        def extend() -> Future:
+            trajectory = self._trajectory
+            if trajectory is None:  # it finished between the check and now: start afresh
+                return None
+            end = trajectory.points[-1].time_s
+            more = tuple(JointTrajectoryPoint(end + p.time_s, tuple(p.positions)) for p in points)
+            self._trajectory = _Trajectory(trajectory.points + more, trajectory.start_s, trajectory.future)
+            return trajectory.future
+
+        future = self._sim.run(extend)
+        return future if future is not None else self.start_trajectory(points)
 
     def stop_trajectory(self) -> None:
         def stop() -> None:

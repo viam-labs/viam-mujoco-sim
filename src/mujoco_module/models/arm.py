@@ -425,13 +425,27 @@ class MujocoArm(Arm, EasyResource):
         if not raw:
             return
 
+        nowait = (kwargs.get("extra") or {}).get("waitAtEnd") is False
         self._moving_count += 1
         try:
-            start = await asyncio.to_thread(handle.get_joint_positions)
+            # a no-wait move (teleop, one per cycle) continues from where the last one was
+            # heading; restarting from the lagging measured pose loses ground every cycle
+            read = handle.get_commanded_positions if nowait else handle.get_joint_positions
+            start = await asyncio.to_thread(read)
             # never push targets faster than the joint limit: the rate-limited
             # servo would chase the newest target and cut corners off the plan
             limit = np.array(handle.dynamics_metadata()["max_velocity_rad_s"])
             stream = _densify(start, raw, np.minimum(self._max_step_rad, limit * self._control_period))
+            if nowait:
+                # RDK's teleop executor sends each plan like this and expects the call back at
+                # once: follow the same path on the sim thread and return; a newer move replaces it.
+                # ponytail: is_moving reads False while it runs; track the trajectory if a caller needs it
+                points = [
+                    JointTrajectoryPoint((i + 1) * self._control_period, tuple(targets))
+                    for i, targets in enumerate(stream)
+                ]
+                await asyncio.to_thread(handle.start_trajectory, points)
+                return
 
             loop = asyncio.get_running_loop()
             push_start = loop.time()
@@ -467,46 +481,43 @@ class MujocoArm(Arm, EasyResource):
         last_time = timedelta(0)
         first = True
         handle = self._h()
-        async for batch in batches:
-            trajectory: list[JointTrajectoryPoint] = []
-            batch_start = last_time
-            for point in batch:
-                if first:
-                    if point.time != timedelta(0):
-                        raise ValueError("first trajectory point must have time zero")
-                    first = False
-                elif point.time <= last_time:
-                    raise ValueError("trajectory point times must strictly increase")
-                trajectory.append(
-                    JointTrajectoryPoint(
-                        time_s=(point.time - batch_start).total_seconds(),
-                        positions=tuple(
-                            _finite_si(point.positions, self._scale, "joint positions")
-                        ),
+        future = expected = None
+        try:
+            async for batch in batches:
+                trajectory: list[JointTrajectoryPoint] = []
+                batch_start = last_time
+                for point in batch:
+                    if first:
+                        if point.time != timedelta(0):
+                            raise ValueError("first trajectory point must have time zero")
+                        first = False
+                    elif point.time <= last_time:
+                        raise ValueError("trajectory point times must strictly increase")
+                    trajectory.append(
+                        JointTrajectoryPoint(
+                            time_s=(point.time - batch_start).total_seconds(),
+                            positions=tuple(
+                                _finite_si(point.positions, self._scale, "joint positions")
+                            ),
+                        )
                     )
-                )
-                last_time = point.time
+                    last_time = point.time
 
-            if trajectory:
-                expected = trajectory[-1].positions
-                start_task = asyncio.create_task(
-                    asyncio.to_thread(handle.start_trajectory, trajectory)
-                )
-                started = False
-                try:
-                    future = await asyncio.shield(start_task)
-                    started = True
-                    await asyncio.wrap_future(future)
-                finally:
-                    if not started:
-                        try:
-                            await start_task
-                        except BaseException:
-                            started = False
-                        else:
-                            started = True
-                    if started:
-                        await asyncio.to_thread(handle.stop_trajectory)
+                if trajectory:
+                    # each batch joins the running trajectory; waiting for it to finish
+                    # before taking the next added per-batch overhead (RDK sends 10 ms ones)
+                    expected = trajectory[-1].positions
+                    future = await asyncio.to_thread(handle.extend_trajectory, trajectory)
+                yield Arm.TrajectoryUpdate()
+        except BaseException:  # the stream failed or was cancelled: don't leave the arm playing it
+            await asyncio.to_thread(handle.stop_trajectory)
+            raise
+        if future is not None:
+            try:
+                await asyncio.wrap_future(future)
+            finally:
+                await asyncio.to_thread(handle.stop_trajectory)
+            if expected is not None:
                 actual = await asyncio.to_thread(handle.get_joint_positions)
                 # Viam units: degrees, mm for a slide
                 error = max(
@@ -523,7 +534,6 @@ class MujocoArm(Arm, EasyResource):
                     [round(value * scale, 2) for value, scale in zip(actual, self._scale)],
                     error,
                 )
-            yield Arm.TrajectoryUpdate()
 
     async def get_joint_positions(self, **kwargs) -> JointPositions:
         si = await asyncio.to_thread(self._h().get_joint_positions)

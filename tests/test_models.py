@@ -125,6 +125,38 @@ def test_streamed_trajectory_yields_an_update(cell):
     assert len(run(consume())) == 1
 
 
+def test_streamed_batches_play_back_to_back_in_real_time(running_sim):
+    """RDK's arm-streaming session sends a 10 ms batch of timed points at a time.
+    Running each batch to completion before taking the next added a few ms of
+    overhead per batch, so a 2 s stream took over 3 s; batches must join one
+    continuous trajectory instead."""
+    from datetime import timedelta
+
+    from viam.components.arm import Arm, JointPositions
+
+    MujocoWorld.new(config("sim-world", {"props": [BLOCK]}), {})
+    arm = MujocoArm.new(
+        config("pick-arm", {"world": "sim-world", "asset": "lite6", "max_joint_deg_s": 60}), {}
+    )
+    run(arm.move_to_joint_positions(JointPositions(values=[0, 0, 90, 0, 90, 0])))
+
+    def at(i):  # base joint at 20 deg/s, one point per 10 ms
+        return Arm.TrajectoryPoint(time=timedelta(milliseconds=10 * i), positions=[0.2 * i, 0, 90, 0, 90, 0])
+
+    async def batches():
+        yield [at(0)]
+        for i in range(1, 201):
+            yield [at(i)]
+
+    async def consume():
+        return [update async for update in arm.move_through_joint_positions_streamed(batches())]
+
+    start = time.monotonic()
+    run(consume())
+    assert time.monotonic() - start < 2.4  # a 2 s stream, plus settling
+    assert run(arm.get_joint_positions()).values[0] > 38  # it ends at 40 deg
+
+
 def test_camera_properties(cell):
     camera = MujocoCamera.new(
         config("scene-cam", {"world": "sim-world", "target": [0.3, 0, 0.15]}), {}
@@ -208,6 +240,49 @@ def test_move_through_streams_no_faster_than_the_joint_limit(running_sim, monkey
         # 30 deg/s at the default 50 Hz is 0.6 deg per push
         assert max(abs(a - b) for a, b in zip(targets, prev)) <= math.radians(0.6) + 1e-9
         prev = targets
+
+
+def test_move_through_without_waiting_at_the_end_returns_at_once(running_sim):
+    """RDK's teleop executor sends each plan with waitAtEnd false and expects the
+    call back at once; the arm follows the same rate-limited path, and a newer
+    call replaces it."""
+    from viam.components.arm import JointPositions
+
+    MujocoWorld.new(config("sim-world", {"props": [BLOCK]}), {})
+    arm = MujocoArm.new(
+        config("pick-arm", {"world": "sim-world", "asset": "lite6", "max_joint_deg_s": 30}), {}
+    )
+    nowait = {"waitAtEnd": False, "interpolate": False}
+    start = time.monotonic()
+    run(arm.move_through_joint_positions([JointPositions(values=[20, 0, 90, 0, 90, 0])], extra=nowait))
+    assert time.monotonic() - start < 0.3  # 20 deg at 30 deg/s takes 0.67 s
+    assert run(arm.get_joint_positions()).values[0] < 15  # still on its way
+    run(arm.move_through_joint_positions([JointPositions(values=[-10, 0, 90, 0, 90, 0])], extra=nowait))
+    deadline = time.monotonic() + 5
+    while abs(run(arm.get_joint_positions()).values[0] + 10) > 0.6 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert run(arm.get_joint_positions()).values == pytest.approx([-10, 0, 90, 0, 90, 0], abs=0.6)
+
+
+def test_chained_moves_without_waiting_keep_pace(running_sim):
+    """Teleop sends a no-wait move every cycle; each must continue from where the
+    last was heading (the commanded pose), not restart from the lagging measured
+    one, or the arm falls further behind every cycle."""
+    from viam.components.arm import JointPositions
+
+    MujocoWorld.new(config("sim-world", {"props": [BLOCK]}), {})
+    arm = MujocoArm.new(
+        config("pick-arm", {"world": "sim-world", "asset": "lite6", "max_joint_deg_s": 30}), {}
+    )
+    run(arm.move_to_joint_positions(JointPositions(values=[0, 0, 90, 0, 90, 0])))
+    nowait = {"waitAtEnd": False, "interpolate": False}
+    start = time.monotonic()
+    while (t := time.monotonic() - start) < 3.0:
+        goal = 20 * t + 2  # 20 deg/s, sent 0.1 s ahead
+        run(arm.move_through_joint_positions([JointPositions(values=[goal, 0, 90, 0, 90, 0])], extra=nowait))
+        time.sleep(0.1)
+    # at 20 deg/s for 3 s the joint should be near 60; restarting from measured each cycle lost ~30%
+    assert run(arm.get_joint_positions()).values[0] > 54
 
 
 def test_densify_ends_on_waypoint_within_step():

@@ -63,6 +63,8 @@ nav-stack for SLAM and navigation in it (see
 de-palletizing cell (see [De-palletizing](#de-palletizing)), and
 [`examples/parcel-sort.json`](examples/parcel-sort.json) a parcel-sorting cell
 with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), and
+[`examples/conveyor-pick.json`](examples/conveyor-pick.json) a UR5e picking
+parcels off the running belt (see [Conveyor pick](#conveyor-pick)), and
 [`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
 between two tables (see [Mobile manipulation](#mobile-manipulation)), and
 [`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
@@ -369,8 +371,8 @@ as it drives, so plan arm moves in the base's frame; see
 |---|---|
 | `GetJointPositions` | Degrees (mm for a slide joint). |
 | `MoveToJointPositions` | Returns when the arm arrives, or fails after `move_timeout_sec`. |
-| `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. |
-| `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time. |
+| `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. With extra `{"waitAtEnd": false}` (as the motion service's teleop sends) it returns at once and the next move continues from the commanded pose. |
+| `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time; each batch plays straight after the last. |
 | `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
 | `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes. |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
@@ -1762,6 +1764,59 @@ gripper, sized from `get_parcels`, as in [De-palletizing](#de-palletizing).
 Moves that carry a parcel add an `OrientationConstraint` (5°), so the cup
 stays pointing down along the whole path, not only at its ends. At the end it reads `get_parcels` again and
 reports any parcel that isn't in its right bin.
+
+## Conveyor pick
+
+[`examples/conveyor-pick.json`](examples/conveyor-pick.json) is the parcel
+sorting cell without the scale, bins and photo-eye: the UR5e and ePick on
+their pedestal, the belt and the spawner. The arm is faster
+(`max_joint_deg_s` 180, `max_joint_deg_s2` 360) and the belt goes up to
+1 m/s (`max_speed_mps` 1.0), so the arm can chase a parcel on it.
+
+[`examples/conveyor_pick.py`](examples/conveyor_pick.py) picks one parcel
+without stopping the belt, and is a way to compare how Viam's motion APIs
+follow a moving target:
+
+```sh
+uv run python examples/conveyor_pick.py <machine address> <api key id> <api key> \
+    <teleop|stream|move> [--belt POWER] [--lookahead S] [--csv OUT]
+```
+
+It parks the gripper over the start of the arm's reach, runs the belt at
+`--belt` × 1 m/s (default 0.1), and waits for the leading parcel. Then, at a
+steady rate, it reads the parcel's pose from the spawner's `get_parcels` and
+sends a goal `--lookahead` seconds of belt travel ahead of it: 100 mm over it
+until the gripper has been on target for three ticks, then down to its top,
+`Grab`, and up 150 mm, still following the belt, to the edge of the reach.
+The goal's height leads its own ramps by the lookahead too. It prints when
+the gripper locked on and gripped, its error at the grab, and how far the
+parcel rose; `--csv` writes every tick.
+
+The modes send the same goals three ways:
+
+| Mode | API | Rate | Lookahead |
+|---|---|---|---|
+| `teleop` | The motion service's `teleop_start`, `teleop_move` and `teleop_stop` DoCommands. RDK plans each goal in the background, with the belt's rails as obstacles, and runs the newest plan with `MoveThroughJointPositions` and `waitAtEnd` false. | 10 Hz | 0.4 s |
+| `stream` | The motion service's `TempStreamArmJointPositions` session, which times a stream of joint targets with trajex. It takes joints, not poses, so the script solves IK itself on the module's UR5e kinematics, and nothing checks for collisions. Released viam-server builds refuse the session: it needs a build with the `viam_rdk_cgo_have_cxx20_rt` tag. | 20 Hz | 0.5 s |
+| `move` | The motion service's `Move` (the arm leaves `MoveToPosition` to it), once per goal. Each call plans, runs and waits for the arm to stop. | as fast as `Move` returns | 1.0 s |
+
+On a MacBook, one parcel each (viam-server v1.15.0, built with trajex):
+
+| Mode | Belt | Locked on | Gripped | Error at grab (x, y, z mm) | Lifted |
+|---|---|---|---|---|---|
+| `teleop` | 0.1 m/s | 0.8 s | 1.8 s | 0.9, 1.6, 2.8 | 147 mm |
+| `stream` | 0.1 m/s | 0.8 s | 1.9 s | 0.8, 8.6, 3.0 | 147 mm |
+| `move` | 0.1 m/s | 5.2 s | 6.1 s | 0.1, -1.0, 0.9 | 144 mm |
+| `teleop` | 0.3 m/s | 0.9 s | 2.0 s | 4.8, 4.8, 2.0 | 146 mm |
+| `stream` | 0.3 m/s | 1.5 s | 2.8 s | 4.5, -29.9, 2.6 | 145 mm |
+| `move` | 0.3 m/s | never | | | |
+
+`move` stops between goals, about 1 s per goal at 0.1 m/s and 1.4 s at
+0.3 m/s; the parcel crosses the reach in under 3 s at 0.3 m/s, too few goals
+to lock on. `teleop` holds tightest: each plan starts from where the last
+one is headed, so the arm doesn't stop. `stream` moves smoothly, but
+trajex replans its timing whenever the target's speed changes, so it lags
+most on the descent and grips further from the middle.
 
 ## Mobile base, SLAM and navigation
 
