@@ -28,6 +28,7 @@ from .sim import (
     GRIPPER_ASSETS,
     KNOWN_ASSETS,
     LOGGER,
+    ROBOT_LIMB_ASSETS,
     PROP_CONTACT_PRIORITY,
     PROP_SOLREF,
     Contribution,
@@ -40,6 +41,9 @@ Vec3 = tuple[float, float, float]
 Quat = tuple[float, float, float, float]  # (w, x, y, z), MuJoCo's order
 
 DEFAULT_MAX_JOINT_DEG_S = 180.0
+# an arm in a robot file must be framed at its chain base within these
+ROBOT_FRAME_TOLERANCE_M = 0.001
+ROBOT_FRAME_TOLERANCE_DEG = 0.1
 # Each component that others can be framed on adds "{name}/viam_frame": its
 # frame in Viam's frame system (an arm's end effector, a base's origin).
 VIAM_FRAME_SITE = "viam_frame"
@@ -142,20 +146,48 @@ class ArmHandle:
     actuators and home are inferred from the MJCF (robots.py); `attrs` are
     the arm's attributes, over KNOWN_ASSETS[asset] when asset is set. With
     attrs["parent"] (a base) the arm rides that component's viam_frame, and
-    position/orientation_wxyz are relative to it."""
+    position/orientation_wxyz are relative to it.
+
+    With attrs["robot"] the arm is a limb of that robot's file
+    (robot_file.RobotHandle): it attaches nothing, reads the robot's model,
+    and drives `joints`; its frame must be its chain base's pose in the file.
+    File names (joints, actuators, bodies, flange_site) carry file_prefix
+    (the robot's "<robot>/", else the arm's own "<arm>/"); the Viam-facing
+    sites keep the arm's name ("<arm>/viam_frame", "<arm>/arm_frame")."""
 
     def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
-        attrs = {**KNOWN_ASSETS.get(str(attrs.get("asset")), {}), **attrs}
+        self.robot: str | None = str(attrs["robot"]) if attrs.get("robot") else None
+        assets = ROBOT_LIMB_ASSETS if self.robot else KNOWN_ASSETS
+        attrs = {**assets.get(str(attrs.get("asset")), {}), **attrs}
         label = f"arm {name}"
         self._sim = sim
         self.name = name
         self._prefix = f"{name}/"
-        self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
-        where = str(self.mjcf)
-        urdf = self.mjcf.suffix.lower() == ".urdf"
-        robots.check_flange_attrs(attrs, urdf, label)
+        if self.robot:
+            holder = sim.run(lambda: sim.robots.get(self.robot))
+            if holder is None:
+                raise RuntimeError(f"{label}: robot {self.robot!r} is not in the scene; configure the robot first")
+            if attrs.get("collision") == "kinematics":
+                raise ValueError(
+                    f'{label}: collision "kinematics" is not supported for an arm in a robot file yet; '
+                    "the file's own geoms are used"
+                )
+            for key in ("joints", "kinematics_url"):
+                if not attrs.get(key):
+                    raise ValueError(f"{label}: an arm in a robot file needs {key}")
+            self.file_prefix = holder.prefix
+            self.mjcf = holder.mjcf
+            where = f"robot {self.robot} ({holder.mjcf})"
+            urdf = False
+        else:
+            holder = None
+            self.file_prefix = self._prefix
+            self.mjcf = robots.resolve_path(str(attrs["mjcf"]), f"{label}: mjcf")
+            where = str(self.mjcf)
+            urdf = self.mjcf.suffix.lower() == ".urdf"
+            robots.check_flange_attrs(attrs, urdf, label)
         mesh_dir = attrs.get("mesh_dir")
-        spec = robots.load_mjcf(self.mjcf, mesh_dir)
+        spec = None if holder is not None else robots.load_mjcf(self.mjcf, mesh_dir)
         if urdf:
             flange = robots.flange_link(self.mjcf.read_bytes(), attrs.get("flange_link"), where)
         # served by GetKinematics with the kinematics: RDK reads a URDF's mesh collisions from them
@@ -190,16 +222,17 @@ class ArmHandle:
                     "arm joint names in chain order"
                 )
             names = list(self.kinematics.joints)
-        # The arm on its own, as the file describes it. Ids below index this
-        # model; names carry over into the scene with the prefix.
-        self.model = spec.compile()
+        # The arm on its own (or its robot's file), as the file describes it.
+        # Ids below index this model; names carry over into the scene with
+        # file_prefix.
+        self.model = holder.model if holder is not None else spec.compile()
         self.joints = robots.arm_joints(self.model, len(self.kinematics.joints), where, names)
         if urdf:
             robots.prepare_urdf_arm(spec, [self.model.joint(j).name for j in self.joints], flange, where)
             self.model = spec.compile()
         self.actuators = robots.arm_actuators(self.model, self.joints, where)
-        self._joint_names = tuple(self._prefix + self.model.joint(j).name for j in self.joints)
-        self._actuator_names = tuple(self._prefix + self.model.actuator(a).name for a in self.actuators)
+        self._joint_names = tuple(self.file_prefix + self.model.joint(j).name for j in self.joints)
+        self._actuator_names = tuple(self.file_prefix + self.model.actuator(a).name for a in self.actuators)
         self._home = tuple(
             float(value)
             for value in robots.home(self.model, str(attrs.get("home_keyframe", "home")), self.actuators)
@@ -213,9 +246,37 @@ class ArmHandle:
         site = self.model.site(self.flange_site)
         base_offset = robots.parse_pose(attrs.get("base_offset"), f"{label}: base_offset")
         flange_offset = robots.parse_pose(attrs.get("flange_offset"), f"{label}: flange_offset")
+        # The arm's Viam frame (its configured pose, relative to the parent's
+        # viam_frame or the world) and, base_offset on from it, where the
+        # MJCF's world goes.
+        self._frame = robots.transform(
+            [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))],
+            [float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
+        )
+        # an arm in a robot file: its frame is its chain base's (the first joint's parent body)
+        chain_base = 0
+        if holder is not None:
+            chain_base = int(self.model.body_parentid[self.model.jnt_bodyid[self.joints[0]]])
+            self.chain_base = self.model.body(chain_base).name
+            if self.model.body_weldid[chain_base] != 0:
+                raise ValueError(
+                    f"{label}: {self.chain_base} moves relative to robot {self.robot}; an arm's base "
+                    "must be fixed to the robot (no joint between them)"
+                )
+            if attrs.get("parent") != self.robot:
+                raise ValueError(f'{label}: an arm in robot {self.robot!r} needs frame.parent "{self.robot}"')
+            data = mujoco.MjData(self.model)
+            mujoco.mj_kinematics(self.model, data)
+            base = robots.transform(data.xpos[chain_base], data.xquat[chain_base])
+            expected = base @ np.linalg.inv(base_offset)
+            metres, degrees = robots.pose_error(self._frame, expected)
+            if metres > ROBOT_FRAME_TOLERANCE_M or degrees > ROBOT_FRAME_TOLERANCE_DEG:
+                from .robot_file import frame_error
+
+                raise ValueError(frame_error(expected, label, has_offset="base_offset" in attrs))
         robots.check_frames(
             self.model, self.kinematics, self.joints, self.model.site(self.flange_site).id,
-            self._home, base_offset, flange_offset, label,
+            self._home, base_offset, flange_offset, label, base_body=chain_base,
         )
         self._max_rad_s = math.radians(
             float(attrs.get("max_joint_deg_s", DEFAULT_MAX_JOINT_DEG_S))
@@ -236,16 +297,10 @@ class ArmHandle:
         self._ids_generation = -1
         self._callback_key = f"arm:{name}"
         self._parent: str | None = attrs.get("parent")
-        # The arm's Viam frame (its configured pose, relative to the parent's
-        # viam_frame or the world) and, base_offset on from it, where the
-        # MJCF's world goes.
-        self._frame = robots.transform(
-            [float(value) for value in attrs.get("position", (0.0, 0.0, 0.0))],
-            [float(value) for value in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
-        )
         excluded: list[tuple[str, str]] = []
         has_shapes = any(frame.geometry for frame in self.kinematics.frames.values())
-        collision = attrs.get("collision") or ("kinematics" if has_shapes else "mesh")
+        # an arm in a robot file uses the file's own geoms
+        collision = attrs.get("collision") or ("kinematics" if has_shapes and holder is None else "mesh")
         shapes: list[robots.Shape] = []
         if collision == "kinematics":
             if not has_shapes:
@@ -262,6 +317,19 @@ class ArmHandle:
             excluded += robots.home_contacts(child, self.joint_names(), self._home)
 
         arm_spec = spec
+        robot_site = f"{self.robot}/{VIAM_FRAME_SITE}"
+        arm_site = np.linalg.inv(base_offset)  # the arm's frame on its chain base
+
+        def build_in_robot(spec: mujoco.MjSpec) -> bool | None:
+            if spec.site(robot_site) is None:
+                return False  # robot not in the scene; calls say so
+            base = spec.body(self.file_prefix + self.chain_base)
+            base.add_site(name=self._prefix + ARM_FRAME_SITE, pos=list(arm_site[:3, 3]), quat=list(robots.quat(arm_site)))
+            flange = spec.site(self.file_prefix + self.flange_site)
+            end = robots.transform(site.pos, site.quat) @ flange_offset
+            flange.parent.add_site(
+                name=self._prefix + VIAM_FRAME_SITE, pos=list(end[:3, 3]), quat=list(robots.quat(end))
+            )
 
         def build(spec: mujoco.MjSpec) -> bool | None:
             placed = _mount(spec, self._parent, self._frame[:3, 3], robots.quat(self._frame))
@@ -273,19 +341,19 @@ class ArmHandle:
             child = arm_spec.copy()  # the file isn't read again
             robots.apply_shapes(child, shapes, label)
             frame = body.add_frame(pos=list(at_mount[:3, 3]), quat=list(robots.quat(at_mount)))
-            spec.attach(child, prefix=self._prefix, frame=frame)
+            spec.attach(child, prefix=self.file_prefix, frame=frame)
             # the arm's Viam frame, which end_pose is measured from
             body.add_site(name=self._prefix + ARM_FRAME_SITE, pos=list(pos), quat=list(quat))
             # Viam's end-effector frame, which children of the arm's frame
             # (a wrist camera) are placed relative to.
-            flange = spec.site(self._prefix + self.flange_site)
+            flange = spec.site(self.file_prefix + self.flange_site)
             # from the compiled model: the spec's quat ignores euler/axisangle/xyaxes/zaxis
             end = robots.transform(site.pos, site.quat) @ flange_offset
             flange.parent.add_site(
                 name=self._prefix + VIAM_FRAME_SITE, pos=list(end[:3, 3]), quat=list(robots.quat(end))
             )
             for first, second in excluded:
-                spec.add_exclude(bodyname1=self._prefix + first, bodyname2=self._prefix + second)
+                spec.add_exclude(bodyname1=self.file_prefix + first, bodyname2=self.file_prefix + second)
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             ids = self._resolve(model)
@@ -295,18 +363,35 @@ class ArmHandle:
             self._target = np.asarray(self._home)
             self._drop_trajectory()
 
-        def register() -> None:
+        claims = [f"joint:{self.model.joint(j).name}" for j in self.joints] + [
+            f"actuator:{self.model.actuator(a).name}" for a in self.actuators
+        ]
+        contribution = Contribution(build=build_in_robot if holder is not None else build, init=init)
+
+        def add() -> None:
+            # one sim-thread task, so two arms built at once can't both pass the
+            # claim check; a failed claim or contribution leaves nothing behind
+            if holder is not None:
+                from .robot_file import check_claims, claim
+
+                check_claims(sim, self.robot, claims, name)
+            sim.set_contribution(name, contribution)  # inline on the sim thread
+            if holder is not None:
+                claim(sim, self.robot, claims, name)
             sim.step_callbacks[self._callback_key] = self._on_step
             sim.arms[name] = self
 
-        sim.set_contribution(name, Contribution(build=build, init=init))
-        sim.run(register)
+        sim.run(add)
 
     def close(self) -> None:
         def detach() -> None:
             self._sim.step_callbacks.pop(self._callback_key, None)
             if self._sim.arms.get(self.name) is self:
                 del self._sim.arms[self.name]
+            if self.robot is not None:
+                from .robot_file import release_claims
+
+                release_claims(self._sim, self.robot, self.name)
             error = RuntimeError(f"arm {self.name!r} was closed (removed or reconfigured)")
             trajectory, self._trajectory = self._trajectory, None
             pending = [trajectory.future] if trajectory is not None else []
@@ -337,11 +422,24 @@ class ArmHandle:
         )
 
     def _in_scene(self) -> bool:
+        # the arm's own site: a robot's joints exist while the arm's build still waits
         assert self._sim.model is not None
-        return mujoco.mj_name2id(self._sim.model, mujoco.mjtObj.mjOBJ_JOINT, self._joint_names[0]) >= 0
+        return mujoco.mj_name2id(self._sim.model, mujoco.mjtObj.mjOBJ_SITE, self._prefix + VIAM_FRAME_SITE) >= 0
 
     def _absent(self) -> RuntimeError:
+        if self.robot is not None:
+            return RuntimeError(f"arm {self.name!r}: robot {self.robot!r} is not in the scene")
         return RuntimeError(f"arm {self.name!r}: parent {self._parent!r} has no viam_frame in the scene")
+
+    @property
+    def flange_site_name(self) -> str:
+        """The flange site's name in the scene."""
+        return self.file_prefix + self.flange_site
+
+    @property
+    def root_body_name(self) -> str:
+        """The arm's root body's name in the scene (its kinematic tree's root)."""
+        return self.file_prefix + self.root_body
 
     def _now(self) -> tuple[mujoco.MjData, _ArmIds]:
         sim = self._sim
@@ -425,7 +523,7 @@ class ArmHandle:
 
     def joint_names(self) -> tuple[str, ...]:
         """The arm's MJCF joint names, in chain order."""
-        return tuple(name.removeprefix(self._prefix) for name in self._joint_names)
+        return tuple(name.removeprefix(self.file_prefix) for name in self._joint_names)
 
     def get_joint_positions(self) -> list[float]:
         def read() -> list[float]:
@@ -962,13 +1060,25 @@ class GripperHandle:
         if handle is None:
             raise RuntimeError(f"arm {arm!r} is not in the scene; configure the arm first")
         mjcf = attrs.get("mjcf")
+        # an arm's own gripper drives a body below its last joint; another limb's
+        # actuators don't count. An arm on its own file falls back to every
+        # non-arm actuator when none maps to a body (a site or slider-crank drive).
+        below: list[int] | None = robots.actuators_below(handle.model, handle.joints[-1], handle.actuators)
+        if not below and handle.robot is None:
+            below = None
+        self._robot: str | None = handle.robot
         if mjcf is None:
-            model, prefix, where = handle.model, f"{arm}/", f"arm {arm} ({handle.mjcf})"
+            model, prefix = handle.model, handle.file_prefix
+            where = f"arm {arm} ({f'robot {handle.robot}' if handle.robot else handle.mjcf})"
+            named = attrs.get("actuator")
             actuator = robots.gripper_actuator(
-                model, where, exclude=handle.actuators, name=attrs.get("actuator")
+                model, where, exclude=handle.actuators, name=named,
+                # a named actuator must be this arm's only in a robot file (another limb's otherwise)
+                candidates=below if named is None or handle.robot is not None else None,
             )
         else:
-            own = [handle.model.actuator(a).name for a in range(handle.model.nu) if a not in handle.actuators]
+            pool = below if below is not None else [a for a in range(handle.model.nu) if a not in handle.actuators]
+            own = [handle.model.actuator(a).name for a in pool]
             if own:
                 raise ValueError(
                     f"{label}: arm {arm!r} already has a gripper in its MJCF (actuators {own}); "
@@ -1026,7 +1136,7 @@ class GripperHandle:
         self._roots = tuple(prefix + model.body(root).name for root in roots)
         # Captures the arm's flange site, integrated-gripper conflict and root at build;
         # viam-server rebuilds dependents when the arm is reconfigured.
-        self._arm_root = f"{arm}/{handle.root_body}"
+        self._arm_root = handle.root_body_name
         if self._position:
             if "grip_force_n" in attrs:
                 LOGGER.debug("%s: grip_force_n is ignored; the gripper is position controlled", label)
@@ -1048,7 +1158,7 @@ class GripperHandle:
         self._callback_key = f"gripper:{name}"
         self._attached = mjcf is not None
         if self._attached:
-            flange = f"{arm}/{handle.flange_site}"
+            flange = handle.flange_site_name
 
             def build(spec: mujoco.MjSpec) -> bool | None:
                 site = spec.site(flange)
@@ -1064,11 +1174,24 @@ class GripperHandle:
                 spec.attach(child, prefix=prefix, site=site)
 
             sim.set_contribution(name, Contribution(build=build))
+        claims = []
+        if self._robot is not None and mjcf is None:
+            # the robot's init then leaves the gripper's actuator alone (the gripper
+            # drives it); the jaw joints keep the keyframe, so coupled fingers agree
+            from .robot_file import claim
+
+            claims = [f"actuator:{model.actuator(actuator).name}"]
+            sim.run(lambda: claim(sim, self._robot, claims, name))
+        self._claims = claims
         sim.run(lambda: sim.step_callbacks.__setitem__(self._callback_key, self._on_step))
 
     def close(self) -> None:
         def detach() -> None:
             self._sim.step_callbacks.pop(self._callback_key, None)
+            if self._claims:
+                from .robot_file import release_claims
+
+                release_claims(self._sim, self._robot, self.name)
             model, data = self._sim.model, self._sim.data
             if model is not None and data is not None:
                 actuator = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator)
@@ -1095,6 +1218,8 @@ class GripperHandle:
     def _require_scene(self) -> None:
         model = self._sim.model
         if model is None or mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, self._actuator) < 0:
+            if self._robot is not None:
+                raise RuntimeError(f"gripper {self.name!r}: robot {self._robot!r} is not in the scene")
             raise RuntimeError(f"the arm for gripper {self.name!r} is not in the scene")
 
     def _set(self, ctrl: float) -> None:

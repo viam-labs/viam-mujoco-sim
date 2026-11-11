@@ -642,17 +642,46 @@ def home(model: mujoco.MjModel, keyframe: str, actuators: Sequence[int]) -> np.n
     return qpos.copy() if not ctrl.any() and qpos.any() else ctrl
 
 
+def actuator_body(model: mujoco.MjModel, actuator: int) -> int:
+    """The body an actuator drives: its joint's (a fixed tendon's first
+    joint's), or its target body (adhesion); -1 for other transmissions
+    (spatial tendons, sites, slider-cranks)."""
+    kind, target = int(model.actuator_trntype[actuator]), int(model.actuator_trnid[actuator, 0])
+    if kind in (mujoco.mjtTrn.mjTRN_JOINT, mujoco.mjtTrn.mjTRN_JOINTINPARENT):
+        return int(model.jnt_bodyid[target])
+    if kind == mujoco.mjtTrn.mjTRN_TENDON:
+        first = int(model.tendon_adr[target])
+        return int(model.jnt_bodyid[model.wrap_objid[first]]) if model.wrap_type[first] == mujoco.mjtWrap.mjWRAP_JOINT else -1
+    if kind == mujoco.mjtTrn.mjTRN_BODY:
+        return target
+    return -1
+
+
+def actuators_below(model: mujoco.MjModel, last_arm_joint: int, exclude: Sequence[int] = ()) -> list[int]:
+    """The actuators, other than `exclude` (the arm's), that drive a body below
+    the arm's last joint: a gripper on that arm, never another limb's."""
+    below = set(subtree(model, int(model.jnt_bodyid[last_arm_joint])))
+    arm = set(exclude)
+    return [a for a in range(model.nu) if a not in arm and actuator_body(model, a) in below]
+
+
 def gripper_actuator(
-    model: mujoco.MjModel, label: str, exclude: Sequence[int] = (), name: str | None = None
+    model: mujoco.MjModel, label: str, exclude: Sequence[int] = (), name: str | None = None,
+    candidates: Sequence[int] | None = None,
 ) -> int:
-    """`name` if given, else the single actuator not in `exclude` (the arm's)."""
+    """`name` if given, else the single actuator not in `exclude` (the arm's),
+    among `candidates` when given (an integrated gripper's: actuators_below),
+    which a named actuator must then be one of."""
     if name is not None:
         actuator = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
         if actuator < 0:
             raise ValueError(f"{label}: actuator {name!r} is not in the MJCF")
+        if candidates is not None and actuator not in candidates:
+            raise ValueError(f"{label}: actuator {name!r} doesn't drive a body below the arm's last joint")
         return actuator
     arm = set(exclude)
-    found = [a for a in range(model.nu) if a not in arm]
+    pool = range(model.nu) if candidates is None else candidates
+    found = [a for a in pool if a not in arm]
     if not found:
         raise ValueError(f"{label}: has no gripper actuator")
     if len(found) > 1:
@@ -855,10 +884,13 @@ def check_frames(
     base_offset: np.ndarray,
     flange_offset: np.ndarray,
     label: str,
+    base_body: int = 0,
 ) -> None:
     """Compare the MJCF flange (with the offsets) and Viam's end effector, in
     the arm frame, at zeros, home and a mixed pose; ValueError when they
-    disagree by more than 5 mm or 2 degrees, suggesting an offset that fixes it."""
+    disagree by more than 5 mm or 2 degrees, suggesting an offset that fixes it.
+    The arm frame is base_body's (the MJCF's world by default; an arm in a
+    robot file's chain base) times inverse(base_offset)."""
     low, high = model.jnt_range[list(joints)].T
     limited = model.jnt_limited[list(joints)].astype(bool)
     mixed = 0.5 * (-1.0) ** np.arange(len(joints))
@@ -872,7 +904,10 @@ def check_frames(
         site = np.eye(4)
         site[:3, :3] = data.site_xmat[flange_site].reshape(3, 3)
         site[:3, 3] = data.site_xpos[flange_site]
-        sim[key] = base_offset @ site @ flange_offset
+        base = np.eye(4)
+        base[:3, :3] = data.xmat[base_body].reshape(3, 3)
+        base[:3, 3] = data.xpos[base_body]
+        sim[key] = base_offset @ np.linalg.inv(base) @ site @ flange_offset
         viam[key] = kin.forward(q)[kin.end]
 
     def worst(fix) -> tuple[str, float, float]:

@@ -27,6 +27,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:imu`](#model-viam-labsmujoco-simimu) | `movement_sensor` | An IMU on the world, a base or an arm: orientation, angular velocity and acceleration, with optional noise. |
 | [`viam-labs:mujoco-sim:force_torque`](#model-viam-labsmujoco-simforce_torque) | `sensor` | A wrist force-torque sensor at an arm's flange, with optional noise. |
 | [`viam-labs:mujoco-sim:obstacle`](#model-viam-labsmujoco-simobstacle) | `generic` | A fixed box, sphere, capsule or mesh that Viam's motion planner also sees. |
+| [`viam-labs:mujoco-sim:robot`](#model-viam-labsmujoco-simrobot) | `generic` | A robot file with several limbs, such as the bundled ALOHA bimanual cell; each limb is a mujoco-sim arm. |
 | [`viam-labs:mujoco-sim:scene`](#model-viam-labsmujoco-simscene) | `generic` | An MJCF scene file placed by its frame: simulated, planned against, and its free bodies movable as props. |
 | [`viam-labs:mujoco-sim:world_state`](#model-viam-labsmujoco-simworld_state) | `world_state_store` | Streams movable props, parcels, and the conveyor and scale shapes to the Viam app's 3D scene viewer. |
 | [`viam-labs:mujoco-sim:conveyor`](#model-viam-labsmujoco-simconveyor) | `motor` | A belt conveyor that carries parcels by friction. |
@@ -63,7 +64,10 @@ de-palletizing cell (see [De-palletizing](#de-palletizing)), and
 [`examples/parcel-sort.json`](examples/parcel-sort.json) a parcel-sorting cell
 with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), and
 [`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
-between two tables (see [Mobile manipulation](#mobile-manipulation)). With an
+between two tables (see [Mobile manipulation](#mobile-manipulation)), and
+[`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
+arms from one robot file passing a block across a table (see
+[Model viam-labs:mujoco-sim:robot](#model-viam-labsmujoco-simrobot)). With an
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
@@ -294,7 +298,8 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | Name | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `world` | string | Yes | | The world component's name. |
-| `asset` | string | One of `asset`, `mjcf` | | A bundled arm: `"lite6"` or `"ur5e"`. Its defaults apply; any attribute below set in config wins. |
+| `asset` | string | One of `asset`, `mjcf`, `robot` | | A bundled arm: `"lite6"` or `"ur5e"`; with `robot`, a bundled limb: `"aloha_left"` or `"aloha_right"`. Its defaults apply; any attribute below set in config wins. |
+| `robot` | string | One of `asset`, `mjcf`, `robot` | | A [`viam-labs:mujoco-sim:robot`](#model-viam-labsmujoco-simrobot) this arm is a limb of. The arm then drives `joints` in that robot's file and attaches no file of its own. |
 | `mjcf` | string | One of `asset`, `mjcf` | | Your arm's MJCF (`.xml`) or URDF (`.urdf`) file: an absolute path, `~/...`, or a path relative to the module's `assets/`. See [From a URDF](#from-a-urdf). |
 | `mesh_dir` | string | No | `meshes/` beside the file if it exists, else the file's folder | A `.urdf` `mjcf`'s meshes: absolute, `~`, or relative to the file. `package://` paths are looked up there by file name. |
 | `max_joint_deg_s` | float | No | `180` | Per-joint velocity limit on the commanded target, reported by `dynamics_metadata`. |
@@ -462,6 +467,7 @@ contacts, so a violent move can tear the object off.
 | `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | box 78 × 78 × 70 mm at `z: -35` |
 | `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | box 150 × 80 × 170 mm at `z: -73` (fingers open along x) |
 | `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | box 90 × 90 × 130 mm at `z: -65` |
+| `aloha` | ALOHA's own, in its robot file (open and closed swapped to match its actuator) | `aloha_left`, `aloha_right` | 0 mm (the arm's end effector is the gripper) | none: the arm's kinematics carry it |
 
 Give the gripper's frame that geometry so the planner keeps the whole gripper
 clear of obstacles; without it, a path can pass the arm but clip the gripper.
@@ -1115,6 +1121,92 @@ flange:
 | Method | Notes |
 |---|---|
 | `GetGeometries` | The frame geometry, or one PLY per convex piece labelled `piece<i>`. |
+
+## Model viam-labs:mujoco-sim:robot
+
+A robot file with several limbs: a bimanual cell, or a torso with arms. The
+robot loads the MJCF file once; each limb is a
+[`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) with `robot` set
+and the limb's `joints`, and grippers, cameras and sensors mount on those arms
+as on any other. The module bundles
+[ALOHA](https://github.com/google-deepmind/mujoco_menagerie/tree/main/aloha)
+(two ViperX 300 arms with grippers, BSD-3-Clause, Trossen Robotics).
+
+### Configuration
+
+```json
+{
+  "name": "aloha",
+  "api": "rdk:component:generic",
+  "model": "viam-labs:mujoco-sim:robot",
+  "frame": { "parent": "world" },
+  "attributes": { "world": "sim-world", "asset": "aloha" }
+},
+{
+  "name": "left-arm",
+  "api": "rdk:component:arm",
+  "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "aloha", "translation": { "x": -469, "y": -19, "z": 20 } },
+  "attributes": { "world": "sim-world", "robot": "aloha", "asset": "aloha_left" }
+},
+{
+  "name": "left-gripper",
+  "api": "rdk:component:gripper",
+  "model": "viam-labs:mujoco-sim:gripper",
+  "frame": { "parent": "left-arm" },
+  "attributes": { "world": "sim-world", "arm": "left-arm", "asset": "aloha" }
+}
+```
+
+The right arm is the same with `asset: "aloha_right"`, translation
+`{"x": 469, "y": -19, "z": 20}` and orientation
+`{"type": "ov_degrees", "value": {"x": 0, "y": 0, "z": 1, "th": 180}}`.
+[`examples/aloha-handover.json`](examples/aloha-handover.json) is the whole
+cell, and [`examples/aloha_handover.py`](examples/aloha_handover.py) has the
+left arm set the block down in the middle and the right arm carry it on.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `asset` | string | One of `asset`, `mjcf` | | A bundled robot: `"aloha"`. |
+| `mjcf` | string | One of `asset`, `mjcf` | | Your robot's `.xml` MJCF file: an absolute path, `~/...`, or a path relative to the module's `assets/`. URDF robot files aren't supported yet. |
+| `home_keyframe` | string | No | the file's first keyframe | Sets the joints no arm or gripper drives. |
+
+The robot's frame parent is `world` (on a base isn't supported yet). The file
+can have actuators, tendons and equality constraints; mocap bodies, plugins,
+flexes, skins and free joints are errors. Its names in the scene get the
+prefix `<name>/`.
+
+### Limbs
+
+Each arm with `robot` set takes:
+
+- `joints`: the limb's joint names in the file, base to flange, one chain;
+- `kinematics_url`: its Viam kinematics, base to flange, with joint limits
+  equal to the file's ranges;
+- `flange_site`, `home_keyframe`, `base_offset`, `flange_offset` and the speed
+  limits, as for any arm. The `aloha_left` and `aloha_right` presets set
+  them.
+
+The arm's frame parent must be the robot, and its translation and orientation
+must be the pose of its chain base (the body its first joint hangs from) in
+the file. That body must be fixed to the robot. A wrong frame is a config
+error that gives the values to paste. An arm in a robot file uses the file's
+own collision geoms (`collision: "kinematics"` isn't supported yet), and two
+arms can't share a joint. A gripper on the arm finds its actuator below the
+arm's last joint (an `actuator` you name must be one of those), as for an arm
+with its gripper in its own MJCF.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetGeometries` | The file's fixed parts, in the robot's frame, except the bodies a limb hangs from (its arm's kinematics carry those). ALOHA has none. |
+
+If the robot is removed, its arms and grippers error until it's back; then the
+arms return to their home and the grippers keep their last command.
 
 ## Model viam-labs:mujoco-sim:scene
 

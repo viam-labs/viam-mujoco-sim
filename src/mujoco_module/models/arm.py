@@ -89,7 +89,7 @@ from ..handles import (
     ArmHandle,
     JointTrajectoryPoint,
 )
-from ..sim import SimManager
+from ..sim import ROBOT_LIMB_ASSETS, SimManager
 from viam.spatialmath import Quaternion
 from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
 
@@ -199,6 +199,27 @@ def _is_moving_velocity_threshold(
     return threshold
 
 
+def _validate_limb(config: ComponentConfig, attrs: Mapping[str, Any]) -> None:
+    """An arm bound to a robot file (robot set): ValueError for what doesn't go with it."""
+    name, robot = config.name, attrs["robot"]
+    if not isinstance(robot, str) or not robot:
+        raise ValueError(f"{name}: robot must be the name of a viam-labs:mujoco-sim:robot")
+    asset = attrs.get("asset")
+    if "mjcf" in attrs or (asset is not None and asset not in ROBOT_LIMB_ASSETS):
+        raise ValueError(
+            f"{name}: set robot, or mjcf/asset, not both (a limb preset with robot: one of "
+            f"{sorted(ROBOT_LIMB_ASSETS)})"
+        )
+    merged = {**ROBOT_LIMB_ASSETS.get(str(asset), {}), **attrs}
+    for key in ("joints", "kinematics_url"):
+        if not merged.get(key):
+            raise ValueError(f"{name}: an arm in a robot file needs {key}")
+    if merged.get("collision") == "kinematics":
+        raise ValueError(f'{name}: collision "kinematics" is not supported for an arm in a robot file yet')
+    if _frame_parent(config) != robot:
+        raise ValueError(f'{name}: an arm in robot {robot!r} needs frame.parent "{robot}"')
+
+
 def _frame_parent(config: ComponentConfig) -> str | None:
     """The component the arm is framed on, None for the world."""
     if config.HasField("frame") and config.frame.parent not in ("", "world"):
@@ -231,8 +252,16 @@ class MujocoArm(Arm, EasyResource):
     def validate_config(
         cls, config: ComponentConfig
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        deps, _ = validate_sim_component(config, world_frame_only=False)
         attrs = get_attrs(config)
+        robot = attrs.get("robot")
+        if robot is not None:
+            _validate_limb(config, attrs)
+        elif attrs.get("asset") in ROBOT_LIMB_ASSETS:
+            raise ValueError(
+                f"{config.name}: asset {attrs['asset']!r} is a limb of a robot file; set robot to the "
+                "viam-labs:mujoco-sim:robot it belongs to"
+            )
+        deps, _ = validate_sim_component(config, needs_asset=robot is None, world_frame_only=False)
         url = attrs.get("kinematics_url")
         if url is not None:
             if not isinstance(url, str) or not url:

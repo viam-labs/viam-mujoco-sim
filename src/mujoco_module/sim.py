@@ -64,6 +64,21 @@ KNOWN_ASSETS: dict[str, dict[str, Any]] = {
         "kinematics_url": "universal_robots_ur5e/ur5e_kinematics.json",
     },
 }
+# Bundled limbs of a bundled robot file (viam-labs:mujoco-sim:robot): default
+# attributes for an arm with `robot` set. Joint and site names are the file's.
+_ALOHA_JOINTS = ("waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate")
+ROBOT_LIMB_ASSETS: dict[str, dict[str, Any]] = {
+    f"aloha_{side}": {
+        "joints": [f"{side}/{joint}" for joint in _ALOHA_JOINTS],
+        "flange_site": f"{side}/gripper",
+        # written here from the vx300s MJCF; both arms share it
+        "kinematics_url": "trossen_aloha/vx300s_kinematics.json",
+        "home_keyframe": "neutral_pose",
+        # Viam's end-effector z points out of the fingers: the site's +x
+        "flange_offset": {"orientation": {"o_x": 1, "o_y": 0, "o_z": 0, "theta": 0}},
+    }
+    for side in ("left", "right")
+}
 # Bundled grippers: default attributes for the gripper's `asset`. No mjcf
 # means the arm MJCF's own gripper.
 GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
@@ -72,6 +87,8 @@ GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
     "robotiq_2f85": {"mjcf": "robotiq_2f85/2f85.xml"},
     # written here; mesh from ValerioMa/robotiq_tcp@45891ab, decimated
     "robotiq_epick": {"mjcf": "robotiq_epick/epick.xml"},
+    # ALOHA's integrated fingers: ctrl 0.037 opens them, 0.002 closes them
+    "aloha": {"open": 0.037, "closed": 0.002},
 }
 
 MAX_SUBSTEPS = 50
@@ -447,6 +464,11 @@ class SimManager:
         self._built: set[str] = set()  # the contributions in the current model
         self.step_callbacks: dict[str, Callable[[float], None]] = {}
         self.arms: dict[str, Any] = {}  # ArmHandle by component name, for its gripper
+        self.robots: dict[str, Any] = {}  # RobotHandle by component name, for its arms
+        # by robot name: the file's joint and actuator names (unprefixed) an arm
+        # or gripper drives, to its component name. Kept here, not in the robot
+        # handle, so claims survive the robot being removed or reconfigured.
+        self.robot_claims: dict[str, dict[str, str]] = {}
         self.conveyors: dict[str, Any] = {}  # ConveyorHandle by component name, for its spawner
         self.dynamic_props: dict[str, DynamicProp] = {}  # live ones, by body name
         self.static_shapes: dict[str, StaticShape] = {}  # by component name

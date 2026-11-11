@@ -66,6 +66,12 @@
       "markdown_link": "README.md#model-viam-labsmujoco-simobstacle"
     },
     {
+      "model": "viam-labs:mujoco-sim:robot",
+      "api": "rdk:component:generic",
+      "short_description": "A robot file with several limbs (ALOHA, a torso with arms), each limb a mujoco-sim arm",
+      "markdown_link": "README.md#model-viam-labsmujoco-simrobot"
+    },
+    {
       "model": "viam-labs:mujoco-sim:scene",
       "api": "rdk:component:generic",
       "short_description": "An MJCF scene file placed by its frame: simulated, planned against, its free bodies movable as props",

@@ -182,7 +182,7 @@ class ForceTorqueHandle:
             return
         prefix = f"{self.arm}/"
         site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, prefix + VIAM_FRAME_SITE)
-        flange = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, prefix + handle.flange_site)
+        flange = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, handle.flange_site_name)
         if site < 0 or flange < 0:
             return
         joint_bodies = {int(model.jnt_bodyid[model.joint(name).id]) for name in handle._joint_names}

@@ -1,0 +1,188 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "block",
+            "type": "cube",
+            "size": 0.03,
+            "position": [
+              -0.2,
+              0.05,
+              0.015
+            ],
+            "mass": 0.03,
+            "color": [
+              1,
+              0,
+              0
+            ],
+            "static_friction": 2.0
+          }
+        ]
+      }
+    },
+    {
+      "name": "table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": -10
+        },
+        "geometry": {
+          "type": "box",
+          "x": 1400,
+          "y": 800,
+          "z": 20
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.4,
+          0.4,
+          0.42
+        ]
+      }
+    },
+    {
+      "name": "aloha",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:robot",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "aloha"
+      }
+    },
+    {
+      "name": "left-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "aloha",
+        "translation": {
+          "x": -469,
+          "y": -19,
+          "z": 20
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "aloha",
+        "asset": "aloha_left",
+        "max_joint_deg_s": 60
+      }
+    },
+    {
+      "name": "right-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "aloha",
+        "translation": {
+          "x": 469,
+          "y": -19,
+          "z": 20
+        },
+        "orientation": {
+          "type": "ov_degrees",
+          "value": {
+            "x": 0,
+            "y": 0,
+            "z": 1,
+            "th": 180
+          }
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "robot": "aloha",
+        "asset": "aloha_right",
+        "max_joint_deg_s": 60
+      }
+    },
+    {
+      "name": "left-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "left-arm"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "left-arm",
+        "asset": "aloha"
+      }
+    },
+    {
+      "name": "right-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "right-arm"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "right-arm",
+        "asset": "aloha"
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": -1100,
+          "z": 800
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [
+          0,
+          0,
+          0.15
+        ],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "world-state",
+      "api": "rdk:service:world_state_store",
+      "model": "viam-labs:mujoco-sim:world_state",
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "builtin",
+      "api": "rdk:service:motion",
+      "model": "rdk:builtin:builtin",
+      "attributes": {}
+    }
+  ]
+}
