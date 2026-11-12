@@ -137,6 +137,12 @@ def test_out_of_range_fails_before_moving(gantry):
     assert not run(gantry.is_moving())
 
 
+def test_a_hair_past_an_end_is_clamped_not_rejected(gantry):
+    # RDK sends back the position the sim reports, which can sit a hair past an end after settling
+    run(gantry.move_to_position([-0.08, 0.0, 500.4], []))
+    assert run(gantry.get_position()) == pytest.approx([0, 0, 500], abs=1.0)
+
+
 def test_a_move_to_where_it_is_returns_at_once(gantry, monkeypatch):
     def no_trajectory(points):
         raise AssertionError("a zero-length move started a trajectory")

@@ -95,6 +95,7 @@ def profile(start: np.ndarray, goal: np.ndarray, speeds: np.ndarray, accel: floa
 
 class MujocoGantry(Gantry, EasyResource):
     MODEL: ClassVar[Model] = Model(ModelFamily(NAMESPACE, FAMILY), "gantry")
+    AXES: ClassVar[str] = "xyz"  # one letter per axis, in joint order
 
     def __init__(self, name: str) -> None:
         super().__init__(name)
@@ -161,7 +162,7 @@ class MujocoGantry(Gantry, EasyResource):
 
     def _h(self) -> ArmHandle:
         if self._handle is None:
-            raise RuntimeError(f"gantry {self.name} is not attached to the sim")
+            raise RuntimeError(f"{self.name} is not attached to the sim")
         return self._handle
 
     async def get_position(self, *, extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None,
@@ -173,16 +174,20 @@ class MujocoGantry(Gantry, EasyResource):
                                extra: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None,
                                **kwargs) -> None:
         handle = self._h()
-        if len(positions) != 3:
-            raise ValueError(f"{self.name}: expected 3 positions (x, y, z mm), got {len(positions)}")
-        for axis, value, length in zip("xyz", positions, self._lengths):
-            if not math.isfinite(value) or not 0 <= value <= length:
+        n = len(self.AXES)
+        if len(positions) != n:
+            raise ValueError(f"{self.name}: expected {n} positions ({', '.join(self.AXES)} mm), got {len(positions)}")
+        for axis, value, length in zip(self.AXES, positions, self._lengths):
+            # within the settle tolerance of an end counts as the end: RDK sends back the
+            # position the sim reports, which can sit a hair past it after settling
+            if not math.isfinite(value) or not -TOLERANCE_MM < value < length + TOLERANCE_MM:
                 raise ValueError(f"{self.name}: {axis} {value} mm is outside its travel [0, {length:g}]")
-        if speeds and len(speeds) != 3:
-            raise ValueError(f"{self.name}: expected 3 speeds (mm/s) or none, got {len(speeds)}")
+        positions = [min(max(value, 0.0), length) for value, length in zip(positions, self._lengths)]
+        if speeds and len(speeds) != n:
+            raise ValueError(f"{self.name}: expected {n} speeds (mm/s) or none, got {len(speeds)}")
         if any(not math.isfinite(s) or s <= 0 for s in speeds):
             raise ValueError(f"{self.name}: speeds must be positive")
-        limits = np.minimum(np.asarray(speeds, float), self._max_speed) if speeds else np.full(3, self._max_speed)
+        limits = np.minimum(np.asarray(speeds, float), self._max_speed) if speeds else np.full(n, self._max_speed)
         start = np.asarray(await asyncio.to_thread(handle.get_commanded_positions)) * 1000
         goal = np.asarray(positions, float)
         if np.all(np.abs(goal - start) < TOLERANCE_MM):

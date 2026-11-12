@@ -21,6 +21,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:arm`](#model-viam-labsmujoco-simarm) | `arm` | A UFactory Lite6, a UR5e, or your own MJCF or URDF arm, placed by its frame on the world or a base, with joint control. |
 | [`viam-labs:mujoco-sim:gripper`](#model-viam-labsmujoco-simgripper) | `gripper` | The Lite6's gripper, a Robotiq 2F-85 or ePick, or your own MJCF or URDF gripper, on an arm or a gantry. |
 | [`viam-labs:mujoco-sim:gantry`](#model-viam-labsmujoco-simgantry) | `gantry` | An XYZ Cartesian gantry generated from its travel, planned by the motion service like an arm. |
+| [`viam-labs:mujoco-sim:rail`](#model-viam-labsmujoco-simrail) | `gantry` | A one-axis floor rail an arm stands on and rides (a 7th axis), planned with the arm by the motion service. |
 | [`viam-labs:mujoco-sim:camera`](#model-viam-labsmujoco-simcamera) | `camera` | An RGB-D camera placed by its frame, on the world or an arm's or gantry's end effector. |
 | [`viam-labs:mujoco-sim:base`](#model-viam-labsmujoco-simbase) | `base` | A Viam Rover, a Clearpath Husky, TIAGo++'s base, or your own MJCF or URDF base; ideal motion or driven through its wheels. |
 | [`viam-labs:mujoco-sim:lidar`](#model-viam-labsmujoco-simlidar) | `camera` | A 2D or 3D LIDAR on the world, a base or an arm; point clouds only. |
@@ -71,6 +72,8 @@ with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), an
 parcels off the running belt (see [Conveyor pick](#conveyor-pick)), and
 [`examples/gantry-sort.json`](examples/gantry-sort.json) an XYZ gantry
 sorting blocks into bins (see [Gantry sort](#gantry-sort)), and
+[`examples/rail-tending.json`](examples/rail-tending.json) a UR5e on a rail
+tending two machines (see [Machine tending on a rail](#machine-tending-on-a-rail)), and
 [`examples/vision-pick.json`](examples/vision-pick.json) a UR5e with a wrist
 camera that finds blocks with vision services and sorts them (see
 [Vision pick](#vision-pick); [`examples/vision-pick-suction.json`](examples/vision-pick-suction.json)
@@ -643,6 +646,71 @@ point straight down, or no plan reaches it.
 | `Stop` | Holds where it is. |
 | `IsMoving` | True while a `MoveToPosition` is running. |
 | `GetKinematics` | The generated kinematics: three prismatic joints and the structure's boxes. |
+
+## Model viam-labs:mujoco-sim:rail
+
+A one-axis floor rail: a track on the floor and a carriage that slides along
+it, an arm (or anything else) standing on the carriage's plate. The module
+generates its MuJoCo model and its Viam kinematics from the travel, so the
+motion service plans across the rail and the arm together, as a 7th axis,
+and the 3D scene shows it. What mounts on the rail rides the carriage.
+See [Machine tending on a rail](#machine-tending-on-a-rail) for an arm on
+one serving two machines, and how RDK runs plans across the two.
+
+### Configuration
+
+```json
+{
+  "name": "rail",
+  "api": "rdk:component:gantry",
+  "model": "viam-labs:mujoco-sim:rail",
+  "frame": { "parent": "world", "translation": { "x": -1300, "y": 0, "z": 400 } },
+  "attributes": { "world": "sim-world", "length_mm": 2600 }
+}
+```
+
+The frame is the carriage plate's top centre at position 0. Its parent must
+be `world`; its `z` is the plate's height above the floor, where the track
+lies (at least 100 mm), and it may turn about z (a yaw) but not tilt. The
+carriage travels along the frame's +x, from 0 to `length_mm`.
+
+An arm stands on the plate with its frame parent set to the rail; it rides
+the carriage:
+
+```json
+{
+  "name": "arm",
+  "api": "rdk:component:arm",
+  "model": "viam-labs:mujoco-sim:arm",
+  "frame": { "parent": "rail" },
+  "attributes": { "world": "sim-world", "asset": "ur5e" }
+}
+```
+
+Nothing on the rail collides: the arm rests on the plate without contact.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `length_mm` | float | Yes | | The travel in mm. |
+| `payload_kg` | float | No | `25` | What the carriage carries (a UR5e and a gripper), for the servo gains. |
+| `max_speed_mm_s` | float | No | `500` | Top speed. |
+| `max_accel_mm_s2` | float | No | `2000` | Acceleration. |
+| `move_timeout_sec` | float | No | `30` | How long a move may take to settle, after its path ends, before it fails. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetPosition` | [x] mm. |
+| `MoveToPosition` | One position (and at most one speed), as the [gantry's](#model-viam-labsmujoco-simgantry): within its speed and `max_accel_mm_s2`, returns once within 1 mm and still; outside the travel fails before anything moves; a newer move or `Stop` makes it fail as superseded. |
+| `GetLengths` | [`length_mm`]. |
+| `Home` | True at once, without moving: the sim always knows where the carriage is. |
+| `Stop` | Holds where it is. |
+| `IsMoving` | True while a `MoveToPosition` is running. |
+| `GetKinematics` | The generated kinematics: one prismatic joint, the track and the carriage. |
 
 ## Model viam-labs:mujoco-sim:camera
 
@@ -1993,6 +2061,69 @@ session expires, a moment after the script exits, viam-server stops the
 gantry, and a move the next run has started fails as superseded. A
 motion-service run doesn't hand the gantry to its session, so it leaves
 nothing behind.
+
+## Machine tending on a rail
+
+[`examples/rail-tending.json`](examples/rail-tending.json) is a UR5e with a
+Robotiq 2F-85 on a 2.6 m [rail](#model-viam-labsmujoco-simrail) (world x
+-1300 to 1300 mm), and four stations in a row beside it, 650 mm off the rail:
+a parts table with four 40 mm parts (`part_1`..`part_4`), machine A, machine
+B, and an outfeed table. The machines are top-loading: a 450 mm base with
+four 180 mm walls around its top, open above. The stations span more than
+the arm can reach from any one spot (machine B is about 1.8 m from the arm's
+base at rail 0), so every move is the rail and the arm together.
+[`examples/rail_tending.py`](examples/rail_tending.py) runs the parts
+through both machines:
+
+```sh
+uv run python examples/rail_tending.py <machine address> <api key id> <api key> [--parts N]
+```
+
+It resets the world, then pipelines the parts so both machines stay busy:
+part 1 into A, then on to B; then for each next part, load it into A, unload
+B's part to the outfeed, and move A's part on to B; last, B's part to the
+outfeed. Each transfer is a grab and a place, and every move is one
+`motion.move` of the gripper to a world pose; RDK plans the rail and the arm
+together, as one 7-joint chain. Long moves go between transit poses, 120 mm
+over the machines' walls above each station's front half, so they happen in
+open air; only the short moves (down to a part, up, into a machine) happen
+near the walls. A machine's cycle is a 2 s wait after it's loaded: the arm
+idles meanwhile, it doesn't overlap with other work. Each transfer prints its
+time, whether the part landed within 30 mm of its slot and how far off it
+was, and the rail travel; at the end, how many parts are on the outfeed.
+
+It isn't fully reliable. On a MacBook (viam-server v1.16.0), five full
+4-part runs landed 43 of 49 transfers on their slot (about 88%), and ended
+with 4, 3, 3, 1 and 1 parts on the outfeed: one clean run in five. A
+transfer takes 16 to 52 s; a clean run about 350 s, with 11 to 12 m of rail
+travel. Of the six failures, four were parts dragged or dropped (one landed
+about 700 mm off) and two were the arm stalling against a machine wall
+("did not converge on final waypoint"), which stops the run.
+
+The cause is how RDK v1.16's builtin motion runs a plan across two
+components. It plans the rail and the arm together (in 0.1 to 0.3 s), but
+executes them one at a time, in either order, and parks the rail at a
+different spot each time, often several hundred mm short of the station with
+the arm stretched out. So a short move can come with a big rail move that
+drags a held or just-placed part, the arm-first half of a long move can
+swing into a wall, and an awkward stretched grasp can drop a part. The
+transit poses are why it mostly works; with open-front machines, plans
+alternated rail and arm for dozens of steps a move and jammed far more often.
+
+What didn't help:
+
+- A `collision_buffer_mm` on the moves: any buffer large enough to matter
+  forbids the grasps, since the closed pads sit about 10 mm above the surface
+  at the grip pose.
+- A linear constraint on the short moves at a station: one clean run, but
+  five times slower (about 1870 s), and the planner sometimes refuses
+  ("linear with cbirrt not allowed").
+
+What would likely fix it: parking the rail at each station and making the
+short moves with the arm alone (which needs straight-line arm moves), or RDK
+executing a combined plan's components together. The rail itself isn't the
+problem: it reaches each position within 1 mm, carries the arm, and takes
+combined plans.
 
 ## Vision pick
 

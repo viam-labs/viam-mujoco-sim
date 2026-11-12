@@ -1,0 +1,515 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "part_1",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.04,
+              0.04,
+              0.04
+            ],
+            "mass": 0.1,
+            "static_friction": 1.5,
+            "color": [
+              0.9,
+              0.5,
+              0.1
+            ],
+            "position": [
+              -1.28,
+              0.56,
+              0.47
+            ]
+          },
+          {
+            "name": "part_2",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.04,
+              0.04,
+              0.04
+            ],
+            "mass": 0.1,
+            "static_friction": 1.5,
+            "color": [
+              0.9,
+              0.5,
+              0.1
+            ],
+            "position": [
+              -1.16,
+              0.56,
+              0.47
+            ]
+          },
+          {
+            "name": "part_3",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.04,
+              0.04,
+              0.04
+            ],
+            "mass": 0.1,
+            "static_friction": 1.5,
+            "color": [
+              0.9,
+              0.5,
+              0.1
+            ],
+            "position": [
+              -1.04,
+              0.56,
+              0.47
+            ]
+          },
+          {
+            "name": "part_4",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.04,
+              0.04,
+              0.04
+            ],
+            "mass": 0.1,
+            "static_friction": 1.5,
+            "color": [
+              0.9,
+              0.5,
+              0.1
+            ],
+            "position": [
+              -0.92,
+              0.56,
+              0.47
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "rail",
+      "api": "rdk:component:gantry",
+      "model": "viam-labs:mujoco-sim:rail",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1300,
+          "y": 0,
+          "z": 400
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "length_mm": 2600
+      }
+    },
+    {
+      "name": "arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {
+        "parent": "rail"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "ur5e",
+        "max_joint_deg_s": 60,
+        "max_joint_deg_s2": 120
+      }
+    },
+    {
+      "name": "gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {
+        "parent": "arm",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 155.8
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "arm": "arm",
+        "asset": "robotiq_2f85",
+        "sensorless": true
+      }
+    },
+    {
+      "name": "parts-table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1100,
+          "y": 650,
+          "z": 225.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 500,
+          "y": 400,
+          "z": 450
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.55,
+          0.45,
+          0.35
+        ]
+      }
+    },
+    {
+      "name": "outfeed",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1150,
+          "y": 650,
+          "z": 225.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 500,
+          "y": 400,
+          "z": 450
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.55,
+          0.45,
+          0.35
+        ]
+      }
+    },
+    {
+      "name": "machine-a-base",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -350,
+          "y": 650,
+          "z": 225.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 400,
+          "y": 400,
+          "z": 450
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-a-left",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -540.0,
+          "y": 650,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 20,
+          "y": 400,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-a-right",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -160.0,
+          "y": 650,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 20,
+          "y": 400,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-a-front",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -350,
+          "y": 460.0,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 360,
+          "y": 20,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-a-back",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -350,
+          "y": 840.0,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 360,
+          "y": 20,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-b-base",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 400,
+          "y": 650,
+          "z": 225.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 400,
+          "y": 400,
+          "z": 450
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-b-left",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 210.0,
+          "y": 650,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 20,
+          "y": 400,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-b-right",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 590.0,
+          "y": 650,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 20,
+          "y": 400,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-b-front",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 400,
+          "y": 460.0,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 360,
+          "y": 20,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "machine-b-back",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 400,
+          "y": 840.0,
+          "z": 540.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 360,
+          "y": 20,
+          "z": 180
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.35,
+          0.55,
+          0.4
+        ]
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": -2600,
+          "z": 2000
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [
+          0,
+          0.35,
+          0.5
+        ],
+        "width": 1280,
+        "height": 720
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "world-state",
+      "api": "rdk:service:world_state_store",
+      "model": "viam-labs:mujoco-sim:world_state",
+      "attributes": {
+        "world": "sim-world"
+      }
+    }
+  ]
+}
