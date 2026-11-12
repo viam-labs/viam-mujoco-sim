@@ -213,7 +213,9 @@ def test_neither_source_warns_at_once_without_retrying(running_sim, monkeypatch,
         start = time.monotonic()
         with caplog.at_level(logging.WARNING):
             assert await world._import_task == {"imported": [], "from_frame": [], "missing": []}
-        assert time.monotonic() - start < 1.0
+        # retrying would run to IMPORT_TIMEOUT_S (30 s); the bound is loose so a slow CI runner
+        # can't trip it, and refreshes == 1 below is the exact check
+        assert time.monotonic() - start < 10.0
 
     asyncio.run(run())
     assert parent.refreshes == 1
