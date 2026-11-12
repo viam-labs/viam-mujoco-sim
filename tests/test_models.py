@@ -164,7 +164,7 @@ def test_camera_properties(cell):
     properties = run(camera.get_properties())
     assert properties.intrinsic_parameters.width_px == 640
     images, _ = run(camera.get_images())
-    assert [image.name for image in images] == ["scene-cam"]
+    assert [image.name for image in images] == ["color"]  # RDK's RGB-D name, as realsense serves
     assert images[0].data[:2] == b"\xff\xd8"  # JPEG
     assert properties.supports_pcd
 
@@ -175,11 +175,14 @@ def test_wrist_camera_returns_depth_and_point_cloud(cell):
     cfg.frame.translation.z = 50  # mm along the tool axis
     camera = MujocoCamera.new(cfg, {})
     images, _ = run(camera.get_images())
-    assert [image.name for image in images] == ["wrist-cam", "depth"]
+    assert [image.name for image in images] == ["color", "depth"]
     depth = images[1].bytes_to_depth_array()
     assert (len(depth), len(depth[0])) == (24, 32)
     only_depth, _ = run(camera.get_images(filter_source_names=["depth"]))
     assert [image.name for image in only_depth] == ["depth"]
+    for name in ("color", "wrist-cam"):  # the component's name still picks the colour image
+        only_color, _ = run(camera.get_images(filter_source_names=[name]))
+        assert [image.name for image in only_color] == ["color"]
     data, mime = run(camera.get_point_cloud())
     assert mime == "pointcloud/pcd"
     assert data.startswith(b"VERSION .7\nFIELDS x y z rgb")

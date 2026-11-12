@@ -126,17 +126,6 @@
           "x": 0,
           "y": 0,
           "z": 130
-        },
-        "geometry": {
-          "type": "box",
-          "x": 90,
-          "y": 90,
-          "z": 130,
-          "translation": {
-            "x": 0,
-            "y": 0,
-            "z": -65
-          }
         }
       },
       "attributes": {

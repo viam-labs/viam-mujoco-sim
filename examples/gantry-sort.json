@@ -56,7 +56,7 @@
       "name": "cup",
       "api": "rdk:component:gripper",
       "model": "viam-labs:mujoco-sim:gripper",
-      "frame": {"parent": "gantry", "translation": {"x": 0, "y": 0, "z": 130}, "geometry": {"type": "box", "x": 90, "y": 90, "z": 130, "translation": {"x": 0, "y": 0, "z": -65}}},
+      "frame": {"parent": "gantry", "translation": {"x": 0, "y": 0, "z": 130}},
       "attributes": {"world": "sim-world", "mount": "gantry", "asset": "robotiq_epick"}
     },
     {

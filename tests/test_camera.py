@@ -150,3 +150,28 @@ def test_encode_pcd_without_colors():
     header, body = data.split(b"DATA binary\n")
     assert b"FIELDS x y z\n" in header and b"TYPE F F F\n" in header and b"POINTS 2" in header
     assert np.frombuffer(body, "<f4").reshape(2, 3)[1] == pytest.approx([0.5, -0.5, 0.0])
+
+
+def test_point_cloud_projects_onto_the_color_image(sim):
+    """detections-to-segments takes a camera's native point cloud and keeps the
+    points whose projection through the colour intrinsics falls in a 2D
+    detection box: the block's points must land on the pixels showing it."""
+    sim.set_prop_pose("pick_block", [0.04, -0.03, 0.0157], [1, 0, 0, 0])  # off centre, on the floor
+    camera = CameraHandle(
+        sim, "down", {"position": [0, 0, 0.3], "orientation_wxyz": [0, 1, 0, 0], "width": 160, "height": 120}
+    )
+    rgb = camera.get_rgb().astype(int)
+    points, _ = camera.point_cloud()
+    k = camera.intrinsics()
+    u = np.rint(points[:, 0] / points[:, 2] * k["focal_x_px"] + k["center_x_px"] - 0.5).astype(int)
+    v = np.rint(points[:, 1] / points[:, 2] * k["focal_y_px"] + k["center_y_px"] - 0.5).astype(int)
+    assert ((u >= 0) & (u < 160) & (v >= 0) & (v < 120)).all()
+    block = points[:, 2] < 0.29  # nearer than the floor, 0.3 m away
+    assert block.sum() > 10
+    # the block's pixels, found from the images alone: what changes when the block goes
+    sim.set_prop_pose("pick_block", [3.0, 3.0, 0.0157], [1, 0, 0, 0])
+    shown = np.abs(rgb - camera.get_rgb().astype(int)).sum(axis=2) > 30
+    assert shown[v[block], u[block]].mean() > 0.9
+    rows, cols = np.nonzero(shown)
+    assert np.mean(u[block]) == pytest.approx(cols.mean(), abs=2)
+    assert np.mean(v[block]) == pytest.approx(rows.mean(), abs=2)

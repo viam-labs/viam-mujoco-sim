@@ -50,7 +50,7 @@ from viam.utils import ValueTypes
 from .. import FAMILY, NAMESPACE, robots
 from ..handles import DEFAULT_GRIP_FORCE_N, GripperHandle
 from ..sim import GRIPPER_ASSETS, SimManager
-from .utils import finite_number, get_attrs, positive_number, validate_sim_component
+from .utils import apply_frame_to_attrs, finite_number, get_attrs, positive_number, validate_sim_component
 
 
 def _mount(name: str, attrs: dict) -> str:
@@ -109,13 +109,18 @@ class MujocoGripper(Gripper, EasyResource):
             if key in attrs:
                 finite_number(config.name, attrs, key, 0.0)
         positive_number(config.name, attrs, "grip_force_n", DEFAULT_GRIP_FORCE_N)
+        if config.HasField("frame") and config.frame.parent != mount:
+            raise ValueError(
+                f'{config.name}: frame.parent must be its mount "{mount}": the gripper serves its '
+                "shape in its frame relative to the mount's end effector"
+            )
         return [*world, mount], []
 
     # Called once, from new(): viam-server rebuilds resources (close() then new()) on config changes.
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
     ) -> None:
-        attrs = get_attrs(config)
+        attrs = apply_frame_to_attrs(config, get_attrs(config))  # its frame: where it serves its shape
         self._sensorless = bool(attrs.get("sensorless", False))
         self._closed = False
         self._handle = GripperHandle(SimManager.get(), self.name, _mount(self.name, attrs), attrs)
@@ -184,7 +189,10 @@ class MujocoGripper(Gripper, EasyResource):
         raise NotImplementedError("the simulated gripper serves no kinematics")
 
     async def get_geometries(self, **kwargs) -> list[Geometry]:
-        return []
+        """The gripper's collision shape, open and closed, for the motion planner
+        (RDK falls back to it when get_kinematics raises); none for a gripper in
+        its arm's own file, whose kinematics carry it."""
+        return list(self._handle.geometries) if self._handle is not None else []
 
     async def do_command(
         self,

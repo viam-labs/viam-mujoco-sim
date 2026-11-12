@@ -114,7 +114,9 @@ class MujocoCamera(Camera, EasyResource):
         return self._handle
 
     def _images(self, sources: Optional[Sequence[str]]) -> List[NamedImage]:
-        want_color = not sources or self.name in sources
+        # "color" and "depth", RDK's RGB-D names (as realsense serves, and
+        # detections-to-segments requires); the component's name still picks the colour image
+        want_color = not sources or "color" in sources or self.name in sources
         want_depth = self._depth and (not sources or "depth" in sources)
         if want_depth:
             rgb, depth = self._h().get_rgbd()
@@ -124,7 +126,7 @@ class MujocoCamera(Camera, EasyResource):
         if want_color:
             buffer = BytesIO()
             Image.fromarray(rgb, mode="RGB").save(buffer, format="JPEG", quality=90)
-            images.append(NamedImage(self.name, buffer.getvalue(), CameraMimeType.JPEG))
+            images.append(NamedImage("color", buffer.getvalue(), CameraMimeType.JPEG))
         if depth is not None:
             images.append(NamedImage("depth", encode_depth(depth), CameraMimeType.VIAM_RAW_DEPTH))
         return images

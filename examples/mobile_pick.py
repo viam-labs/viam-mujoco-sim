@@ -28,6 +28,7 @@ from viam.proto.common import (
     Pose,
     PoseInFrame,
     RectangularPrism,
+    Transform,
     Vector3,
     WorldState,
 )
@@ -49,9 +50,12 @@ TO_TABLE_A_MM = 2000  # the bumper stops 36 mm short of table A
 BACK_UP_MM = 400  # then the arm clears table A while the Husky turns
 TO_TABLE_B_MM = 2000  # the bumper stops 36 mm short of table B
 ABOVE_MM = 100  # approach and retreat height
+# the tool point grips this far above the block's centre: the planner checks the 2F-85's
+# jaw closed too, its pads then 18 mm past the tool point, and the block's centre is 15.7 mm up
+GRIP_UP_MM = 4
 DOWN = {"o_x": 0, "o_y": 0, "o_z": -1, "theta": 0}
 # the carry pose, in the husky frame: close over the Husky, pointing down, with the
-# gripper's box (158 mm below the tool point) clear of the 450 mm tables
+# gripper (its mount 156 mm up the tool axis from the tool point) clear of the 450 mm tables
 CARRY_MM = (0, 400, 750)
 
 
@@ -100,15 +104,29 @@ async def mobile_pick(world, base, odometry, gripper, motion) -> tuple[float, fl
         x, y, z = (v * 1000 for v in pose["position"])
         return x, y, z
 
-    # No held-block transform: the block sits between the fingers, inside the
-    # gripper's planner box but for its last ~4 mm (less than the place clearance).
+    # While held, the block rides the gripper as a transform the planner checks: its centre
+    # GRIP_UP_MM out along the tool axis, 4 mm shorter than the block so it never touches
+    # what it sits on.
+    held = Transform(
+        reference_frame="held_block",
+        pose_in_observer_frame=PoseInFrame(reference_frame="gripper", pose=Pose(o_z=1)),
+        physical_object=Geometry(
+            center=Pose(z=GRIP_UP_MM, o_z=1),
+            box=RectangularPrism(dims_mm=Vector3(x=BLOCK_MM, y=BLOCK_MM, z=BLOCK_MM - 4)),
+            label="held_block",
+        ),
+    )
+    holding = False
     tool = CARRY_MM  # where the tool point last went, in the husky frame
 
     async def move_husky(hx: float, hy: float, z: float, husky, step: str, *extra: Geometry) -> None:
         """The gripper's tool point to (hx, hy, z) mm in the husky frame, pointing down."""
         nonlocal tool
         tables = [box(name, *table, husky) for name, table in TABLES.items()]
-        state = WorldState(obstacles=[GeometriesInFrame(reference_frame="husky", geometries=[*tables, *extra])])
+        state = WorldState(
+            obstacles=[GeometriesInFrame(reference_frame="husky", geometries=[*tables, *extra])],
+            transforms=[held] if holding else [],
+        )
         destination = PoseInFrame(reference_frame="husky", pose=Pose(x=hx, y=hy, z=z, **DOWN))
         if not await motion.move(component_name="gripper", destination=destination, world_state=state):
             raise RuntimeError(f"motion.move failed: {step}")
@@ -135,11 +153,12 @@ async def mobile_pick(world, base, odometry, gripper, motion) -> tuple[float, fl
     print(f"at table A: Husky at ({husky[0]:.0f}, {husky[1]:.0f}) mm, block at ({x:.0f}, {y:.0f}, {z:.0f}) mm")
     # the block stays an obstacle until the last, straight-down approach
     await move(x, y, z + ABOVE_MM, husky, "above the block", box(BLOCK, (x, y, z), (BLOCK_MM,) * 3, husky))
-    await move(x, y, z, husky, "down to the block")
+    await move(x, y, z + GRIP_UP_MM, husky, "down to the block")
     await gripper.grab()
     await asyncio.sleep(1.0)  # Grab returns at once; let the jaws close
     if not (await gripper.is_holding_something()).is_holding_something:
         raise RuntimeError("the gripper is not holding the block")
+    holding = True
     await move(x, y, z + ABOVE_MM, husky, "lift the block")
     await carry(husky, "before backing up")
 
@@ -151,8 +170,9 @@ async def mobile_pick(world, base, odometry, gripper, motion) -> tuple[float, fl
     z = TABLE_TOP_MM + BLOCK_MM / 2
     print(f"at table B: Husky at ({husky[0]:.0f}, {husky[1]:.0f}) mm")
     await move(x, y, z + ABOVE_MM, husky, "above table B")
-    await move(x, y, z + 2, husky, "down onto table B")  # let go 2 mm above the table
+    await move(x, y, z + GRIP_UP_MM + 2, husky, "down onto table B")  # let go 2 mm above the table
     await gripper.open()
+    holding = False
     await asyncio.sleep(1.0)  # let the block settle before reading it back
     await move(x, y, z + ABOVE_MM, husky, "retreat from table B")
     return await block_mm()

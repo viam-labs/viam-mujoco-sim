@@ -35,6 +35,7 @@ from .sim import (
     DynamicProp,
     SimManager,
 )
+from viam.proto.common import Geometry
 from viam.spatialmath import Quaternion
 
 Vec3 = tuple[float, float, float]
@@ -1222,6 +1223,23 @@ class GripperHandle:
         self._ctrl = self._command(self._open)
         self._callback_key = f"gripper:{name}"
         self._attached = mjcf is not None
+        # What the motion planner knows of the gripper's shape (GetGeometries): its file's
+        # colliding geoms open and closed, in its Viam frame. The file's world sits at the
+        # mount's flange site; the mount's Viam end frame is that site with flange_offset,
+        # and the gripper's frame is its configured pose from there.
+        self.geometries: list[Geometry] = []
+        if self._attached:
+            from .gripper_shape import collision_geometries
+
+            site = handle.model.site(handle.flange_site)
+            flange_offset = np.linalg.inv(robots.transform(site.pos, site.quat)) @ handle.end_offset
+            configured = robots.transform(
+                [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))],
+                [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
+            )
+            frame = np.linalg.inv(configured) @ np.linalg.inv(flange_offset)
+            commands = [self._ctrl] if self.suction else [self._ctrl, self._command(self._closed)]
+            self.geometries = collision_geometries(gripper_spec, actuator, commands, frame)
         if self._attached:
             flange = handle.flange_site_name
 

@@ -88,14 +88,7 @@
       "model": "viam-labs:mujoco-sim:gripper",
       "frame": {
         "parent": "arm",
-        "translation": {"x": 0, "y": 0, "z": 155.8},
-        "geometry": {
-          "type": "box",
-          "x": 150,
-          "y": 80,
-          "z": 170,
-          "translation": {"x": 0, "y": 0, "z": -73}
-        }
+        "translation": {"x": 0, "y": 0, "z": 155.8}
       },
       "attributes": {
         "world": "sim-world",

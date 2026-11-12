@@ -43,7 +43,7 @@ DOWN = {"o_x": 0, "o_y": 0, "o_z": -1, "theta": 0}
 
 # The held carton in the gripper's frame (+z along the tool; with the tool
 # pointing down, x is world -x, so the carton's 190 mm side stays along x).
-# Its centre is 76 mm out, just past the gripper's planner box, and it is
+# Its centre is 76 mm out, just past the cup, and it is
 # 4 mm shorter than the carton so it never touches what the carton sat on.
 HELD = Transform(
     reference_frame="held_carton",

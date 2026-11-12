@@ -1,0 +1,89 @@
+{
+  "modules": [
+    {"type": "local", "name": "mujoco-sim", "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"},
+    {"type": "registry", "name": "devrel_shape-finder", "module_id": "devrel:shape-finder", "version": "latest"},
+    {"type": "registry", "name": "viam_detections-to-segments", "module_id": "viam:detections-to-segments", "version": "latest"},
+    {"type": "registry", "name": "viam_obstacles-pointcloud", "module_id": "viam:obstacles-pointcloud", "version": "latest"}
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {"name": "red_1", "type": "cube", "size": 1, "scale": [0.05, 0.05, 0.04], "position": [0.38, -0.13, 0.025], "orientation_wxyz": [0.984808, 0, 0, 0.173648], "mass": 0.1, "color": [0.85, 0.08, 0.08], "static_friction": 1.5},
+          {"name": "blue_1", "type": "cube", "size": 1, "scale": [0.08, 0.04, 0.04], "position": [0.51, -0.135, 0.025], "orientation_wxyz": [0.953717, 0, 0, -0.300706], "mass": 0.1, "color": [0.08, 0.15, 0.85], "static_friction": 1.5},
+          {"name": "red_2", "type": "cube", "size": 1, "scale": [0.08, 0.04, 0.04], "position": [0.64, -0.125, 0.025], "orientation_wxyz": [0.866025, 0, 0, 0.5], "mass": 0.1, "color": [0.85, 0.08, 0.08], "static_friction": 1.5},
+          {"name": "blue_2", "type": "cube", "size": 1, "scale": [0.05, 0.05, 0.04], "position": [0.385, 0.0, 0.025], "orientation_wxyz": [0.996195, 0, 0, 0.087156], "mass": 0.1, "color": [0.08, 0.15, 0.85], "static_friction": 1.5},
+          {"name": "red_3", "type": "cube", "size": 1, "scale": [0.05, 0.05, 0.04], "position": [0.515, 0.005, 0.025], "orientation_wxyz": [0.991445, 0, 0, -0.130526], "mass": 0.1, "color": [0.85, 0.08, 0.08], "static_friction": 1.5},
+          {"name": "blue_3", "type": "cube", "size": 1, "scale": [0.08, 0.04, 0.04], "position": [0.635, -0.005, 0.025], "orientation_wxyz": [0.793353, 0, 0, 0.608761], "mass": 0.1, "color": [0.08, 0.15, 0.85], "static_friction": 1.5},
+          {"name": "red_4", "type": "cube", "size": 1, "scale": [0.08, 0.04, 0.04], "position": [0.38, 0.13, 0.025], "orientation_wxyz": [0.866025, 0, 0, -0.5], "mass": 0.1, "color": [0.85, 0.08, 0.08], "static_friction": 1.5},
+          {"name": "blue_4", "type": "cube", "size": 1, "scale": [0.05, 0.05, 0.04], "position": [0.51, 0.125, 0.025], "orientation_wxyz": [0.92388, 0, 0, 0.382683], "mass": 0.1, "color": [0.08, 0.15, 0.85], "static_friction": 1.5}
+        ]
+      }
+    },
+    {
+      "name": "table",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 500, "y": 0, "z": -5}, "geometry": {"type": "box", "x": 900, "y": 1300, "z": 20}},
+      "attributes": {"world": "sim-world", "color": [0.6, 0.6, 0.62]}
+    },
+    {
+      "name": "red-bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 380, "y": -450, "z": 5}},
+      "attributes": {"world": "sim-world", "mesh": "meshes/bin.stl", "scale": [1.5, 1.5, 1], "color": [0.8, 0.3, 0.3]}
+    },
+    {
+      "name": "blue-bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 620, "y": -450, "z": 5}},
+      "attributes": {"world": "sim-world", "mesh": "meshes/bin.stl", "scale": [1.5, 1.5, 1], "color": [0.3, 0.45, 0.8]}
+    },
+    {
+      "name": "clear-bin",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {"parent": "world", "translation": {"x": 500, "y": 450, "z": 5}},
+      "attributes": {"world": "sim-world", "mesh": "meshes/bin.stl", "scale": [1.5, 1.5, 1], "color": [0.5, 0.5, 0.5]}
+    },
+    {
+      "name": "pick-arm",
+      "api": "rdk:component:arm",
+      "model": "viam-labs:mujoco-sim:arm",
+      "frame": {"parent": "world"},
+      "attributes": {"world": "sim-world", "asset": "ur5e", "max_joint_deg_s": 60, "max_joint_deg_s2": 120}
+    },
+    {
+      "name": "pick-gripper",
+      "api": "rdk:component:gripper",
+      "model": "viam-labs:mujoco-sim:gripper",
+      "frame": {"parent": "pick-arm", "translation": {"x": 0, "y": 0, "z": 155.8}},
+      "attributes": {"world": "sim-world", "mount": "pick-arm", "asset": "robotiq_2f85"}
+    },
+    {
+      "name": "wrist-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {"parent": "pick-arm", "translation": {"x": 0, "y": 100, "z": 30}},
+      "attributes": {"world": "sim-world", "width": 640, "height": 480}
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {"parent": "world", "translation": {"x": 1700, "y": -1300, "z": 1300}},
+      "attributes": {"world": "sim-world", "target": [0.5, 0, 0.1], "width": 1280, "height": 720}
+    }
+  ],
+  "services": [
+    {"name": "world-state", "api": "rdk:service:world_state_store", "model": "viam-labs:mujoco-sim:world_state", "attributes": {"world": "sim-world"}},
+    {"name": "shapes", "api": "rdk:service:vision", "model": "devrel:shape-finder:detector", "attributes": {"camera_name": "wrist-cam"}},
+    {"name": "shape-segments", "api": "rdk:service:vision", "model": "viam:vision:detections-to-segments", "attributes": {"detector_name": "shapes", "camera_name": "wrist-cam", "mean_k": 10, "sigma": 1.25, "confidence_threshold_pct": 0.5}},
+    {"name": "objects", "api": "rdk:service:vision", "model": "viam:obstacles-pointcloud:obstacles-pointcloud", "attributes": {"camera_name": "wrist-cam", "max_dist_from_plane_mm": 10, "min_points_in_plane": 2000, "min_points_in_segment": 100}}
+  ]
+}

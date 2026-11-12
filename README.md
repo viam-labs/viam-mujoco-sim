@@ -68,6 +68,9 @@ with a conveyor, photo-eye and scale (see [Parcel sorting](#parcel-sorting)), an
 parcels off the running belt (see [Conveyor pick](#conveyor-pick)), and
 [`examples/gantry-sort.json`](examples/gantry-sort.json) an XYZ gantry
 sorting blocks into bins (see [Gantry sort](#gantry-sort)), and
+[`examples/vision-pick.json`](examples/vision-pick.json) a UR5e with a wrist
+camera that finds blocks with vision services and sorts them (see
+[Vision pick](#vision-pick)), and
 [`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
 between two tables (see [Mobile manipulation](#mobile-manipulation)), and
 [`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
@@ -477,16 +480,25 @@ Lite6 gripper. A suction gripper (an `<adhesion>` actuator) has no jaws: `Grab` 
 vacuum on and `Open` turns it off. Adhesion pulls only through the cup's
 contacts, so a violent move can tear the object off.
 
-| `asset` | Gripper | On | Frame `translation.z` (TCP) | Frame `geometry` covering it |
+| `asset` | Gripper | On | Frame `translation.z` (TCP) | Its shape for the planner |
 |---|---|---|---|---|
-| `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | box 78 × 78 × 70 mm at `z: -35` |
-| `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | box 150 × 80 × 170 mm at `z: -73` (fingers open along x) |
-| `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | box 90 × 90 × 130 mm at `z: -65` |
+| `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | none served: give the frame a `geometry`, box 78 × 78 × 70 mm at `z: -35` |
+| `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | served (fingers open along x, ~100 mm across the pads open) |
+| `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | served |
 | `aloha` | ALOHA's own, in its robot file (open and closed swapped to match its actuator) | `aloha_left`, `aloha_right` | 0 mm (the arm's end effector is the gripper) | none: the arm's kinematics carry it |
 | `tiago` | TIAGo++'s own, two coupled fingers on one actuator, in its robot file (open 45 mm a finger; open and closed swapped) | `tiago_arm_left`, `tiago_arm_right` | 0 mm (the arm's end effector is between the fingertips) | none: the arm's kinematics carry it |
 
-Give the gripper's frame that geometry so the planner keeps the whole gripper
-clear of obstacles; without it, a path can pass the arm but clip the gripper.
+A gripper from its own file (a bundled one, or your `mjcf`) serves its shape
+to the motion planner from `GetGeometries`: each of its colliding geoms,
+meshes as convex hulls of at most 32 vertices and boxes, spheres and capsules
+as themselves, in its Viam frame. A part that moves with the jaw is served
+twice, open and closed (labelled `:open` and `:closed`), so a plan clears the
+fingers either way; the 2F-85 serves 26 shapes. RDK asks for them because
+the gripper serves no kinematics, and checks them as well as any frame
+`geometry`, so an existing frame box now adds to the served shape: remove
+it. Its `frame.parent` must be its `mount` (or `arm`). A gripper in its arm's own file (`lite6_gripper`) serves none: give
+its frame the box above, or the planner can pass the arm but clip the
+gripper.
 The 2F-85 and the ePick also switch the whole scene to elliptic friction cones
 with `impratio` 10 (their own MJCF options, which grasping relies on) while
 configured. The ePick's cup pulls with up to 100 N; it carries a 1 kg carton
@@ -539,7 +551,8 @@ fingertip center: use the TCP value from the table above, or for your own
 | `IsMoving` | True while the jaws move; always false for suction. |
 | `IsHoldingSomething` | See below. |
 | `GetCurrentInputs` / `GoToInputs` | One value: `0` open, `1` closed. |
-| `GetKinematics` | Not supported, deliberately; the planner treats the gripper as a point. |
+| `GetKinematics` | Not supported; RDK falls back to `GetGeometries`. |
+| `GetGeometries` | Its colliding geoms, open and closed, in its frame (see above); none for a gripper in its arm's own file (`lite6_gripper`, `aloha`, `tiago`). |
 
 `IsHoldingSomething` always fills `meta`:
 
@@ -596,8 +609,7 @@ gripper uses the frame it would use on an arm (the ePick: `"translation":
   "model": "viam-labs:mujoco-sim:gripper",
   "frame": {
     "parent": "gantry",
-    "translation": { "x": 0, "y": 0, "z": 130 },
-    "geometry": { "type": "box", "x": 90, "y": 90, "z": 130, "translation": { "x": 0, "y": 0, "z": -65 } }
+    "translation": { "x": 0, "y": 0, "z": 130 }
   },
   "attributes": { "world": "sim-world", "mount": "gantry", "asset": "robotiq_epick" }
 }
@@ -700,7 +712,7 @@ error saying the camera is not in the scene.
 
 | Method | Notes |
 |---|---|
-| `GetImages` | A JPEG named after the component and, with `depth`, a `depth` image in Viam's raw depth format (millimeters, 0 where nothing is in view). Both come from the same sim step. `filter_source_names` picks either one. Raw depth is uncompressed, 2 bytes a pixel: 150 KB a frame at the default 320 x 240, 600 KB at 640 x 480. |
+| `GetImages` | A JPEG named `color` and, with `depth`, a `depth` image in Viam's raw depth format (millimeters, 0 where nothing is in view): RDK's RGB-D names, as a RealSense serves and vision modules such as detections-to-segments expect. Both come from the same sim step. `filter_source_names` picks either one; the component's name also picks the colour image (it was that image's name before 0.13.0). Raw depth is uncompressed, 2 bytes a pixel: 150 KB a frame at the default 320 x 240, 600 KB at 640 x 480. |
 | `GetProperties` | Intrinsics of the color image, computed from `fov_deg` and the image size. The depth image has the same vertical field of view at its own size. |
 | `GetPointCloud` | Colored binary PCD in meters, in the camera's frame. Pixels with nothing in view are left out. Works whether or not `depth` is set. |
 
@@ -1197,9 +1209,10 @@ await motion.move(component_name="pick-gripper", destination=goal,
 
 The buffer applies to every obstacle, so leave it off for the final approach
 onto a surface, such as placing into the bin. To have the planner see the gripper
-itself, give its frame a geometry (the gripper table lists one for each bundled
-gripper); this box covers the Lite6 gripper from the fingertips back to the
-flange:
+itself: a gripper in its arm's own file (`lite6_gripper`) needs a frame
+geometry (the gripper table lists it), while a gripper from its own file
+serves its shape. This box covers the Lite6 gripper from the fingertips back
+to the flange:
 
 ```json
 "frame": {
@@ -1924,6 +1937,80 @@ gantry, and a move the next run has started fails as superseded. A
 motion-service run doesn't hand the gantry to its session, so it leaves
 nothing behind.
 
+## Vision pick
+
+[`examples/vision-pick.json`](examples/vision-pick.json) is a UR5e with a
+Robotiq 2F-85 and a wrist camera over a grey table of eight 40 mm tall
+blocks, red and blue, 50 mm squares and 40 x 80 mm rectangles at assorted
+turns, 130 mm apart (the planner clears a neighbour with the 2F-85's served
+shape; a 150 mm box round the gripper would not), and a
+red, a blue and a "clear" bin at the table's ends, out of the camera's view.
+The table top sits 5 mm over the sim's floor plane (flush, the two
+z-fight). It configures two perception pipelines on the wrist camera,
+from the registry:
+
+- `shapes`, [`devrel:shape-finder:detector`](https://app.viam.com/module/devrel/shape-finder):
+  coloured squares and rectangles in the image, labelled `<shape>-<colour>`;
+  and `shape-segments`, [`viam:vision:detections-to-segments`](https://app.viam.com/module/viam/detections-to-segments)
+  over it: each detection's points from the camera's point cloud.
+- `objects`, [`viam:obstacles-pointcloud:obstacles-pointcloud`](https://app.viam.com/module/viam/obstacles-pointcloud):
+  the point cloud's clusters above the table, unlabelled. Its
+  `max_dist_from_plane_mm` is 10: at the default 100 mm the 40 mm blocks
+  would count as table.
+
+[`examples/vision_pick.py`](examples/vision_pick.py) picks every block it
+finds:
+
+```sh
+uv run python examples/vision_pick.py <machine address> <api key id> <api key> [--vision shapes|pointcloud]
+```
+
+Each round the camera surveys the table from 450 mm straight above, and
+`GetDetections3D` on `shape-segments` (default) or `objects` returns each
+object as a transform tree: a root frame on the camera at the object's
+bounding box, carrying the box (and, from shapes, its label), and a
+`<root>/points` child carrying the object's points in the root's frame. The
+robot client's `transform_pose` pins each root to the world with
+viam-server's frame system (the camera rides the arm: a root left on it
+would move with the next plan), and the script keeps the points
+at block height (a detection box also takes in the table round a turned
+block, which detections-to-segments leaves in) and, of those, the cluster
+nearest the middle (a neighbour's corner can fall in the box). The smallest
+rectangle round the points, seen from above, gives the block's centre, top,
+yaw and width; the 2F-85 goes in across the short side, its x axis (along
+which the fingers open) turned to the block's yaw + 90 degrees. The script
+builds that pose as `EulerAngles(roll=180, pitch=0, yaw=heading)`: a half
+turn to point the tool down, then the heading about the vertical. (The same
+pose as an orientation vector is (0, 0, -1) with theta = 180 - heading:
+theta turns the frame about its own axis, which points down, so it runs the
+other way from a turn seen from above, from a start where x already points
+along -x.) With `shapes` a
+block goes in the bin of its label's colour (only the colour: shape-finder
+sizes its boxes upright, so a turned rectangle can read as a square); with
+`pointcloud`, which has no labels, every block goes in the clear bin. After
+each survey the script scores the detections against the blocks' true poses
+(the world's `get_prop_pose`), and at the end reports where every block
+landed. While it picks one block, the other detections, pinned to the
+world, go to the motion planner as `WorldState` transforms, each with its
+box, so the fingers clear the neighbours as they were seen. GetDetections3D
+needs detections-to-segments 1.4.0 or obstacles-pointcloud 0.2.0 or later.
+
+On a MacBook (viam-server v1.16.0; shape-finder 0.1.0, detections-to-segments
+1.4.0, obstacles-pointcloud 0.2.0):
+
+| `--vision` | Seen on the first survey | Missed | Spurious | Detection error (median) | In the right bin | Time |
+|---|---|---|---|---|---|---|
+| `shapes` | 8 / 8 | 0 | 0 | 0.7 mm, 0.0 deg | 8 / 8 | 115 s |
+| `pointcloud` | 8 / 8 | 0 | 0 | 0.8 mm, 0.0 deg | 8 / 8 | 135 s |
+
+Missed counts the blocks a later survey didn't see (each was seen again on
+the next); runs vary by a few misses and seconds.
+
+The sim's camera has no noise, so both pipelines find the blocks to under a
+millimetre; the difference is what they tell you. Only shapes says which bin
+a block belongs in, and only obstacles-pointcloud strips the table from what
+it returns.
+
 ## Mobile base, SLAM and navigation
 
 A simulated rover can map its world and navigate it with
@@ -2086,9 +2173,9 @@ so the script plans every move in the `husky` frame. At each table it reads
 the Husky's pose from odometry (`get_position` with
 `extra={"return_relative_pos_m": true}`, and `get_orientation`), moves the
 block's pose from `get_prop_pose` and the tables' boxes into the `husky`
-frame, and passes the destination and the `WorldState` in that frame. It
-doesn't transform the held block: it sits inside the gripper's planner box,
-so the planner already treats it as part of the gripper. The tables'
+frame, and passes the destination and the `WorldState` in that frame. While
+it holds the block it passes it as a transform on the gripper (centred on the
+tool point), so the planner keeps it clear of the tables. The tables'
 obstacle components are in the frame system too, but placed relative to where
 RDK keeps the Husky: more than 2 m away, out of the arm's reach. Watch it
 with `scene-cam`, not the 3D scene view.

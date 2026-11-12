@@ -85,8 +85,8 @@ def box(parcel: dict) -> Geometry:
 
 def held(size: tuple[float, float, float]) -> Transform:
     """A held parcel in the gripper's frame (+z along the tool; with the tool
-    pointing down its x stays along world x), just past the gripper's
-    planner box and 4 mm shorter than the parcel, so it never touches what
+    pointing down its x stays along world x), just past the cup and 4 mm
+    shorter than the parcel, so it never touches what
     the parcel sat on."""
     return Transform(
         reference_frame="held_parcel",
