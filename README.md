@@ -70,7 +70,8 @@ parcels off the running belt (see [Conveyor pick](#conveyor-pick)), and
 sorting blocks into bins (see [Gantry sort](#gantry-sort)), and
 [`examples/vision-pick.json`](examples/vision-pick.json) a UR5e with a wrist
 camera that finds blocks with vision services and sorts them (see
-[Vision pick](#vision-pick)), and
+[Vision pick](#vision-pick); [`examples/vision-pick-suction.json`](examples/vision-pick-suction.json)
+is the same cell with a Robotiq ePick), and
 [`examples/husky-ur5e.json`](examples/husky-ur5e.json) a UR5e riding a Husky
 between two tables (see [Mobile manipulation](#mobile-manipulation)), and
 [`examples/aloha-handover.json`](examples/aloha-handover.json) the ALOHA, two
@@ -1947,7 +1948,7 @@ shape; a 150 mm box round the gripper would not), and a
 red, a blue and a "clear" bin at the table's ends, out of the camera's view.
 The table top sits 5 mm over the sim's floor plane (flush, the two
 z-fight). It configures two perception pipelines on the wrist camera,
-from the registry:
+from the registry, and a grasp tracker over each:
 
 - `shapes`, [`devrel:shape-finder:detector`](https://app.viam.com/module/devrel/shape-finder):
   coloured squares and rectangles in the image, labelled `<shape>-<colour>`;
@@ -1965,43 +1966,56 @@ finds:
 uv run python examples/vision_pick.py <machine address> <api key id> <api key> [--vision shapes|pointcloud]
 ```
 
-Each round the camera surveys the table from 450 mm straight above, and
-`GetDetections3D` on `shape-segments` (default) or `objects` returns each
-object as a transform tree: a root frame on the camera at the object's
-bounding box, carrying the box (and, from shapes, its label), and a
-`<root>/points` child carrying the object's points in the root's frame. The
-robot client's `transform_pose` pins each root to the world with
-viam-server's frame system (the camera rides the arm: a root left on it
-would move with the next plan), and the script keeps the points
-at block height (a detection box also takes in the table round a turned
-block, which detections-to-segments leaves in) and, of those, the cluster
-nearest the middle (a neighbour's corner can fall in the box). The smallest
-rectangle round the points, seen from above, gives the block's centre, top,
-yaw and width; the 2F-85 goes in across the short side, its x axis (along
-which the fingers open) turned to the block's yaw + 90 degrees. The script
-builds that pose as `EulerAngles(roll=180, pitch=0, yaw=heading)`: a half
-turn to point the tool down, then the heading about the vertical. (The same
-pose as an orientation vector is (0, 0, -1) with theta = 180 - heading:
-theta turns the frame about its own axis, which points down, so it runs the
-other way from a turn seen from above, from a start where x already points
-along -x.) With `shapes` a
-block goes in the bin of its label's colour (only the colour: shape-finder
-sizes its boxes upright, so a turned rectangle can read as a square); with
-`pointcloud`, which has no labels, every block goes in the clear bin. After
-each survey the script scores the detections against the blocks' true poses
-(the world's `get_prop_pose`), and at the end reports where every block
-landed. While it picks one block, the other detections, pinned to the
-world, go to the motion planner as `WorldState` transforms, each with its
-box, so the fingers clear the neighbours as they were seen. GetDetections3D
-needs detections-to-segments 1.4.0 or obstacles-pointcloud 0.2.0 or later.
+The grasps come from the [`viam-labs:grasp-pose`](https://github.com/viam-labs/grasp-pose)
+module: a `top-down` pose tracker per pipeline, `shape-grasps` over
+`shape-segments` and `object-grasps` over `objects`:
+
+```json
+{
+  "name": "shape-grasps",
+  "api": "rdk:component:pose_tracker",
+  "model": "viam-labs:grasp-pose:top-down",
+  "attributes": {
+    "vision": "shape-segments",
+    "camera": "wrist-cam",
+    "support_z_mm": 5,
+    "gripper": {"type": "parallel", "max_opening_mm": 85, "finger_depth_mm": 40, "finger_width_mm": 22, "finger_thickness_mm": 8, "opening_axis": "x"}
+  }
+}
+```
+
+Each round the camera surveys the table from 450 mm straight above (every
+survey moves the arm to fixed joints, `SURVEY_JOINTS_DEG`, that put the camera
+over the blocks with the arm out of its view) and the
+script calls the tracker's `grasps` DoCommand. It returns each object's
+fitted box (centre, yaw, size, label) and its ranked grasp poses, all in the
+world frame. See the [module's README](https://github.com/viam-labs/grasp-pose#readme)
+for how grasps are found; it needs vision services that serve GetDetections3D
+(detections-to-segments 1.4.0 or obstacles-pointcloud 0.2.0 or later). The
+script tries the best grasp of the nearest object that has grasps, then that
+object's next grasp, then the next object; while it picks one block, the
+other objects' boxes go to the motion planner as obstacles, so the gripper
+clears the neighbours as they were seen. With `shapes` a block goes in the
+bin of its label's colour (only the colour: shape-finder sizes its boxes
+upright, so a turned rectangle can read as a square); with `pointcloud`,
+which has no labels, every block goes in the clear bin. After each survey
+the script scores the objects against the blocks' true poses (the world's
+`get_prop_pose`), and at the end reports where every block landed.
+
+The suction cell, [`examples/vision-pick-suction.json`](examples/vision-pick-suction.json),
+swaps the 2F-85 for a Robotiq ePick and configures the trackers with
+`"gripper": {"type": "suction", "cup_diameter_mm": 45}`. It runs the same
+script, `--vision shapes|pointcloud`.
 
 On a MacBook (viam-server v1.16.0; shape-finder 0.1.0, detections-to-segments
-1.4.0, obstacles-pointcloud 0.2.0):
+1.4.0, obstacles-pointcloud 0.2.0, grasp-pose 0.1.0):
 
-| `--vision` | Seen on the first survey | Missed | Spurious | Detection error (median) | In the right bin | Time |
-|---|---|---|---|---|---|---|
-| `shapes` | 8 / 8 | 0 | 0 | 0.7 mm, 0.0 deg | 8 / 8 | 115 s |
-| `pointcloud` | 8 / 8 | 0 | 0 | 0.8 mm, 0.0 deg | 8 / 8 | 135 s |
+| Cell | `--vision` | Seen on the first survey | Missed | Spurious | Detection error (median) | In the right bin | Time |
+|---|---|---|---|---|---|---|---|
+| 2F-85 | `shapes` | 8 / 8 | 0 | 0 | 1.1 mm, 0.0 deg | 8 / 8 | 142 s |
+| 2F-85 | `pointcloud` | 8 / 8 | 0 | 0 | 0.8 mm, 0.0 deg | 8 / 8 | 123 s |
+| ePick | `shapes` | 8 / 8 | 0 | 0 | 0.8 mm, 0.0 deg | 8 / 8 | 125 s |
+| ePick | `pointcloud` | 8 / 8 | 0 | 0 | 0.9 mm, 0.0 deg | 8 / 8 | 123 s |
 
 Missed counts the blocks a later survey didn't see (each was seen again on
 the next); runs vary by a few misses and seconds.

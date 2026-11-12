@@ -3,7 +3,8 @@
     {"type": "local", "name": "mujoco-sim", "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"},
     {"type": "registry", "name": "devrel_shape-finder", "module_id": "devrel:shape-finder", "version": "latest"},
     {"type": "registry", "name": "viam_detections-to-segments", "module_id": "viam:detections-to-segments", "version": "latest"},
-    {"type": "registry", "name": "viam_obstacles-pointcloud", "module_id": "viam:obstacles-pointcloud", "version": "latest"}
+    {"type": "registry", "name": "viam_obstacles-pointcloud", "module_id": "viam:obstacles-pointcloud", "version": "latest"},
+    {"type": "registry", "name": "viam-labs_grasp-pose", "module_id": "viam-labs:grasp-pose", "version": "latest"}
   ],
   "components": [
     {
@@ -78,6 +79,28 @@
       "model": "viam-labs:mujoco-sim:camera",
       "frame": {"parent": "world", "translation": {"x": 1700, "y": -1300, "z": 1300}},
       "attributes": {"world": "sim-world", "target": [0.5, 0, 0.1], "width": 1280, "height": 720}
+    },
+    {
+      "name": "shape-grasps",
+      "api": "rdk:component:pose_tracker",
+      "model": "viam-labs:grasp-pose:top-down",
+      "attributes": {
+        "vision": "shape-segments",
+        "camera": "wrist-cam",
+        "support_z_mm": 5,
+        "gripper": {"type": "parallel", "max_opening_mm": 85, "finger_depth_mm": 40, "finger_width_mm": 22, "finger_thickness_mm": 8, "opening_axis": "x"}
+      }
+    },
+    {
+      "name": "object-grasps",
+      "api": "rdk:component:pose_tracker",
+      "model": "viam-labs:grasp-pose:top-down",
+      "attributes": {
+        "vision": "objects",
+        "camera": "wrist-cam",
+        "support_z_mm": 5,
+        "gripper": {"type": "parallel", "max_opening_mm": 85, "finger_depth_mm": 40, "finger_width_mm": 22, "finger_thickness_mm": 8, "opening_axis": "x"}
+      }
     }
   ],
   "services": [

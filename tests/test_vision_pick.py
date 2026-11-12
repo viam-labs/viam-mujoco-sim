@@ -1,6 +1,6 @@
 """examples/vision-pick.json and vision_pick.py: the config matches the
-script, the script's point and grasp maths, and an end to end run on the
-local sim with stand-ins for the motion and vision services."""
+script, the script's pose maths and scoring, and an end to end run on the
+local sim with stand-ins for the motion service and the grasp tracker."""
 
 import asyncio
 import importlib.util
@@ -12,11 +12,10 @@ import numpy as np
 import pytest
 from test_parcel_sort import EXAMPLES, MODELS, component
 from viam.components.arm import JointPositions
-from viam.proto.common import Geometry, PointCloud, Pose, PoseInFrame, RectangularPrism, Transform, Vector3
-from viam.proto.service.vision import Detection3D
-from viam.spatialmath import OrientationVector, Quaternion
+from viam.proto.common import Pose, PoseInFrame
+from viam.spatialmath import EulerAngles, OrientationVector, Quaternion
 
-from mujoco_module.handles import JointTrajectoryPoint, encode_pcd
+from mujoco_module.handles import JointTrajectoryPoint
 from mujoco_module.models.camera import MujocoCamera
 
 CELL_MODELS = {**MODELS, "viam-labs:mujoco-sim:camera": MujocoCamera}
@@ -32,24 +31,38 @@ def load_script():
 script = load_script()
 
 
-def block_cloud(cx, cy, yaw_deg, length, width, step=2.0, top=40.0, base=script.TABLE_TOP_MM):
-    """A block's top face and sides as world points (mm), as a camera from
-    above sees it, with some table round it."""
-    a = math.radians(yaw_deg)
-    u, v = np.meshgrid(np.arange(-length / 2, length / 2, step), np.arange(-width / 2, width / 2, step))
-    u, v = u.ravel(), v.ravel()
-    x, y = cx + u * math.cos(a) - v * math.sin(a), cy + u * math.sin(a) + v * math.cos(a)
-    block = np.column_stack([x, y, np.full_like(x, base + top)])
-    tx, ty = np.meshgrid(np.arange(cx - 60, cx + 60, step), np.arange(cy - 60, cy + 60, step))
-    table = np.column_stack([tx.ravel(), ty.ravel(), np.full(tx.size, float(base))])
-    return np.vstack([block, table])
+def down(x: float, y: float, z: float, heading_deg: float) -> PoseInFrame:
+    """A world pose pointing straight down (+z along world -z) with its x
+    axis turned heading_deg from world +x, counterclockwise seen from above:
+    a half turn about x (roll 180), then the turn about the vertical (yaw)."""
+    ov = EulerAngles(roll=math.pi, pitch=0, yaw=math.radians(heading_deg)).to_quaternion().to_orientation_vector()
+    pose = Pose(x=x, y=y, z=z, o_x=ov.o_x, o_y=ov.o_y, o_z=ov.o_z, theta=math.degrees(ov.theta))
+    return PoseInFrame(reference_frame="world", pose=pose)
+
+
+def parse_pcd(data: bytes) -> np.ndarray:
+    """The x, y, z (metres) of a binary PCD, as Viam's vision services return it."""
+    header, rest = {}, data
+    while True:
+        line, rest = rest.split(b"\n", 1)
+        key, _, value = line.decode().partition(" ")
+        header[key] = value.split()
+        if key == "DATA":
+            break
+    if header["DATA"] != ["binary"]:
+        raise ValueError(f"expected a binary PCD, got DATA {header['DATA']}")
+    kinds = {("F", "4"): "<f4", ("F", "8"): "<f8", ("U", "4"): "<u4", ("I", "4"): "<i4", ("U", "1"): "u1"}
+    dtype = np.dtype([(name, kinds[(kind, size)]) for name, kind, size in zip(header["FIELDS"], header["TYPE"], header["SIZE"])])
+    rows = np.frombuffer(rest, dtype=dtype, count=int(header["POINTS"][0]))
+    return np.column_stack([rows["x"], rows["y"], rows["z"]]).astype(float)
 
 
 # -- config ---------------------------------------------------------------------
 
 
-def test_example_validates_and_matches_the_script():
-    cfg = json.loads((EXAMPLES / "vision-pick.json").read_text())
+@pytest.mark.parametrize("name", ["vision-pick.json", "vision-pick-suction.json"])
+def test_example_validates_and_matches_the_script(name):
+    cfg = json.loads((EXAMPLES / name).read_text())
     items = {item["name"]: item for item in cfg["components"]}
     for item in cfg["components"]:
         if item["model"] in CELL_MODELS:
@@ -58,11 +71,10 @@ def test_example_validates_and_matches_the_script():
     assert sorted(props) == sorted(script.BLOCKS)
     assert {round(p["scale"][2] * 1000) for p in props.values()} == {script.BLOCK_H_MM}
     assert {n for n, p in props.items() if p["scale"][0] == p["scale"][1]} == script.SQUARES
-    assert all(min(p["scale"][:2]) * 1000 <= script.MAX_GRASP_MM for p in props.values())
-    for name, (x, y) in script.BINS.items():
-        frame = items[f"{name}-bin"]["frame"]["translation"]
+    for colour, (x, y) in script.BINS.items():
+        frame = items[f"{colour}-bin"]["frame"]["translation"]
         assert (frame["x"], frame["y"]) == (x, y)
-        assert items[f"{name}-bin"]["attributes"]["scale"][:2] == [1.5, 1.5]
+        assert items[f"{colour}-bin"]["attributes"]["scale"][:2] == [1.5, 1.5]
     assert script.BIN_HALF_MM == 150 * 1.5 / 2
     # the bins stay out of the survey's view (~690 x 520 mm at 450 mm, 60 deg vertical fov, 4:3)
     half_y = script.SURVEY_MM[2] * math.tan(math.radians(30))
@@ -71,53 +83,26 @@ def test_example_validates_and_matches_the_script():
     assert table["translation"]["z"] + table["geometry"]["z"] / 2 == script.TABLE_TOP_MM
     assert items[script.GRIPPER]["attributes"]["mount"] == script.ARM
     services = {s["name"]: s for s in cfg["services"]}
-    assert set(script.SERVICES.values()) <= set(services)
+    trackers = {c["name"]: c for c in cfg["components"] if c["model"] == "viam-labs:grasp-pose:top-down"}
+    assert set(trackers) == set(script.TRACKERS.values())
+    for mode, tracker in script.TRACKERS.items():
+        attrs = trackers[tracker]["attributes"]
+        assert attrs["vision"] == script.SERVICES[mode] and attrs["vision"] in services
+        assert attrs["camera"] == script.CAMERA and attrs["support_z_mm"] == script.TABLE_TOP_MM
+        suction = items[script.GRIPPER]["attributes"]["asset"] == "robotiq_epick"
+        assert attrs["gripper"]["type"] == ("suction" if suction else "parallel")
     assert services["shape-segments"]["attributes"]["detector_name"] == "shapes"
 
 
-# -- points and grasps ------------------------------------------------------------
-
-
-def test_parse_pcd_reads_the_module_s_own_point_clouds():
-    points = np.array([[0.1, -0.2, 0.5], [0.0, 0.0, 1.25]], dtype=np.float32)
-    for colors in (None, np.array([[255, 0, 0], [0, 0, 255]])):
-        assert script.parse_pcd(encode_pcd(points, colors)) == pytest.approx(points)
+# -- poses and scoring ------------------------------------------------------------
 
 
 @pytest.mark.parametrize("heading", [0, 30, 90, -45, 180])
 def test_down_points_the_tool_down_with_x_at_the_heading(heading):
-    rotation = rotation_of(script.down(500, 0, 450, heading).pose)
+    rotation = rotation_of(down(500, 0, 450, heading).pose)
     assert rotation[:, 2] == pytest.approx([0, 0, -1], abs=1e-9)  # the tool points down
     x_heading = math.degrees(math.atan2(rotation[1, 0], rotation[0, 0]))
     assert (x_heading - heading + 180) % 360 - 180 == pytest.approx(0, abs=1e-6)
-
-
-def test_block_points_drop_the_table_and_a_neighbours_corner():
-    cloud = block_cloud(0, 0, 30, 80, 40)
-    neighbour = block_cloud(75, 0, 0, 50, 50)
-    corner = neighbour[(neighbour[:, 2] > script.TABLE_TOP_MM) & (neighbour[:, 0] < 55)]  # its near edge, inside the box
-    kept = script.block_points(np.vstack([cloud, corner]))
-    assert (kept[:, 2] > script.BAND_MM[0]).all()
-    assert kept[:, 0].max() < 45  # none of the neighbour's points
-    assert len(kept) == (cloud[:, 2] > script.TABLE_TOP_MM).sum()
-
-
-@pytest.mark.parametrize("yaw", [0, 30, -60, 89])
-def test_grasp_finds_a_rectangle_s_centre_yaw_and_width(yaw):
-    item = script.grasp(script.block_points(block_cloud(510, -40, yaw, 80, 40)))
-    assert (item["x"], item["y"]) == pytest.approx((510, -40), abs=3)
-    assert script.yaw_error(item["yaw"], yaw, square=False) < 3
-    assert item["width"] == pytest.approx(40, abs=4) and item["length"] == pytest.approx(80, abs=4)
-    assert item["top"] == pytest.approx(script.TABLE_TOP_MM + 40)
-
-
-def test_grasp_on_a_noisy_square():
-    rng = np.random.default_rng(1)
-    cloud = block_cloud(380, 130, 20, 50, 50)
-    cloud += rng.normal(0, 1.0, cloud.shape)
-    item = script.grasp(script.block_points(cloud))
-    assert (item["x"], item["y"]) == pytest.approx((380, 130), abs=3)
-    assert item["width"] == pytest.approx(50, abs=5) and item["length"] == pytest.approx(50, abs=5)
 
 
 def test_score_matches_detections_to_blocks():
@@ -138,20 +123,37 @@ def test_score_matches_detections_to_blocks():
     assert (second["block"], second["yaw_deg"], second["colour_ok"]) == ("blue_1", 2.0, False)
 
 
+class Hand:
+    """A gripper stand-in that counts its opens and says whether it holds something."""
+
+    def __init__(self, holding=False, log=None) -> None:
+        self.holding, self.opens, self.log = holding, 0, log if log is not None else []
+
+    async def open(self):
+        self.opens += 1
+        self.log.append("open")
+
+    async def grab(self):
+        pass
+
+    async def is_holding_something(self):
+        return type("Held", (), {"is_holding_something": self.holding})()
+
+
 class ScriptedCell(script.Cell):
     """A cell whose survey and picks are scripted: each object a dict at a
     position, each pick's outcome taken from `outcomes` (True held, False
     slipped, an exception for a plan that fails)."""
 
     def __init__(self, objects, outcomes) -> None:
-        super().__init__(None, None, None, None, None, "pointcloud")
+        super().__init__(None, None, Hand(), None, None, "pointcloud")
         self.objects, self.outcomes, self.attempts = objects, outcomes, []
 
     async def truths(self):
         return {}
 
     async def survey(self):
-        return [dict(o, top=script.TABLE_TOP_MM + 40.0, yaw=0.0, length=50.0, width=50.0, label="", obstacle=None) for o in self.objects]
+        return [dict(o, yaw=0.0, label="", box=None, grasps=[grasp_at(o["x"])]) for o in self.objects]
 
     async def pick(self, item, others):
         name = item["name"]
@@ -191,20 +193,110 @@ def test_three_failures_in_a_row_stop_the_run():
     assert attempts == ["near", "far", "third"] and picked == 0
 
 
-def test_a_vision_service_error_names_the_service():
+def test_a_failed_pick_opens_a_gripper_that_holds_something():
+    cell = ScriptedCell([NEAR], {"near": [RuntimeError("no plan after the grab")] * 2})
+    cell.gripper = Hand(holding=True)
+    asyncio.run(cell.run())
+    assert cell.gripper.opens == 2  # once per failed pick
+
+
+def test_a_failed_pick_lets_go_before_it_lifts():
+    log = []
+
+    class Lift:
+        async def move(self, **kwargs):
+            log.append("lift")
+
+    cell = ScriptedCell([NEAR], {"near": [RuntimeError("no plan after the grab")] * 2})
+    cell.gripper, cell.motion = Hand(holding=True, log=log), Lift()
+    asyncio.run(cell.run())
+    assert log == ["open", "lift"] * 2
+
+
+def grasp_at(x):
+    return {"pose": {"x": x, "y": 0, "z": 45, "o_x": 0, "o_y": 0, "o_z": -1, "theta": 0}}
+
+
+class Recorder:
+    """A motion stand-in: records the x of each destination, failing the ones in `fail`."""
+
+    def __init__(self, fail) -> None:
+        self.fail, self.xs = fail, []
+
+    async def move(self, component_name, destination, world_state=None, **kwargs):
+        if destination.pose.x in self.fail:
+            raise RuntimeError(f"no plan to {destination.pose.x}")
+        self.xs.append(destination.pose.x)
+
+
+def test_pick_falls_back_to_the_next_grasp_when_a_plan_fails():
+    motion = Recorder(fail={111})
+    cell = script.Cell(None, None, Hand(holding=True), motion, None, "pointcloud")
+    assert asyncio.run(cell.pick({"label": "", "grasps": [grasp_at(111), grasp_at(222)]}, [])) is True
+    assert 222 in motion.xs and 111 not in motion.xs
+
+
+def test_pick_raises_when_every_grasp_fails():
+    cell = script.Cell(None, None, Hand(holding=True), Recorder(fail={111, 222}), None, "pointcloud")
+    with pytest.raises(RuntimeError, match="no plan to 222"):
+        asyncio.run(cell.pick({"label": "", "grasps": [grasp_at(111), grasp_at(222)]}, []))
+
+
+def test_every_survey_moves_the_arm_to_the_fixed_joints():
+    class Motion:
+        async def move(self, **kwargs):
+            raise AssertionError("a survey does not plan")
+
+    class Arm:
+        def __init__(self) -> None:
+            self.went = []
+
+        async def move_to_joint_positions(self, joints):
+            self.went.append(list(joints.values))
+
+    class Empty:
+        async def do_command(self, command, **kwargs):
+            return {"grasps": [], "objects": []}
+
+    arm = Arm()
+    cell = script.Cell(None, arm, None, Motion(), Empty(), "pointcloud")
+
+    async def look():
+        await cell.survey()
+        await cell.survey()
+
+    asyncio.run(look())
+    assert arm.went == [script.SURVEY_JOINTS_DEG] * 2
+
+
+def test_a_failed_pick_lifts_clear_before_the_next_survey():
+    class Lift:
+        def __init__(self) -> None:
+            self.moves = []
+
+        async def move(self, component_name, destination, world_state=None, **kwargs):
+            self.moves.append((component_name, destination.pose.x, destination.pose.z))
+
+    cell = ScriptedCell([NEAR], {"near": [RuntimeError("no plan after the grab")] * 2})
+    cell.motion = Lift()
+    asyncio.run(cell.run())
+    assert cell.motion.moves[0] == (script.GRIPPER, 300, script.CARRY_MM)
+
+
+def test_a_tracker_error_names_the_tracker():
     class Broken:
-        async def get_detections_3d(self, camera_name, **kwargs):
+        async def do_command(self, command, **kwargs):
             raise ConnectionError("down")
 
     class Still:
         async def move(self, **kwargs):
             pass
 
-        async def get_pose(self, **kwargs):
-            return PoseInFrame(reference_frame="world", pose=Pose(o_z=-1))
+        async def move_to_joint_positions(self, joints):
+            pass
 
-    cell = script.Cell(None, None, None, Still(), Broken(), "shapes")
-    with pytest.raises(RuntimeError, match="vision service shape-segments: down"):
+    cell = script.Cell(None, Still(), None, Still(), Broken(), "shapes")
+    with pytest.raises(RuntimeError, match="grasp tracker shape-grasps: down"):
         asyncio.run(cell.survey())
 
 
@@ -226,8 +318,9 @@ class FakeMotion:
     gripper or the wrist camera (each a fixed offset from the flange), then a
     straight joint path. No planning: the script's moves stay clear."""
 
-    def __init__(self, sim, arm) -> None:
+    def __init__(self, sim, arm, gripper_m) -> None:
         self.sim, self.arm = sim, arm
+        self.offsets = {**OFFSETS_M, script.GRIPPER: np.array([0, 0, gripper_m])}
         self.world_states = []  # each move's, for the obstacle checks
 
     def _flange(self):
@@ -264,7 +357,7 @@ class FakeMotion:
         pose = destination.pose
         position = np.array([pose.x, pose.y, pose.z]) / 1000
         joints = await asyncio.to_thread(
-            self.sim.run, lambda: self._solve(position, rotation_of(pose), OFFSETS_M[component_name])
+            self.sim.run, lambda: self._solve(position, rotation_of(pose), self.offsets[component_name])
         )
         handle = self.arm._h()
         start = await asyncio.to_thread(handle.get_joint_positions)
@@ -276,7 +369,7 @@ class FakeMotion:
     async def get_pose(self, component_name, destination_frame, **kwargs):
         assert destination_frame == "world"
         position, frame = await asyncio.to_thread(self.sim.run, self._flange)
-        point = (position + frame @ OFFSETS_M[component_name]) * 1000
+        point = (position + frame @ self.offsets[component_name]) * 1000
         quat = np.zeros(4)
         mujoco.mju_mat2Quat(quat, frame.ravel())
         ov = Quaternion(*quat).to_orientation_vector()
@@ -289,81 +382,83 @@ def camera_to_world(points_m: np.ndarray, camera: Pose) -> np.ndarray:
     return points_m * 1000 @ rotation_of(camera).T + [camera.x, camera.y, camera.z]
 
 
-class FakeRobot:
-    """The robot client's transform_pose, for the harness: a pose on the wrist
-    camera moved to the world by the camera's pose from the stand-in motion
-    service (the sim's camera)."""
+class FakeTracker:
+    """The viam-labs:grasp-pose tracker, for the harness: each block still on
+    the table as an object (its true centre and yaw, its size from the
+    config), nearest the arm first, with the grasps the module gives a lone
+    block (labelled square-<colour> whatever its shape: only the colour
+    matters to the script): parallel across each side that fits the 2F-85 (+10 mm under
+    85 mm), the tool point 15 mm under the top; suction at the top's centre,
+    1 mm over it."""
 
-    def __init__(self, motion) -> None:
-        self.motion = motion
+    def __init__(self, sim, cfg: dict, labelled: bool) -> None:
+        self.sim, self.labelled = sim, labelled
+        world = next(c for c in cfg["components"] if c["name"] == script.WORLD)
+        self.sizes = {p["name"]: (p["scale"][0] * 1000, p["scale"][1] * 1000) for p in world["attributes"]["props"]}
+        self.suction = next(c for c in cfg["components"] if c["name"] == script.GRIPPER)["attributes"]["asset"] == "robotiq_epick"
 
-    async def transform_pose(self, query: PoseInFrame, destination: str, **kwargs) -> PoseInFrame:
-        assert query.reference_frame == script.CAMERA and destination == "world"
-        camera = (await self.motion.get_pose(script.CAMERA, "world")).pose
-        local = query.pose
-        x, y, z = camera_to_world(np.array([[local.x, local.y, local.z]]) / 1000, camera)[0]
-        quat = np.zeros(4)
-        mujoco.mju_mat2Quat(quat, (rotation_of(camera) @ rotation_of(local)).ravel())
-        return PoseInFrame(reference_frame="world", pose=Quaternion(*quat).to_pose(x, y, z))
-
-
-class FakeVision:
-    """A 3D segmenter that knows where the blocks are, its detections shaped
-    as RDK's detection3d.FromSegmenter makes them: for each block on the
-    table, the wrist camera's points inside an axis-aligned box round it (as
-    a 2D detection box would take them, table and neighbours' corners
-    included), as a root transform on the camera at the points' bounding box
-    (labelled with the block's colour) and a "<root>/points" child with the
-    points in the root's frame."""
-
-    def __init__(self, sim, camera, motion, labelled: bool) -> None:
-        self.sim, self.camera, self.motion, self.labelled = sim, camera, motion, labelled
-
-    async def get_detections_3d(self, camera_name, **kwargs):
-        data, _ = await self.camera.get_point_cloud()
-        cam_points = script.parse_pcd(data)
-        pose = (await self.motion.get_pose(camera_name, "world")).pose
-        world = camera_to_world(cam_points, pose)
-        detections = []
+    async def do_command(self, command, **kwargs):
+        assert command == {"grasps": {}}
+        blocks = []
         for name in script.BLOCKS:
-            x, y, z = (v * 1000 for v in self.sim.get_prop_pose(name)["position"])
+            pose = self.sim.get_prop_pose(name)
+            x, y, z = (v * 1000 for v in pose["position"])
             if z > script.TABLE_TOP_MM + script.BLOCK_H_MM or script.in_bin(x, y):
                 continue
-            points = cam_points[(np.abs(world[:, 0] - x) < 55) & (np.abs(world[:, 1] - y) < 55)]
-            low, high = points.min(axis=0), points.max(axis=0)
-            centre = (low + high) / 2
-            root = f"fake/object-{len(detections)}"
+            w, _, _, k = pose["orientation_wxyz"]
+            sx, sy = self.sizes[name]
+            yaw = math.degrees(2 * math.atan2(k, w)) + (90 if sx < sy else 0)  # the long side's yaw
+            blocks.append((math.hypot(x, y), name, x, y, (yaw + 90) % 180 - 90, max(sx, sy), min(sx, sy)))
+        top = script.TABLE_TOP_MM + script.BLOCK_H_MM
+        objects, grasps = [], []
+        for i, (_, name, x, y, yaw, length, width) in enumerate(sorted(blocks)):
+            obj = f"object-{i}"
             label = f"square-{name.split('_')[0]}" if self.labelled else ""
-            dims = Vector3(x=(high - low)[0] * 1000, y=(high - low)[1] * 1000, z=(high - low)[2] * 1000)
-            detections.append(Detection3D(transforms=[
-                Transform(
-                    reference_frame=root,
-                    pose_in_observer_frame=PoseInFrame(reference_frame=camera_name, pose=Pose(
-                        x=centre[0] * 1000, y=centre[1] * 1000, z=centre[2] * 1000, o_z=1)),
-                    physical_object=Geometry(center=Pose(o_z=1), box=RectangularPrism(dims_mm=dims), label=label),
-                ),
-                Transform(
-                    reference_frame=f"{root}/points",
-                    pose_in_observer_frame=PoseInFrame(reference_frame=root, pose=Pose(o_z=1)),
-                    physical_object=Geometry(pointcloud=PointCloud(
-                        point_cloud=encode_pcd((points - centre).astype(np.float32)))),
-                ),
-            ]))
-        return detections
+            objects.append({
+                "name": obj, "label": label, "yaw_deg": yaw, "dims_mm": {"x": length, "y": width, "z": script.BLOCK_H_MM},
+                "center": {"x": x, "y": y, "z": script.TABLE_TOP_MM + script.BLOCK_H_MM / 2, "o_x": 0, "o_y": 0, "o_z": 1, "theta": yaw},
+            })
+            if self.suction:
+                spans = [(yaw, width, top + 1)]
+            else:
+                spans = [(h, w, top - 15) for h, w in ((yaw + 90, width), (yaw, length)) if w + 10 <= 85]
+            for j, (h, span, tool_z) in enumerate(spans):
+                p = down(x, y, tool_z, (h + 90) % 180 - 90).pose
+                grasps.append({
+                    "name": f"{obj}/grasp-{j}", "object": obj, "label": label, "width_mm": span, "score": 100.0,
+                    "pose": {"x": p.x, "y": p.y, "z": p.z, "o_x": p.o_x, "o_y": p.o_y, "o_z": p.o_z, "theta": p.theta},
+                })
+        return {"grasps": grasps, "objects": objects}
 
 
-def make_cell(running_sim, mode):
-    cfg = json.loads((EXAMPLES / "vision-pick.json").read_text())
+def make_cell(running_sim, mode, name="vision-pick.json"):
+    cfg = json.loads((EXAMPLES / name).read_text())
+    items = {item["name"]: item for item in cfg["components"]}
     made = {}
     for item in cfg["components"]:
         if item["model"] in CELL_MODELS:
             if item["model"] == "viam-labs:mujoco-sim:world":
                 item["attributes"]["real_time"] = False
             made[item["name"]] = CELL_MODELS[item["model"]].new(component(item), {})
-    motion = FakeMotion(running_sim, made[script.ARM])
-    vision = FakeVision(running_sim, made[script.CAMERA], motion, labelled=mode == "shapes")
-    cell = script.Cell(FakeRobot(motion), made[script.WORLD], made[script.GRIPPER], motion, vision, mode)
+    motion = FakeMotion(running_sim, made[script.ARM], items[script.GRIPPER]["frame"]["translation"]["z"] / 1000)
+    cell = script.Cell(made[script.WORLD], made[script.ARM], made[script.GRIPPER], motion, FakeTracker(running_sim, cfg, mode == "shapes"), mode)
     return cell, made
+
+
+def test_the_survey_joints_put_the_camera_over_the_blocks(running_sim):
+    cell, made = make_cell(running_sim, "shapes")
+
+    async def look():
+        await made[script.ARM].move_to_joint_positions(JointPositions(values=script.SURVEY_JOINTS_DEG))
+        return (await cell.motion.get_pose(script.CAMERA, "world")).pose
+
+    pose = asyncio.run(look())
+    # whole degrees put it ~6 mm off in y: nothing, in a view ~690 x 520 mm
+    assert (pose.x, pose.y, pose.z) == pytest.approx(script.SURVEY_MM, abs=10)
+    rotation = rotation_of(pose)
+    assert rotation[:, 2] == pytest.approx([0, 0, -1], abs=0.02)  # pointing down
+    heading = math.degrees(math.atan2(rotation[1, 0], rotation[0, 0]))
+    assert (heading - script.SURVEY_HEADING_DEG + 180) % 360 - 180 == pytest.approx(0, abs=2)
 
 
 def test_the_survey_sees_the_blocks_and_nothing_else(running_sim):
@@ -371,12 +466,10 @@ def test_the_survey_sees_the_blocks_and_nothing_else(running_sim):
 
     async def look():
         await made[script.WORLD].do_command({"command": "reset"})
-        await cell.motion.move(
-            component_name=script.CAMERA, destination=script.down(*script.SURVEY_MM, script.SURVEY_HEADING_DEG)
-        )
+        await made[script.ARM].move_to_joint_positions(JointPositions(values=script.SURVEY_JOINTS_DEG))
         pose = (await cell.motion.get_pose(script.CAMERA, "world")).pose
         data, _ = await made[script.CAMERA].get_point_cloud()
-        return pose, camera_to_world(script.parse_pcd(data), pose)
+        return pose, camera_to_world(parse_pcd(data), pose)
 
     pose, world = asyncio.run(look())
     # the stand-in's camera pose is the sim's camera
@@ -387,9 +480,12 @@ def test_the_survey_sees_the_blocks_and_nothing_else(running_sim):
     assert not any(script.in_bin(x, y) for x, y, _ in world[::50])
 
 
-@pytest.mark.parametrize("mode", ["shapes", "pointcloud"])
-def test_the_script_sorts_every_block(running_sim, mode):
-    cell, made = make_cell(running_sim, mode)
+@pytest.mark.parametrize(
+    "name, mode",
+    [("vision-pick.json", "shapes"), ("vision-pick.json", "pointcloud"), ("vision-pick-suction.json", "pointcloud")],
+)
+def test_the_script_sorts_every_block(running_sim, name, mode):
+    cell, made = make_cell(running_sim, mode, name)
 
     async def run():
         await made[script.WORLD].do_command({"command": "reset"})
@@ -397,20 +493,19 @@ def test_the_script_sorts_every_block(running_sim, mode):
         return result, await cell.landed()
 
     result, where = asyncio.run(run())
-    want = {name: name.split("_")[0] if mode == "shapes" else "clear" for name in script.BLOCKS}
+    want = {block: block.split("_")[0] if mode == "shapes" else "clear" for block in script.BLOCKS}
     assert where == want
     assert result["picked"] == len(script.BLOCKS)
     first = result["reports"][0]
     assert first["seen"] == len(script.BLOCKS) and first["spurious"] == 0
-    # the first pick's moves avoid the other seven detections, each pinned to the world
-    # at its block, with its own box, under a unique label
+    # the first pick's moves avoid the other seven objects' boxes, each under a unique label
     state = next(s for s in cell.motion.world_states if s is not None)
-    assert len(state.transforms) == len(script.BLOCKS) - 1
-    assert len({t.physical_object.label for t in state.transforms}) == len(state.transforms)
-    world = next(c for c in json.loads((EXAMPLES / "vision-pick.json").read_text())["components"] if c["name"] == script.WORLD)
+    geometries = state.obstacles[0].geometries
+    assert len(geometries) == len(script.BLOCKS) - 1
+    assert all(g.HasField("box") and g.label.startswith("object-") for g in geometries)
+    assert len({g.label for g in geometries}) == len(geometries)
+    world = next(c for c in json.loads((EXAMPLES / name).read_text())["components"] if c["name"] == script.WORLD)
     blocks = [[v * 1000 for v in prop["position"]] for prop in world["attributes"]["props"]]  # where they started
-    for t in state.transforms:
-        assert t.pose_in_observer_frame.reference_frame == "world" and t.physical_object.HasField("box")
-        at = t.pose_in_observer_frame.pose
-        assert min(math.dist((at.x, at.y), b[:2]) for b in blocks) < 15
+    for g in geometries:
+        assert min(math.dist((g.center.x, g.center.y), b[:2]) for b in blocks) < 15
     assert max(e["mm"] for e in first["errors"]) < 5 and max(e["yaw_deg"] for e in first["errors"]) < 5
