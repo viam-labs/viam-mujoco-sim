@@ -108,6 +108,12 @@
       "markdown_link": "README.md#model-viam-labsmujoco-simphoto_eye"
     },
     {
+      "model": "viam-labs:mujoco-sim:range_sensor",
+      "api": "rdk:component:sensor",
+      "short_description": "An ultrasonic or time-of-flight range sensor: the nearest hit in a cone",
+      "markdown_link": "README.md#model-viam-labsmujoco-simrange_sensor"
+    },
+    {
       "model": "viam-labs:mujoco-sim:scale",
       "api": "rdk:component:sensor",
       "short_description": "A platform scale",

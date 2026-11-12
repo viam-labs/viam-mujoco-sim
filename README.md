@@ -34,6 +34,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:conveyor`](#model-viam-labsmujoco-simconveyor) | `motor` | A belt conveyor that carries parcels by friction. |
 | [`viam-labs:mujoco-sim:spawner`](#model-viam-labsmujoco-simspawner) | `sensor` | Feeds box parcels of random classes onto a conveyor; `box-detect` compatible. |
 | [`viam-labs:mujoco-sim:photo_eye`](#model-viam-labsmujoco-simphoto_eye) | `sensor` | A through-beam photo-eye that counts what passes. |
+| [`viam-labs:mujoco-sim:range_sensor`](#model-viam-labsmujoco-simrange_sensor) | `sensor` | An ultrasonic or time-of-flight range sensor: the nearest hit in a cone. |
 | [`viam-labs:mujoco-sim:scale`](#model-viam-labsmujoco-simscale) | `sensor` | A platform scale. |
 
 ## Getting started
@@ -59,7 +60,9 @@ under the world model). [`examples/rover-lidar.json`](examples/rover-lidar.json)
 rover cell: a rover with a LIDAR inside a walled pen, and
 [`examples/rover-nav.json`](examples/rover-nav.json) adds odometry and
 nav-stack for SLAM and navigation in it (see
-[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)).
+[Mobile base, SLAM and navigation](#mobile-base-slam-and-navigation)), and
+[`examples/rover-avoid.json`](examples/rover-avoid.json) a depth camera and
+bumpers on top (see [Mobile obstacle avoidance](#mobile-obstacle-avoidance)).
 [`examples/depalletize.json`](examples/depalletize.json) is a suction
 de-palletizing cell (see [De-palletizing](#de-palletizing)), and
 [`examples/parcel-sort.json`](examples/parcel-sort.json) a parcel-sorting cell
@@ -1633,6 +1636,59 @@ An eye framed on the world would see the rail.
 | `GetReadings` | `blocked` (something within range), `distance_m` (to the hit, or `range_m`), `count` (times the beam became blocked since configure or reset). |
 | `DoCommand` | `{"command": "reset"}` zeroes `count`; so does a world `reset`. |
 
+## Model viam-labs:mujoco-sim:range_sensor
+
+An ultrasonic or time-of-flight range sensor, served as a sensor: a cone of
+rays cast at the moment you read it, reporting the nearest hit as `distance`
+in meters, as RDK's ultrasonic sensor does. A cone catches a thin pole or a
+chair leg that a single ray would slip past.
+
+### Configuration
+
+```json
+{
+  "name": "front-range",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:range_sensor",
+  "frame": {
+    "parent": "rover",
+    "translation": { "x": 0, "y": 155, "z": 80 },
+    "orientation": {
+      "type": "quaternion",
+      "value": { "W": 0.70323, "X": 0.07391, "Y": -0.07391, "Z": 0.70323 }
+    }
+  },
+  "attributes": { "world": "sim-world", "range_max_m": 1.5 }
+}
+```
+
+The cone's axis is the frame's +X. A base drives along its +Y, so the example
+turns the sensor 90 degrees about Z to face forward, then pitches it up 12
+degrees (half the cone plus 2) so its lowest ray stays above level and off the
+floor. Mounted level at 80 mm, the default cone's lowest ray would meet the
+floor about 0.45 m out, inside `range_max_m`; or use `cone_deg: 0`, a single
+ray. The frame's `parent` is `world` or another mujoco-sim component, and the
+sensor never sees its parent or anything attached below it, so it can sit
+inside a rover's shell.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `cone_deg` | float | No | `20` | Full cone angle, at least 0 and under 180. `0` is a single ray along +X. |
+| `rings` | int | No | `2` | Rings of rays around the axis ray. Ring `i` (1 to `rings`) sits at `i / rings * cone_deg / 2` off the axis. |
+| `rays_per_ring` | int | No | `8` | Rays per ring, evenly spaced around the axis, the first toward the frame's +Y. |
+| `range_min_m` | float | No | `0.02` | Nearer hits read as `range_min_m`: too close to measure. |
+| `range_max_m` | float | No | `4` | Farther hits are ignored; the reading when nothing is hit. |
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | `distance`: meters to the nearest hit across the cone; `range_min_m` if something is nearer than that; `range_max_m` if nothing is hit. |
+| `DoCommand` | None; returns `{}`. |
+
 ## Model viam-labs:mujoco-sim:scale
 
 A platform scale, served as a sensor. It weighs what presses on the platform:
@@ -2073,10 +2129,8 @@ Add the module from the registry:
   `.venv` (or the module from the config and add it back).
   [viam-labs/nav-stack#100](https://github.com/viam-labs/nav-stack/pull/100)
   makes the first run install the package and recover on its own.
-- **macOS:** there is no darwin build in the registry. Clone nav-stack, create
-  its venv (`uv venv .venv --python 3.11 && VIRTUAL_ENV=.venv uv pip install -r
-  requirements.txt`), and add it as a local module whose `executable_path` is
-  the checkout's `run.sh`.
+- **macOS:** the registry build runs on darwin/arm64 too (`latest`, 1.1.47 on
+  2026-11-12, checked on a MacBook); no local checkout needed.
 
 `latest` resolves to nav-stack's newest stable release. Its typed Navigation
 methods (such as `GetNavigationStatus`) may be newer than that release; the
@@ -2162,6 +2216,88 @@ status = await nav.do_command({"command": "get_status"})  # "state": "succeeded"
 - Heading drift is what SLAM corrects. The example's 0.05 °/s maps cleanly;
   0.5 °/s smears the walls into rotated copies. See nav-stack's README for
   tuning.
+
+For a depth camera and bumpers on top of the LIDAR, see
+[Mobile obstacle avoidance](#mobile-obstacle-avoidance).
+
+## Mobile obstacle avoidance
+
+[`examples/rover-avoid.json`](examples/rover-avoid.json) is the rover-nav pen
+with three layers of sensing, each catching what the one before misses:
+
+- **LIDAR** (`lidar`, scan plane 160 mm up): the walls and the two boxes. It
+  maps the pen and localizes the rover.
+- **Depth camera** (`depth-cam`, 110 mm up at the rover's nose, pitched 15
+  degrees down): an 80 mm tall `crate` prop between the spawn and the goal,
+  under the LIDAR's plane. nav-stack takes it as a second scan source with
+  `obstacles_only`, so it marks obstacles for the planner but stays out of
+  SLAM.
+- **Bumpers** (`bumper-left` and `bumper-right`,
+  [range_sensor](#model-viam-labsmujoco-simrange_sensor)s 80 mm up, angled 5
+  degrees out and 12 up): a `surprise` box dropped closer than the planner
+  reacts. The script, not nav-stack, acts on them.
+
+[`examples/rover-avoid-lidar.json`](examples/rover-avoid-lidar.json) is the
+same cell without the depth camera, to show what the LIDAR alone misses. Both
+add a world-framed `scene-cam` to watch the rover in the app, and `nav-view`
+(a nav-stack nav-camera; it doesn't draw the depth camera's obstacles).
+[`examples/rover_avoid.py`](examples/rover_avoid.py) runs the trips:
+
+```sh
+uv run python examples/rover_avoid.py <machine address> <api key id> <api key> [--run map|blind|depth|surprise ...]
+```
+
+- `map` resets the world, deletes the old map and drives a lap of the pen
+  while nav-stack maps it, then saves the map.
+- `depth` sends the rover from the spawn to a goal 1.2 m ahead, past the crate.
+- `surprise` is `depth` with the box dropped 0.25 m ahead of the rover once it
+  is 0.5 m from the spawn; after the bumper stop the box is taken away again.
+- `blind` is the `depth` trip on the LIDAR-only config; the script leaves the bumpers off for it, so it shows what the lidar alone misses.
+
+Each config maps first: with `rover-avoid.json` loaded the script runs `map`,
+`depth`, `surprise`; with `rover-avoid-lidar.json`, `map`, `blind`. After a
+config switch SLAM restores a stale pose, so the second config maps again
+rather than trust it. `--run` picks runs; one that needs the other config is
+refused. SLAM's `mode` is `mapping` in both configs (in `localizing` mode
+nav-stack's SLAM won't start without a saved map); every trip calls
+`start_localizing` and seeds the pose at the spawn itself.
+
+The bumpers arm only while more than 0.5 m of route remains: the goal is
+0.28 m from the north wall, and the pitched-up bumpers see the wall. Armed,
+the script polls them at 20 Hz; a reading under 0.3 m suspends nav, then
+stops the base. Once both read 0.4 m or more for 1 s it resumes. A hit nearer
+than `range_min_m` reads `range_min_m`, so a box touching the rover still
+stops it.
+
+nav-stack reports `succeeded` even after pushing the crate out of the way, or
+at a goal it snapped up to 0.5 m from where it was asked, so the script
+checks the props (`get_prop_pose`; one that moved more than 20 mm was hit)
+and the rover's odometry distance to the goal (reached within 300 mm).
+
+On a MacBook (viam-server v1.16.0, nav-stack 1.1.47):
+
+| Run | Runs | nav-stack | Goal | Props moved | Bumper stops |
+|---|---|---|---|---|---|
+| `map` | | 84 s lap | | | |
+| `depth` | 3 | succeeded in 16-25 s | reached, 209-270 mm off | nothing | none |
+| `surprise` | 3 | succeeded in 21-30 s | reached, 229-262 mm off | nothing; the dropped box 0 mm | one, at 0.20-0.21 m |
+| `blind` | 2 | succeeded in 6 s | "reached", 228-238 mm off, through the crate | crate pushed 644-654 mm | off |
+
+The goal offsets are within nav-stack's 0.25 m goal tolerance. In a dry run
+nav-stack with the depth camera alone also stopped about 0.6 s after a box
+dropped 0.25 m ahead; the bumpers act first, on their next poll.
+
+Tuning notes:
+
+- A `camera_optical` cloud needs an explicit `mount` with `pitch` on its
+  `lidars` entry: nav-stack ignores the frame system's orientation for it.
+- `clearance_m` is 0.1. At the default 0.2 the crate's no-go band (the rover's
+  half-width, 0.13 m, plus the clearance) swallows the start or the goal.
+- `start_mapping` continues an existing map; `delete_map` first to map again.
+- After a world `reset`, `start_localizing` restores the last trip's end pose;
+  `set_initial_pose` with `"refine": true` puts it back at the spawn.
+- The sim camera serves depth only with `"depth": true`, at half its
+  resolution by default.
 
 ## Mobile manipulation
 

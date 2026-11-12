@@ -1,0 +1,384 @@
+{
+  "modules": [
+    {
+      "type": "local",
+      "name": "mujoco-sim",
+      "executable_path": "/ABSOLUTE/PATH/TO/viam-mujoco-sim/run.sh"
+    },
+    {
+      "type": "registry",
+      "name": "viam-labs_nav-stack",
+      "module_id": "viam-labs:nav-stack",
+      "version": "latest"
+    }
+  ],
+  "components": [
+    {
+      "name": "sim-world",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:world",
+      "attributes": {
+        "props": [
+          {
+            "name": "crate",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.3,
+              0.2,
+              0.08
+            ],
+            "position": [
+              0,
+              0.55,
+              0.04
+            ],
+            "mass": 0.5,
+            "color": [
+              0.6,
+              0.45,
+              0.3
+            ]
+          },
+          {
+            "name": "surprise",
+            "type": "cube",
+            "size": 1,
+            "scale": [
+              0.15,
+              0.15,
+              0.15
+            ],
+            "position": [
+              2.0,
+              0,
+              0.075
+            ],
+            "mass": 0.5,
+            "color": [
+              0.9,
+              0.8,
+              0.1
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "wall-n",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": 1500.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 3000,
+          "y": 40.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.8,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-s",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 0,
+          "y": -1500.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 3000,
+          "y": 40.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.7,
+          0.8
+        ]
+      }
+    },
+    {
+      "name": "wall-e",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 1500.0,
+          "y": 0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40.0,
+          "y": 3040.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.8,
+          0.7,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "wall-w",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -1500.0,
+          "y": 0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 40.0,
+          "y": 3040.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.7,
+          0.8,
+          0.7
+        ]
+      }
+    },
+    {
+      "name": "box-a",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 600.0,
+          "y": 700.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 300.0,
+          "y": 300.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.9,
+          0.3,
+          0.2
+        ]
+      }
+    },
+    {
+      "name": "box-b",
+      "api": "rdk:component:generic",
+      "model": "viam-labs:mujoco-sim:obstacle",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": -800.0,
+          "y": -400.0,
+          "z": 200.0
+        },
+        "geometry": {
+          "type": "box",
+          "x": 200.0,
+          "y": 500.0,
+          "z": 400.0
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "color": [
+          0.2,
+          0.4,
+          0.9
+        ]
+      }
+    },
+    {
+      "name": "rover",
+      "api": "rdk:component:base",
+      "model": "viam-labs:mujoco-sim:base",
+      "frame": {
+        "parent": "world"
+      },
+      "attributes": {
+        "world": "sim-world",
+        "asset": "viam_rover"
+      }
+    },
+    {
+      "name": "lidar",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:lidar",
+      "frame": {
+        "parent": "rover",
+        "translation": {
+          "x": 0,
+          "y": 0,
+          "z": 160
+        }
+      },
+      "attributes": {
+        "world": "sim-world"
+      }
+    },
+    {
+      "name": "odometry",
+      "api": "rdk:component:movement_sensor",
+      "model": "viam-labs:mujoco-sim:movement_sensor",
+      "attributes": {
+        "world": "sim-world",
+        "base": "rover",
+        "linear_scale_error": 0.02,
+        "heading_drift_dps": 0.05
+      }
+    },
+    {
+      "name": "bumper-left",
+      "api": "rdk:component:sensor",
+      "model": "viam-labs:mujoco-sim:range_sensor",
+      "frame": {
+        "parent": "rover",
+        "translation": {
+          "x": -60,
+          "y": 155,
+          "z": 80
+        },
+        "orientation": {
+          "type": "quaternion",
+          "value": {
+            "W": 0.67189,
+            "X": 0.07707,
+            "Y": -0.07062,
+            "Z": 0.73324
+          }
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "cone_deg": 20,
+        "range_max_m": 1.5
+      }
+    },
+    {
+      "name": "bumper-right",
+      "api": "rdk:component:sensor",
+      "model": "viam-labs:mujoco-sim:range_sensor",
+      "frame": {
+        "parent": "rover",
+        "translation": {
+          "x": 60,
+          "y": 155,
+          "z": 80
+        },
+        "orientation": {
+          "type": "quaternion",
+          "value": {
+            "W": 0.73324,
+            "X": 0.07062,
+            "Y": -0.07707,
+            "Z": 0.67189
+          }
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "cone_deg": 20,
+        "range_max_m": 1.5
+      }
+    },
+    {
+      "name": "scene-cam",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:mujoco-sim:camera",
+      "frame": {
+        "parent": "world",
+        "translation": {
+          "x": 2600,
+          "y": -2600,
+          "z": 2600
+        }
+      },
+      "attributes": {
+        "world": "sim-world",
+        "target": [
+          0,
+          0.3,
+          0
+        ],
+        "width": 1280,
+        "height": 720
+      }
+    },
+    {
+      "name": "nav-view",
+      "api": "rdk:component:camera",
+      "model": "viam-labs:nav-stack:nav-camera",
+      "attributes": {
+        "navigation": "nav"
+      }
+    }
+  ],
+  "services": [
+    {
+      "name": "slam",
+      "api": "rdk:service:slam",
+      "model": "viam-labs:nav-stack:slam",
+      "attributes": {
+        "base": "rover",
+        "movement_sensor": "odometry",
+        "movement_sensor_yaw_deg": 0,
+        "mode": "mapping",
+        "maps_dir": "/tmp/nav-maps",
+        "active_map": "rover-avoid",
+        "lidars": [
+          {
+            "name": "lidar"
+          }
+        ]
+      }
+    },
+    {
+      "name": "nav",
+      "api": "rdk:service:navigation",
+      "model": "viam-labs:nav-stack:navigation",
+      "attributes": {
+        "slam_service": "slam",
+        "base": "rover",
+        "clearance_m": 0.1
+      }
+    }
+  ]
+}

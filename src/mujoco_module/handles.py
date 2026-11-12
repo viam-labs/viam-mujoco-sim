@@ -1979,6 +1979,90 @@ class PhotoEyeHandle:
         self._sim.run(lambda: setattr(self, "count", 0))
 
 
+DEFAULT_RANGE_SENSOR_CONE_DEG = 20.0
+DEFAULT_RANGE_SENSOR_RINGS = 2
+DEFAULT_RANGE_SENSOR_RAYS_PER_RING = 8
+DEFAULT_RANGE_SENSOR_MIN_M = 0.02
+DEFAULT_RANGE_SENSOR_MAX_M = 4.0
+
+
+def cone_rays(cone_deg: float, rings: int, rays_per_ring: int) -> np.ndarray:
+    """Unit ray directions in the sensor frame: one along +X, then ring i
+    (1..rings) at half-angle i / rings * cone_deg / 2, rays_per_ring rays
+    evenly around +X, the first toward +Y. cone_deg 0 is the axis ray alone."""
+    rays = [(1.0, 0.0, 0.0)]
+    if cone_deg > 0:
+        for ring in range(1, rings + 1):
+            half = math.radians(ring / rings * cone_deg / 2)
+            for k in range(rays_per_ring):
+                phi = 2 * math.pi * k / rays_per_ring
+                rays.append((math.cos(half), math.sin(half) * math.cos(phi), math.sin(half) * math.sin(phi)))
+    return np.array(rays)
+
+
+class RangeSensorHandle:
+    """An ultrasonic or time-of-flight range sensor: a cone of rays about its
+    frame's +X (cone_rays), mounted like the lidar (on the world or a
+    parent's viam_frame, never seeing the parent's subtree). A read casts
+    every ray at that sim instant and reports range_min_m if any hit is
+    nearer than that (too close to measure: it hides whatever is behind it),
+    else the nearest hit within range_max_m, else range_max_m."""
+
+    def __init__(self, sim: SimManager, name: str, attrs: dict[str, Any]) -> None:
+        self._sim = sim
+        self.name = name
+        self.parent: str | None = attrs.get("parent")
+        self.range_min_m = float(attrs.get("range_min_m", DEFAULT_RANGE_SENSOR_MIN_M))
+        self.range_max_m = float(attrs.get("range_max_m", DEFAULT_RANGE_SENSOR_MAX_M))
+        self._rays = cone_rays(
+            float(attrs.get("cone_deg", DEFAULT_RANGE_SENSOR_CONE_DEG)),
+            int(attrs.get("rings", DEFAULT_RANGE_SENSOR_RINGS)),
+            int(attrs.get("rays_per_ring", DEFAULT_RANGE_SENSOR_RAYS_PER_RING)),
+        )
+        position = [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))]
+        quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
+
+        def build(spec: mujoco.MjSpec) -> bool | None:
+            mount = _mount(spec, self.parent, position, quat)
+            if mount is None:
+                return False  # parent not configured (yet); readings() says so
+            body, pos, rot = mount
+            body.add_site(name=name, pos=list(pos), quat=list(rot))
+
+        sim.set_contribution(name, Contribution(build=build))
+
+    def close(self) -> None:
+        self._sim.remove_contribution(self.name)
+
+    def readings(self) -> dict[str, float]:
+        def cast() -> np.ndarray:
+            self._sim.require_world()
+            model, data = self._sim.model, self._sim.data
+            assert model is not None and data is not None
+            site = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, self.name)
+            if site < 0:
+                why = f"configure its frame parent {self.parent!r}" if self.parent else "the world has not rebuilt yet"
+                raise RuntimeError(f"range sensor {self.name!r} is not in the scene; {why}")
+            count = len(self._rays)
+            directions = (data.site_xmat[site].reshape(3, 3) @ self._rays.T).T
+            geomid = np.zeros(count, np.int32)
+            dist = np.zeros(count)
+            # the parent's subtree is hidden; body 0 is the world, whose subtree is everything
+            own = subtree_geoms(model, int(model.site_bodyid[site])) if self.parent else np.zeros(0, int)
+            with hidden_geoms(model, own):
+                mujoco.mj_multiRay(
+                    model, data, data.site_xpos[site].copy(), directions.ravel().copy(),
+                    RAY_GROUPS, 1, -1, geomid, dist, None, count, self.range_max_m,
+                )
+            return dist
+
+        dist = self._sim.run(cast)
+        if np.any((dist >= 0) & (dist < self.range_min_m)):  # misses are -1
+            return {"distance": self.range_min_m}
+        hits = dist[(dist >= self.range_min_m) & (dist <= self.range_max_m)]
+        return {"distance": float(hits.min()) if len(hits) else self.range_max_m}
+
+
 SCALE_TAU_S = 0.1  # low-pass filter time constant
 SCALE_STABLE_S = 0.3
 SCALE_STABLE_KG = 0.005
