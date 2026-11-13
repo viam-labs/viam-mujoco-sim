@@ -1,4 +1,4 @@
-"""An IMU and a wrist force-torque sensor, read from MuJoCo on the sim thread.
+"""An IMU, a wrist force-torque sensor and an MJCF file's own sensors, read from MuJoCo on the sim thread.
 
 Both are exact unless noise is configured: a reading is truth plus a constant
 bias plus Gaussian noise, from a generator seeded per sensor, so runs repeat.
@@ -117,6 +117,73 @@ class ImuHandle:
                 angular_velocity_dps=self._noise.vector(gyro, self.gyro_noise_dps, self.gyro_bias_dps),
                 linear_acceleration_mps2=self._noise.vector(accel, self.accel_noise_mps2, self.accel_bias_mps2),
             )
+
+        return self._sim.run(snapshot)
+
+
+class MjcfSensorHandle:
+    """The named <sensor>s of the MJCF file a component (scene, robot, arm,
+    gripper, base) loaded: in the model as "<source>/<name in the file>".
+    Builds nothing; finds them once per model and reads them in one
+    snapshot. Unnamed sensors stay unnamed when attached, so they're skipped."""
+
+    def __init__(self, sim: SimManager, name: str, source: str, sensors: Sequence[str] | None = None) -> None:
+        self._sim = sim
+        self.name = name
+        self.source = source
+        self.sensors = tuple(sensors) if sensors else None
+        self._generation = -1
+        self._slots: list[tuple[str, int, int]] = []  # name in the file, sensordata address, dim
+        self._error: str | None = None
+
+    def _resolve(self) -> None:
+        if self._generation == self._sim.generation:
+            return
+        self._generation = self._sim.generation
+        model = self._sim.model
+        assert model is not None
+        prefix = f"{self.source}/"
+        found: dict[str, tuple[int, int]] = {}
+        for i in range(model.nsensor):
+            full = model.sensor(i).name
+            if full.startswith(prefix):
+                found[full[len(prefix):]] = (int(model.sensor_adr[i]), int(model.sensor_dim[i]))
+        self._slots, self._error = [], None
+        if not self._sim.built(self.source):
+            self._error = (
+                f"sensor {self.name}: {self.source} is not in the scene; "
+                f"configure a component named {self.source} that loads an MJCF file"
+            )
+        elif not found:
+            self._error = f"sensor {self.name}: {self.source}'s file declares no named sensors"
+            robot = getattr(self._sim.arms.get(self.source), "robot", None)
+            if robot:
+                self._error += f"; its file's sensors are under the robot {robot}: set source to {robot}"
+        else:
+            missing = [s for s in self.sensors or () if s not in found]
+            if missing:
+                self._error = (
+                    f"sensor {self.name}: {self.source}'s file has no sensor {missing[0]!r}; "
+                    f"it has: {', '.join(found)}"
+                )
+            else:
+                self._slots = [(s, *found[s]) for s in self.sensors or found]
+
+    def read(self) -> dict[str, float | list[float]]:
+        """{name in the file: value}: a float for one value, else a list; MuJoCo's units."""
+
+        def snapshot() -> dict[str, float | list[float]]:
+            self._sim.require_world()
+            self._resolve()
+            if self._error:
+                raise RuntimeError(self._error)
+            data = self._sim.data
+            assert data is not None
+            values = data.sensordata
+            return {
+                s: float(values[adr]) if dim == 1 else [float(v) for v in values[adr : adr + dim]]
+                for s, adr, dim in self._slots
+            }
 
         return self._sim.run(snapshot)
 

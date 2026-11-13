@@ -1,1 +1,1 @@
-from . import arm, base, camera, conveyor, force_torque, gantry, gripper, imu, lidar, movement_sensor, obstacle, photo_eye, rail, range_sensor, robot, scale, scene, spawner, world, world_state  # noqa: F401  (registers the models)
+from . import arm, base, camera, conveyor, force_torque, gantry, gripper, imu, lidar, movement_sensor, obstacle, photo_eye, rail, range_sensor, robot, scale, scene, sensor, spawner, world, world_state  # noqa: F401  (registers the models)

@@ -1,8 +1,8 @@
 <!-- A small workbench for viam-labs:mujoco-sim:scene, in meters, world origin
      at the Lite6's base: a checker floor (it replaces the world's), a low
      platform with two free blocks the Lite6 can pick, a wall behind the arm with
-     a wedge brace (a mesh, planned as its hull) and a hinged flap, and its own
-     lights. -->
+     a wedge brace (a mesh, planned as its hull) and a hinged flap, its own
+     lights, and two sensors (the platform's load, the flap's angle). -->
 <mujoco model="workbench">
   <asset>
     <texture name="checker" type="2d" builtin="checker" rgb1="0.52 0.52 0.5" rgb2="0.47 0.47 0.45"
@@ -21,6 +21,8 @@
     <geom name="floor" type="plane" size="0 0 0.05" material="checker"/>
     <body name="platform" pos="0.25 0.15 0.025">
       <geom name="platform" type="box" size="0.1 0.08 0.025" material="wood"/>
+      <!-- what rests on the platform: a touch sensor's volume over its top face -->
+      <site name="platform_top" type="box" size="0.1 0.08 0.005" pos="0 0 0.025" rgba="0 0 0 0"/>
     </body>
     <body name="wall" pos="-0.3 0 0.15">
       <geom name="wall" type="box" size="0.015 0.25 0.15" material="wall"/>
@@ -39,4 +41,9 @@
       <geom type="box" size="0.01565 0.01565 0.01565" mass="0.03" friction="2 0.005 0.0001" rgba="0.2 0.45 0.85 1"/>
     </body>
   </worldbody>
+  <!-- served by a viam-labs:mujoco-sim:sensor with source "workbench" -->
+  <sensor>
+    <touch name="platform" site="platform_top"/>
+    <jointpos name="flap" joint="flap_hinge"/>
+  </sensor>
 </mujoco>

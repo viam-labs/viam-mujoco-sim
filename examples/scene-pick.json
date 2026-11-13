@@ -106,6 +106,15 @@
         "width": 1280,
         "height": 720
       }
+    },
+    {
+      "name": "bench-sensors",
+      "api": "rdk:component:sensor",
+      "model": "viam-labs:mujoco-sim:sensor",
+      "attributes": {
+        "world": "sim-world",
+        "source": "workbench"
+      }
     }
   ],
   "services": [

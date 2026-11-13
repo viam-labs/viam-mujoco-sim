@@ -124,6 +124,12 @@
       "api": "rdk:component:sensor",
       "short_description": "A platform scale",
       "markdown_link": "README.md#model-viam-labsmujoco-simscale"
+    },
+    {
+      "model": "viam-labs:mujoco-sim:sensor",
+      "api": "rdk:component:sensor",
+      "short_description": "The sensors an MJCF file declares (touch, joint, frame, force...) as readings",
+      "markdown_link": "README.md#model-viam-labsmujoco-simsensor"
     }
   ],
   "entrypoint": "run.sh",

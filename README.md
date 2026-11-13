@@ -37,6 +37,7 @@ as well as on Linux. Cameras render offscreen with OpenGL: CGL on macOS, EGL
 | [`viam-labs:mujoco-sim:photo_eye`](#model-viam-labsmujoco-simphoto_eye) | `sensor` | A through-beam photo-eye that counts what passes. |
 | [`viam-labs:mujoco-sim:range_sensor`](#model-viam-labsmujoco-simrange_sensor) | `sensor` | An ultrasonic or time-of-flight range sensor: the nearest hit in a cone. |
 | [`viam-labs:mujoco-sim:scale`](#model-viam-labsmujoco-simscale) | `sensor` | A platform scale. |
+| [`viam-labs:mujoco-sim:sensor`](#model-viam-labsmujoco-simsensor) | `sensor` | The sensors an MJCF file declares (touch, joint, frame, force...) as readings. |
 
 ## Getting started
 
@@ -1460,7 +1461,7 @@ A scene file can't have actuators, tendons, equality constraints, flexes,
 skins, plugins or mocap bodies: robots come from the arm, gripper and base
 components.
 
-[`examples/scene-pick.json`](examples/scene-pick.json) is a Lite6 picking the workbench blocks into the bin.
+[`examples/scene-pick.json`](examples/scene-pick.json) is a Lite6 picking the workbench blocks into the bin. Its `bench-sensors` component serves the workbench's own sensors: the platform's load drops by ~0.29 N as each block is lifted ([sensor](#model-viam-labsmujoco-simsensor)).
 
 ## Model viam-labs:mujoco-sim:world_state
 
@@ -1803,6 +1804,78 @@ Viam app's 3D scene shows the platform through the
 | `GetReadings` | `weight_kg` (minus the tare) and `stable` (the weight moved less than 5 g over the last 0.3 s). The weight is filtered with a 0.1 s time constant, so a parcel reads stable about a second after it lands. |
 | `DoCommand` | `{"command": "tare"}` sets the tare to the current weight and returns `{"tare_kg"}`. A world `reset` restarts the filter and keeps the tare. |
 | `GetGeometries` | The platform box. viam-server never calls it on a sensor; the world state store publishes it. |
+
+## Model viam-labs:mujoco-sim:sensor
+
+The sensors an MJCF file declares, served as readings. It reads the named
+`<sensor>` elements of a file that another component loaded (a `scene`, a
+`robot`, an `arm`, or a `gripper` or `base` with its own `mjcf`) and builds
+nothing itself. It serves the sensors MuJoCo computes from the model: touch,
+jointpos and jointvel, framepos and framequat, force and torque,
+accelerometer, rangefinder, and the like.
+
+### Configuration
+
+```json
+{
+  "name": "bench-sensors",
+  "api": "rdk:component:sensor",
+  "model": "viam-labs:mujoco-sim:sensor",
+  "attributes": { "world": "sim-world", "source": "workbench" }
+}
+```
+
+No frame is needed: the sensors sit where the MJCF puts them. The bundled
+[workbench](assets/scenes/workbench.xml) declares a `platform` touch sensor
+and a `flap` joint-angle sensor.
+
+### Attributes
+
+| Name | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `world` | string | Yes | | The world component's name. |
+| `source` | string | Yes | | The component whose MJCF file declares the sensors. |
+| `sensors` | [string] | No | every named sensor | Sensor names as written in the file. |
+
+### Readings
+
+`GetReadings` returns one key per sensor, named as in the file. A sensor with
+one value reads as a number, one with more as a list: `framepos` is `[x, y, z]`,
+`framequat` is `[w, x, y, z]`, `force` is `[fx, fy, fz]`. Units are MuJoCo's: SI,
+angles in radians, in the frame MuJoCo defines for that sensor type. MuJoCo's
+`noise` attribute is not applied (the [imu](#model-viam-labsmujoco-simimu) and
+[force_torque](#model-viam-labsmujoco-simforce_torque) models model noise).
+Unnamed sensors are skipped. All values come from the same step.
+
+```json
+{"platform": 0.589, "flap": 0.0}
+```
+
+### Names
+
+A component's file names are prefixed with the component's name in the model,
+so the workbench's `platform` is `workbench/platform` there; `source` and
+`sensors` use the names as written in the file. A limb arm of a
+[robot](#model-viam-labsmujoco-simrobot) shares the robot's file, so reach its
+sensors with `source` set to the robot. `source` isn't checked by kind: naming
+a component that adds its own prefixed sensors, such as an imu (its `gyro` and
+`accel`), serves those too.
+
+### Errors
+
+Config validation can't see the file, so names are checked on the first
+reading.
+
+- `source` not in the scene: `sensor <name>: <source> is not in the scene; configure a component named <source> that loads an MJCF file`.
+- No named sensors: `sensor <name>: <source>'s file declares no named sensors`. For an arm bound into a robot's file it adds `; its file's sensors are under the robot <robot>: set source to <robot>`.
+- An unknown name: `sensor <name>: <source>'s file has no sensor 'x'; it has: a, b`.
+
+### Supported API
+
+| Method | Notes |
+|---|---|
+| `GetReadings` | The sensors' values, as above. |
+| `GetGeometries` | None. |
 
 ## Bring your own robot
 

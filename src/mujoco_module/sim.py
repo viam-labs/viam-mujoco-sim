@@ -578,6 +578,10 @@ class SimManager:
                 '"world" attribute'
             )
 
+    def built(self, name: str) -> bool:
+        """Whether the contribution `name` is in the current model."""
+        return name in self._built
+
     def configure_world(
         self,
         cfg: WorldConfig,
