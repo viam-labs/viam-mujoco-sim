@@ -1,3 +1,5 @@
+import mujoco
+import numpy as np
 import pytest
 from viam.proto.app.robot import ComponentConfig
 from viam.utils import dict_to_struct
@@ -46,6 +48,41 @@ def test_grasp_holds_and_lifts_block(sim, cell):
     sim.advance(3.0)
     assert gripper.firm_grasp()
     assert sim.get_prop_pose("pick_block")["position"][2] - start_z > 0.05
+
+
+def test_held_block_does_not_creep_over_many_short_moves(sim, cell):
+    # each start and stop used to slide the block down the Lite6's jaws until it fell out
+    arm, gripper = cell
+    gripper.open_jaws()
+    sim.advance(0.5)
+    tip = sim.data.site("pick-arm/end_effector")
+    sim.set_prop_pose("pick_block", list(tip.xpos + [0, 0, 0.006]), [1, 0, 0, 0])
+    gravity = sim.model.opt.gravity.copy()
+    sim.model.opt.gravity[:] = 0
+    gripper.close_jaws()
+    sim.advance(0.5)
+    sim.model.opt.gravity[:] = gravity
+    sim.advance(0.5)
+
+    def offset():
+        return np.linalg.norm(np.array(sim.get_prop_pose("pick_block")["position"]) - tip.xpos)
+
+    start = offset()
+    for i in range(20):  # 10 mm hops, as cell.py pick makes
+        arm.set_joint_targets([0.0, -0.4 + (0.02 if i % 2 else -0.02), 1.57, 0.0, 1.57, 0.0])
+        sim.advance(1.0)
+    assert gripper.firm_grasp()
+    assert offset() - start < 0.002
+
+
+def test_an_integrated_jaw_gripper_brings_grasping_contacts_and_takes_them_away(sim, cell):
+    _, gripper = cell  # the Lite6's own gripper, in its arm's file
+    assert sim.model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+    assert sim.model.opt.impratio == 10
+    gripper.close()
+    defaults = mujoco.MjSpec().option
+    assert sim.model.opt.cone == defaults.cone
+    assert sim.model.opt.impratio == defaults.impratio
 
 
 def test_gripper_requires_attached_arm(sim):
@@ -214,7 +251,7 @@ def test_gripper_mjcf_attaches_at_the_flange_with_its_options(sim, position_arm,
     assert gripper.jaw() == pytest.approx(0.0, abs=1e-3)
     gripper.close()
     assert mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_BODY, "g/palm") < 0
-    defaults = mujoco.MjSpec().option
+    defaults = mujoco.MjSpec().option  # the gripper took its contact settings with it
     assert sim.model.opt.cone == defaults.cone
     assert sim.model.opt.impratio == defaults.impratio
 

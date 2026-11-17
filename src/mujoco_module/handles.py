@@ -1107,6 +1107,19 @@ def _jointed(body: Any) -> list[Any]:
     return found
 
 
+def grasp_options(spec: mujoco.MjSpec) -> None:
+    """MuJoCo's grasping advice, elliptic cones and impratio 10, for each of the two a
+    scene's file hasn't set (per key, so the result doesn't depend on build order). With
+    the default pyramidal cones a held prop creeps down a jaw gripper on every arm start
+    and stop until it falls out. Only with a jaw gripper: elliptic cones also add drag
+    to a belt's sliding parcels."""
+    defaults = mujoco.MjSpec().option
+    if spec.option.cone == defaults.cone:
+        spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
+    if spec.option.impratio == defaults.impratio:
+        spec.option.impratio = 10
+
+
 class GripperHandle:
     """A gripper driven by one actuator: the arm MJCF's own (the Lite6's), or
     with attrs["mjcf"] a gripper MJCF attached at the arm's flange site.
@@ -1254,9 +1267,13 @@ class GripperHandle:
                 for key in ("cone", "impratio"):
                     if getattr(child.option, key) != getattr(defaults, key):
                         setattr(spec.option, key, getattr(child.option, key))
+                if not self.suction:
+                    grasp_options(spec)
                 spec.attach(child, prefix=prefix, site=site)
 
             sim.set_contribution(name, Contribution(build=build))
+        elif not self.suction:  # a gripper in its arm's file: only the contact settings
+            sim.set_contribution(name, Contribution(build=lambda spec: grasp_options(spec)))
         claims = []
         if self._robot is not None and mjcf is None:
             # the robot's init then leaves the gripper's actuator alone (the gripper
@@ -1282,7 +1299,7 @@ class GripperHandle:
                     data.ctrl[actuator] = 0.0
 
         self._sim.run(detach)
-        if self._attached:
+        if self._attached or not self.suction:
             self._sim.remove_contribution(self.name)
 
     def _command(self, value: float) -> float:

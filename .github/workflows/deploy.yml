@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - name: The agent skill pins this version
+        run: 'grep -qx "MODULE_VERSION: ${{ github.ref_name }}" plugin/skills/mujoco-sim-cell/SKILL.md'
       - uses: viamrobotics/build-action@v1
         with:
           version: ${{ github.ref_name }}

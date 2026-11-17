@@ -89,6 +89,29 @@ block from a low table to a shelf (see [Semi-humanoid: TIAGo++](#semi-humanoid-t
 arm and gripper configured, the builtin motion service plans for the arm as it
 would for a real one.
 
+## Build a cell with an agent
+
+The `mujoco-sim` Claude Code plugin in this repo builds a cell from a
+description: it creates a Viam machine, writes its config, runs viam-server on
+your computer, and runs and checks a pick-and-place task until it works.
+
+You need `viam-server`, the `viam` CLI (`viam login`) and `uv`. Then:
+
+```sh
+claude plugin marketplace add viam-labs/viam-mujoco-sim
+claude plugin install mujoco-sim@viam-mujoco-sim
+```
+
+and ask, from any directory: "Build a mujoco-sim cell where a UR5e picks a
+block from a table into a bin behind a low wall." The skill uses the Viam MCP
+server, which signs you in to Viam the first time.
+
+Releasing the module: bump `MODULE_VERSION` in
+`plugin/skills/mujoco-sim-cell/SKILL.md` to the new tag (and the plugin's
+`version` in `plugin/.claude-plugin/plugin.json`) before tagging; the deploy
+workflow refuses a tag the skill doesn't pin. If it does, delete the tag
+(`git push --delete origin <tag>; git tag -d <tag>`), commit the bump, and tag again.
+
 ## Model viam-labs:mujoco-sim:world
 
 Owns the MuJoCo scene: the floor, lighting, props and the step loop. Configure
@@ -507,9 +530,14 @@ the gripper serves no kinematics, and checks them as well as any frame
 it. Its `frame.parent` must be its `mount` (or `arm`). A gripper in its arm's own file (`lite6_gripper`) serves none: give
 its frame the box above, or the planner can pass the arm but clip the
 gripper.
-The 2F-85 and the ePick also switch the whole scene to elliptic friction cones
-with `impratio` 10 (their own MJCF options, which grasping relies on) while
-configured. The ePick's cup pulls with up to 100 N; it carries a 1 kg carton
+Every jaw gripper, and the ePick, switches the whole scene to elliptic friction
+cones with `impratio` 10 while configured. The 2F-85 and the ePick take them
+from their own MJCF options, and every other jaw gripper gets them by default.
+A robot or gripper file that sets either option keeps its own value.
+Grasping relies on these settings. With MuJoCo's default pyramidal cones, a held
+object creeps down the jaws on every arm start and stop until it falls out.
+They also add drag to parcels sliding on a belt, so a cell with no jaw gripper
+keeps the defaults. The ePick's cup pulls with up to 100 N; it carries a 1 kg carton
 through moves streamed at `max_joint_deg_s` 30, as MoveThroughJointPositions
 streams them.
 

@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "viam": { "type": "http", "url": "https://app.viam.com/mcp" }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "viam-mujoco-sim",
+  "owner": { "name": "Viam Labs" },
+  "plugins": [
+    {
+      "name": "mujoco-sim",
+      "source": "./plugin",
+      "description": "Build and test simulated Viam robot cells in MuJoCo from a prompt."
+    }
+  ]
+}
