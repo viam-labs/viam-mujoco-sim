@@ -5,7 +5,7 @@ description: Build a working simulated robot cell on Viam with the viam-labs:muj
 
 # Build a mujoco-sim cell from a prompt
 
-MODULE_VERSION: 0.17.0
+MODULE_VERSION: 0.17.1
 
 Every config you write uses this registry module, pinned:
 
@@ -93,8 +93,8 @@ For any other gripper or a mesh object, measure it: `cell.py measure --gripper <
 ## 3. Provision
 
 1. Confirm with the user before you create anything. If they didn't name an org and location, list them with `list_organizations` and `list_organization_locations` and ask.
-2. Create the machine with `create_machine` and note its `machine_id`. It doesn't return the part id, so get that from `read_machine_metadata` (`part.id`).
-3. Create a key with `viam machines api-key create --machine-id <id>`. Then run `cell.py creds --part-id <part> --key-id <id> --key <key> --dir <scratch>/<machine>`. It writes `viam.json` for viam-server and `cell.json` for everything else. Both hold secrets: keep them in the scratchpad and never print them.
+2. Create the machine with `create_machine` and note its `machine_id`.
+3. Run `cell.py creds --machine-id <id> --dir <scratch>/<machine>`. It creates the machine's API key with the `viam` CLI, finds its main part, and writes `viam.json` for viam-server and `cell.json` for everything else. Both hold secrets: keep them in the scratchpad and never print them. It prints the key's name and id; tell the user both, so they can revoke it later. Don't create keys yourself: the CLI's default key name is the user's login.
 4. Start viam-server in the background, with output going to `<scratch>/<machine>/viam-server.log`:
    `viam-server -config <scratch>/<machine>/viam.json`
 
@@ -102,7 +102,7 @@ For any other gripper or a mesh object, measure it: `cell.py measure --gripper <
 
 ## 4. Bring up
 
-Get the revision from `read_machine_config` (`parts[0].revision`), then write the whole config with `set_machine_config`. Poll `read_machine_api` `method: "GetMachineStatus"` until every module, package and resource is `STATE_READY`; it usually takes under a minute. **After every config write, run the world's `reset`** (`run_docommand` on the world with `{"command": "reset"}`). Rebuilding the scene keeps each prop's live pose, so a prop whose `position` you changed stays where it was until `reset`. The first start downloads the module, so allow up to 5 minutes. If the config errors, read the log line, fix the config, and write it again.
+Get the revision from `read_machine_config` (`parts[0].revision`), then write the whole config with `set_machine_config`. Then run `cell.py wait --cell <cell.json>`: it returns when the machine is running and every resource, module and package is ready, and on timeout lists what isn't with its error. Don't grep the log for readiness. It usually takes under a minute. **After every config write, run the world's `reset`** (`run_docommand` on the world with `{"command": "reset"}`). Rebuilding the scene keeps each prop's live pose, so a prop whose `position` you changed stays where it was until `reset`. The first start downloads the module, so allow up to 5 minutes (`wait`'s default timeout). If something isn't ready, its error says why: fix the config and write it again.
 
 ## 5. Look
 

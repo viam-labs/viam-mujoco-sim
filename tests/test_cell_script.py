@@ -112,3 +112,39 @@ def test_move_down_reports_both_tries_when_both_fail():
 
     with pytest.raises(RuntimeError, match="theta 0.*theta 180"):
         asyncio.run(cell.move_down(Refuses(bad_theta=None), "g", (1, 2, 3), None, theta=0))
+
+
+def test_not_ready_lists_everything_short_of_ready():
+    from viam.proto.common import ResourceName
+    from viam.proto.robot import GetMachineStatusResponse as Status
+    from viam.proto.robot import ModuleStatus, PackageStatus, ResourceStatus
+
+    cell = load()
+    arm = ResourceName(namespace="rdk", type="component", subtype="arm", name="a")
+    world = ResourceName(namespace="rdk", type="component", subtype="generic", name="w")
+    status = Status(
+        state=Status.STATE_INITIALIZING,
+        resources=[ResourceStatus(name=world, state=ResourceStatus.STATE_READY),
+                   ResourceStatus(name=arm, state=ResourceStatus.STATE_CONFIGURING, error="no site")],
+        modules=[ModuleStatus(module_name="mujoco-sim", state=ModuleStatus.STATE_STARTING)],
+        packages=[PackageStatus(name="p", state=PackageStatus.STATE_DOWNLOADING)],
+    )
+    assert cell.not_ready(status) == [
+        {"what": "machine", "state": "INITIALIZING"},
+        {"what": "rdk:component:arm/a", "state": "CONFIGURING", "error": "no site"},
+        {"what": "module mujoco-sim", "state": "STARTING"},
+        {"what": "package p", "state": "DOWNLOADING"},
+    ]
+    ready = Status(state=Status.STATE_RUNNING, resources=[ResourceStatus(name=world, state=ResourceStatus.STATE_READY)])
+    assert cell.not_ready(ready) == []
+
+
+def test_parse_key_reads_the_clis_output_and_never_echoes_it():
+    import pytest
+
+    cell = load()
+    out = "Successfully created key:\nKey ID: 1234-abcd\nKey Value: s3cret\n\nKeep this key somewhere safe\n"
+    assert cell.parse_key(out) == ("1234-abcd", "s3cret")
+    with pytest.raises(ValueError) as error:
+        cell.parse_key("Key Value: s3cret\n")
+    assert "s3cret" not in str(error.value)

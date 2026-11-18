@@ -20,6 +20,7 @@ from viam.module.module import Module
 from viam.resource.registry import Registry
 
 import mujoco_module.models  # noqa: F401  (registers the models)
+from mujoco_module.logs import route_warnings
 from mujoco_module.models import world
 from mujoco_module.sim import SimManager
 
@@ -53,6 +54,7 @@ def _run_module(sim: SimManager) -> None:
 
 
 def main() -> None:
+    route_warnings(LOGGER)
     sim = SimManager.get()
 
     def _shutdown(signum, frame):

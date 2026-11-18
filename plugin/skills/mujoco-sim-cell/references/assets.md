@@ -32,6 +32,8 @@ For a custom gripper, run `cell.py measure --gripper <name>` and set the gripper
 
 Clone the vendor repo, then run `viam xacro convert --input-file <xacro> --output-file <name>.urdf [--args k:=v]`. Never pass `--collapse-fixed-joints`. Set `"mjcf": "<abs>.urdf"`, plus `mesh_dir` and `flange_link` as the README's "Bring your own robot" shows for the UR5e. If the flange check errors, it prints the `flange_offset` to set. Planning can be slow with dense meshes.
 
+Every joint needs a nonzero `<limit effort>` (Nm), which sizes its servo, and some vendor files set 0 (ROS-Industrial's ABB IRB 120 does). Write a copy with efforts from the vendor's datasheet. If there isn't one, use values sized to the arm, about 100 Nm at the shoulder down to 10 at the wrist for a 3 kg-payload arm. Record them as guesses.
+
 ### Gripper from a URDF or MJCF
 
 Set `"mjcf"` on the gripper. A URDF gripper needs exactly one driven (non-`mimic`) joint, with `<limit effort>`. Anything more complex needs an MJCF. Run `cell.py measure --gripper <name>` and set the frame's `translation.z` to its `tcp_mm`.

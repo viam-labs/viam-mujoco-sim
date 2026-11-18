@@ -11,4 +11,5 @@ fi
 
 . env.sh
 
-exec uv run --no-dev src/main.py "$@"
+# --quiet: uv's own progress goes to stderr, which viam-server logs as ERROR
+exec uv run --quiet --no-dev src/main.py "$@"
