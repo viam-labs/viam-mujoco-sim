@@ -73,3 +73,42 @@ def test_write_private_is_owner_only(tmp_path):
     cell.write_private(path, "x")
     assert path.read_text() == "x"
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+class StallsAtTheta:
+    """A motion service whose planner times out for goals at one tool yaw."""
+
+    def __init__(self, bad_theta):
+        self.bad_theta, self.calls = bad_theta, []
+
+    async def move(self, component_name, destination, world_state=None, extra=None):
+        self.calls.append((destination.pose.theta, extra))
+        if destination.pose.theta == self.bad_theta:
+            raise TimeoutError("cbirrt timeout context deadline exceeded")
+
+
+def test_move_down_turns_the_tool_180_when_a_move_stalls_and_keeps_the_turn():
+    import asyncio
+
+    cell = load()
+    motion = StallsAtTheta(bad_theta=0)
+    assert asyncio.run(cell.move_down(motion, "g", (1, 2, 3), None, theta=0)) == 180
+    assert asyncio.run(cell.move_down(motion, "g", (1, 2, 3), None, theta=180)) == 180
+    assert [t for t, _ in motion.calls] == [0, 180, 180]
+    assert all(extra == {"timeout": cell.PLAN_TIMEOUT_S} for _, extra in motion.calls)
+
+
+def test_move_down_reports_both_tries_when_both_fail():
+    import asyncio
+
+    import pytest
+
+    cell = load()
+
+    class Refuses(StallsAtTheta):
+        async def move(self, **kw):
+            await super().move(**kw)
+            raise ValueError(f"collision at {kw['destination'].pose.theta}")
+
+    with pytest.raises(RuntimeError, match="theta 0.*theta 180"):
+        asyncio.run(cell.move_down(Refuses(bad_theta=None), "g", (1, 2, 3), None, theta=0))

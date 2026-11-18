@@ -201,4 +201,6 @@ class MujocoGripper(Gripper, EasyResource):
         timeout: Optional[float] = None,
         **kwargs,
     ) -> Mapping[str, ValueTypes]:
+        if command.get("command") == "measure":
+            return await asyncio.to_thread(self._h().measure)
         raise ValueError(f"unknown command: {command}")

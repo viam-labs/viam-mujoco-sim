@@ -12,7 +12,10 @@
                       [--grasp-offset M] [--release-gap M] [--hover M]
       oracle top-down pick and place through the motion service, then the same check as `check`.
       The planner sees the prop as an obstacle on the approach and as carried on the gripper while
-      held; moves near it while not holding it go straight up and down in 10 mm hops.
+      held; moves near it while not holding it go straight up and down in 10 mm hops. A move that
+      fails to plan within 60 s is tried again with the tool turned 180 degrees, and the turn is kept.
+  uv run cell.py measure --cell DIR/cell.json (--gripper G | --prop NAME)
+      a gripper's TCP, jaw gap and finger reach (mm), or a prop's size and top (m)
 
 Task scripts of your own: sys.path.insert(0, "<this dir>"); import cell;
 then `async with cell.connect("DIR/cell.json") as robot:` and cell.judge(...).
@@ -32,6 +35,8 @@ REST_GAP_S = 0.5
 DOWN = {"o_x": 0, "o_y": 0, "o_z": -1, "theta": 0}  # gripper pointing straight down
 HOP_M = 0.01  # longest vertical move near the prop (10 mm hops worked in the baseline)
 BREAKAWAY_M = 0.02  # first lift off the support, short so it stays straight
+# Per planning try. RDK's default is 5 min, and a move that stalls in a bad IK branch uses all of it.
+PLAN_TIMEOUT_S = 60
 
 
 def judge(before, after, goal=None, goal_tol=GOAL_TOL_M, rest_tol=REST_TOL_M):
@@ -159,10 +164,30 @@ def world_state(target, prop_mm, size_mm, gripper, grasp_offset_mm):
     return None
 
 
+async def move_down(motion, gripper, xyz_mm, state, theta):
+    """Move the gripper, pointing down, to xyz_mm in the world; return the tool yaw that planned.
+
+    If the planner fails at `theta`, try once more turned 180 degrees about the tool axis: a jaw
+    gripper closes along the same line either way, and the turn makes IK pick another arm
+    configuration (the Panda's first choice above a prop stalls the short hops near it)."""
+    from viam.proto.common import Pose, PoseInFrame
+
+    x, y, z = xyz_mm
+    errors = []
+    for t in (theta, (theta + 180) % 360):
+        goal = PoseInFrame(reference_frame="world", pose=Pose(x=x, y=y, z=z, **{**DOWN, "theta": t}))
+        try:
+            await motion.move(component_name=gripper, destination=goal, world_state=state,
+                              extra={"timeout": PLAN_TIMEOUT_S})
+            return t
+        except Exception as e:  # mostly planner refusals; the error class tells a dropped connection apart
+            errors.append(f"theta {t}: {type(e).__name__}: {e}")
+    raise RuntimeError("; ".join(errors))
+
+
 async def pick(args):
     from viam.components.generic import Generic
     from viam.components.gripper import Gripper
-    from viam.proto.common import Pose, PoseInFrame
     from viam.services.motion import MotionClient
 
     async with connect(args.cell) as robot:
@@ -172,17 +197,16 @@ async def pick(args):
         await gripper.open()
         prop = await prop_position(world, args.prop)
         waypoints = pick_waypoints(prop, args.place, args.hover, args.grasp_offset, args.release_gap)
+        theta = DOWN["theta"]  # once a turn plans, keep it: the next moves start from that arm configuration
         try:
             for i, (x, y, z, target, action) in enumerate(waypoints):
-                goal = PoseInFrame(reference_frame="world", pose=Pose(x=x, y=y, z=z, **DOWN))
                 state = world_state(target, [v * 1000 for v in prop], args.size * 1000, args.gripper,
                                     args.grasp_offset * 1000)
                 try:
-                    await motion.move(component_name=args.gripper, destination=goal, world_state=state)
-                except Exception as e:  # mostly planner refusals; the error class tells a dropped connection apart
+                    theta = await move_down(motion, args.gripper, (x, y, z), state, theta)
+                except RuntimeError as e:
                     raise SystemExit(json.dumps({"failed": "plan", "waypoint": i, "of": len(waypoints),
-                                                 "tcp_mm": [x, y, z], "error": f"{type(e).__name__}: {e}",
-                                                 "hint": PLAN_HINT}))
+                                                 "tcp_mm": [x, y, z], "error": str(e), "hint": PLAN_HINT}))
                 if action == "grab":
                     await gripper.grab()  # returns before the jaws close; give them up to 2 s
                     for _ in range(20):
@@ -200,6 +224,18 @@ async def pick(args):
         finally:
             await gripper.open()
         print(json.dumps(await settle_check(world, args.prop, args.place)))
+
+
+async def measure(args):
+    from viam.components.generic import Generic
+    from viam.components.gripper import Gripper
+
+    async with connect(args.cell) as robot:
+        if args.gripper:
+            out = await Gripper.from_robot(robot, args.gripper).do_command({"command": "measure"})
+        else:
+            out = await Generic.from_robot(robot, args.world).do_command({"command": "measure", "prop": args.prop})
+    print(json.dumps(out))
 
 
 def main():
@@ -226,8 +262,14 @@ def main():
                            help="grasp this far above the prop's centre, m: raise it when the fingers hit the table")
             s.add_argument("--release-gap", type=float, default=0.005,
                            help="let go with the prop this far above its goal, m")
+    m = sub.add_parser("measure")
+    m.add_argument("--cell", required=True)
+    m.add_argument("--world", default="sim-world")
+    which = m.add_mutually_exclusive_group(required=True)
+    which.add_argument("--gripper", help="TCP, jaw gap and finger reach (mm)")
+    which.add_argument("--prop", help="world-frame size and top (m)")
     args = p.parse_args()
-    asyncio.run({"creds": creds, "check": check, "pick": pick}[args.cmd](args))
+    asyncio.run({"creds": creds, "check": check, "pick": pick, "measure": measure}[args.cmd](args))
 
 
 if __name__ == "__main__":

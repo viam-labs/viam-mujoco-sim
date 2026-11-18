@@ -5,7 +5,7 @@ description: Build a working simulated robot cell on Viam with the viam-labs:muj
 
 # Build a mujoco-sim cell from a prompt
 
-MODULE_VERSION: 0.16.1
+MODULE_VERSION: 0.17.0
 
 Every config you write uses this registry module, pinned:
 
@@ -19,7 +19,7 @@ The README at that tag documents every model's attributes and DoCommands.
 
 `cell.py` below means `uv run <this skill's directory>/scripts/cell.py`. Run `--help` for its usage. `check` and `pick` assume the world is named `sim-world`; pass `--world <name>` otherwise.
 
-Prerequisites: `viam-server`, the `viam` CLI (logged in with `viam login`), `uv`, and the Viam MCP server (tools `create_machine`, `read_machine_metadata`, `read_machine_config`, `set_machine_config`, `read_machine_api`, `read_machine_logs`, `run_docommand`, `list_organizations`, `list_organization_locations`).
+Prerequisites: `viam-server`, the `viam` CLI (logged in with `viam login`), `uv`, `git` (to clone asset repos), and the Viam MCP server (tools `create_machine`, `read_machine_metadata`, `read_machine_config`, `set_machine_config`, `read_machine_api`, `read_machine_logs`, `run_docommand`, `list_organizations`, `list_organization_locations`).
 
 Keep a run report as you go and give it to the user at the end:
 
@@ -34,9 +34,14 @@ guesses: [every default or assumption you made, one line each]
 Turn the prompt into robot, end effector, objects, goal and sensors. Ask only about what you can't default, and say which defaults you chose. Add each default to `guesses`.
 
 - An object with no bundled asset becomes a primitive. A plate, for example, becomes a thin fixed box prop.
+- A named arm, gripper, object or environment that isn't bundled is sourced (step 2a), not substituted. Substitute only when no trusted source has it and the user doesn't give one, and record it as a scope change.
 - Bundled arms: `lite6`, `ur5e`. Bundled grippers: `lite6_gripper` (the default, the Lite6's own), `robotiq_2f85`, `robotiq_epick`.
 - Bundled bases: `viam_rover`, `clearpath_husky`, `pal_tiago_base`.
 - Bundled robots: `aloha`, `tiago`.
+
+## 2a. Custom assets
+
+Only when something in the prompt isn't bundled: read `references/assets.md` (in this skill's directory) and follow it to source, place and check each asset before you compose. Custom assets need `MODULE_VERSION` 0.17.0 or later.
 
 ## 2. Compose
 
@@ -79,7 +84,11 @@ Measured in the sim at `MODULE_VERSION`, in mm. Check sizes against this before 
 
 - **The open 2F-85 is about 151 mm across its jaws.** That's wider than the bundled bin's 140 mm inside, so let it go above the rim with `--release-gap`.
 - **Bundled bin (`meshes/bin.stl`):** 150×150×80 outside, 5 mm walls and floor. Its origin is the center of its underside, so the inside floor is 5 mm above its frame.
+- **Rest a table on the floor, never flush with it.** A box whose top is at z=0 (center at minus half its thickness) z-fights with the floor plane: camera images show the floor through it in jagged shards. Put its bottom on the floor (center z = half its thickness), then set the z of every prop and obstacle that rests on it (a bin, a fixture) from the table top. A bin left at z=0 inside the table's footprint has its floor buried in the table. Keep the arm's base on the table top or on the floor beside it.
+- **`tcp_mm` from `measure` is the fingertips.** The bundled 2F-85 frame uses the pad centre, 155.8, about 4.5 mm short of its tips (`measure` says 160.3), so the table isn't wrong.
 - **An object too wide for the gripper is a scope problem, not a tuning one.** Say so and offer another gripper (the 2F-85 on a UR5e) or a smaller object before you change anything.
+
+For any other gripper or a mesh object, measure it: `cell.py measure --gripper <name>` or `--prop <name>`.
 
 ## 3. Provision
 
@@ -102,11 +111,12 @@ Get the revision from `read_machine_config` (`parts[0].revision`), then write th
 
 ## 6. Run the task
 
-- **A top-down pick and place of one prop:** run `cell.py pick --cell <cell.json> --gripper <name> --prop <name> --size <m> --place X Y Z`. `--place` is where the prop's center should end up. `--size` is the prop's edge; it's treated as a cube, so for any other shape pass its largest dimension.
+- **A top-down pick and place of one prop:** run `cell.py pick --cell <cell.json> --gripper <name> --prop <name> --size <m> --place X Y Z`. `--place` is where the prop's center should end up. `--size` is the prop's edge; it's treated as a cube, so for any other shape pass its body's largest dimension (ignore a handle). It only shapes what the planner avoids and carries.
   - It passes the prop to the planner itself: as an obstacle on the approach, left out for the straight descent onto it, and as a box carried on the gripper while held, so the planner keeps the held prop clear of walls and rims. Near the prop while not holding it, it moves vertically in 10 mm hops, because the planner can curve a longer move through the prop. While holding, it makes as few moves as it can.
   - `--grasp-offset` (m above the prop's center) is the fix when the finger pads would hit the table. The 2F-85 needed about 0.022 on a 31 mm block. `--release-gap` (default 0.005) is how far above its goal the prop is let go.
   - A pick is about 25 moves, most of them short hops, so it takes a minute or two; it hasn't hung.
-  - On a planner refusal it prints the move, the error naming the two colliding geometries, and which flag to change.
+  - A move that doesn't plan within 60 s is tried again with the gripper turned 180° about its axis (a jaw gripper closes along the same line). That makes IK choose another arm configuration, and the Panda's first choice above a prop stalls the short hops. The turn is kept for the rest of the pick, so a held prop arrives rotated 180°.
+  - On a planner refusal it prints the move, the errors from both tries (the colliding geometries are named in them), and which flag to change.
 - **Anything else:** fetch the matching example script and write your own in the scratchpad. It should `sys.path.insert(0, "<this skill's directory>/scripts")` and then `import cell` for `cell.connect` and `cell.settle_check`, and end with a `settle_check` on every prop that has a goal. Give it its own PEP 723 header so `uv run` installs viam-sdk: `# /// script` / `# dependencies = ["viam-sdk>=0.85"]` / `# ///`.
 
 The task works when every goal prop reports `at_goal: true` (within 2 cm and at rest). Then take the "after" look (`GetImages` again).

@@ -7,8 +7,8 @@ Attributes:
   asset (string)                   - a bundled arm, "lite6" (with its wide gripper)
                                      or "ur5e";
                                      its defaults apply under the attributes set here
-  mjcf (string)                    - instead of asset: the arm's MJCF (.xml, needs
-                                     kinematics_url) or URDF (.urdf) file, absolute,
+  mjcf (string)                    - instead of asset: the arm's MJCF (.xml; kinematics
+                                     are derived when kinematics_url is unset) or URDF (.urdf) file, absolute,
                                      ~, or relative to assets/. A URDF's joints need
                                      <limit effort>: the module adds a position servo
                                      on each, sized from it
@@ -31,6 +31,13 @@ Attributes:
                                      geoms are turned off (so a gripper's geoms
                                      sitting directly on the last link's body stop
                                      colliding; use "mesh" for such MJCFs)
+  planning_geometry (string)       - derived kinematics only: "shapes" (default), a
+                                     fitted box or capsule per link; "mesh", the
+                                     convex hulls of the link's MuJoCo collision
+                                     geoms (what MuJoCo collides; slower to plan)
+  visual_models (bool)             - derived kinematics only: serve each link's
+                                     visible geoms as a GLB through Get3DModels, for
+                                     the 3D viewer (default false)
   position ([x,y,z] meters)        - fallback placement when no frame is set
   orientation_wxyz ([w,x,y,z])     - fallback orientation when no frame is set
   orientation_rpy_deg ([r,p,y])    - fallback orientation when no frame is set
@@ -44,7 +51,8 @@ Attributes:
   path_tolerance_delta_deg (float) - convergence tolerance (default 0.5)
   path_max_step_deg (float)        - max per-joint delta between pushed targets
                                      (default 2.0)
-  kinematics_url (string)          - the arm's Viam kinematics file (.json = SVA,
+  kinematics_url (string)          - the arm's Viam kinematics file (optional for an
+                                     .xml mjcf, derived when unset) (.json = SVA,
                                      .urdf = URDF): http(s)://, file://, or a path
                                      (absolute, ~, or relative to assets/). Read
                                      when the arm is configured. A .urdf mjcf's
@@ -300,6 +308,10 @@ class MujocoArm(Arm, EasyResource):
             raise ValueError(f"{config.name}: mesh_dir must be a folder path")
         if attrs.get("collision", "kinematics") not in ("kinematics", "mesh"):
             raise ValueError(f'{config.name}: collision must be "kinematics" or "mesh"')
+        if attrs.get("planning_geometry", "shapes") not in ("shapes", "mesh"):
+            raise ValueError(f'{config.name}: planning_geometry must be "shapes" or "mesh"')
+        if not isinstance(attrs.get("visual_models", False), bool):
+            raise ValueError(f"{config.name}: visual_models must be true or false")
         for key in ("base_offset", "flange_offset"):
             robots.parse_pose(attrs.get(key), f"{config.name}: {key}")
         _is_moving_velocity_threshold(attrs, config.name)
@@ -550,7 +562,7 @@ class MujocoArm(Arm, EasyResource):
         handle = self._h()
         fmt = (
             KinematicsFileFormat.KINEMATICS_FILE_FORMAT_URDF
-            if robots.is_urdf(handle.kinematics_url)
+            if handle.kinematics_urdf
             else KinematicsFileFormat.KINEMATICS_FILE_FORMAT_SVA
         )
         if not handle.kinematics_meshes:
@@ -562,7 +574,10 @@ class MujocoArm(Arm, EasyResource):
         return fmt, handle.kinematics_data, meshes
 
     async def get_3d_models(self, **kwargs) -> Mapping[str, Mesh]:
-        return {}
+        return {
+            link: Mesh(content_type="model/gltf-binary", mesh=glb)
+            for link, glb in self._h().visual_models.items()
+        }
 
     async def set_manual_mode(
         self, manual_mode: bool, enabled_for: int = 0, **kwargs

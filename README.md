@@ -223,6 +223,7 @@ Lights in a robot's MJCF (an arm, gripper or base) don't drop the sun.
 | `set_prop_pose` | `prop`, `position`, `orientation_wxyz` | `{prop, position, orientation_wxyz}`; zeroes the prop's velocity. |
 | `get_prop_pose` | `prop` | `{prop, pose: {position, orientation_wxyz}}` |
 | `park_props` | `props`: list of names | `{poses: {name: {position, orientation_wxyz}}}`; returns props to their spawn poses. |
+| `measure` | `prop` | `{prop, size_m: [x, y, z], center_m: [x, y, z], top_z_m}` in the world frame, from the prop's surface points (a mesh's vertices). Handy for a mesh prop, whose size after `scale` isn't in the config and whose origin, the mesh file's, can sit off its middle. |
 | `reimport` | | `{imported, from_frame, missing}`: runs `import_geometry` again, replacing the last import. `from_frame` names the imported components whose geometry came from their frame config rather than `GetGeometries`. |
 
 `real_time_factor` is sim seconds per wall second over the last two seconds.
@@ -350,14 +351,16 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `is_moving_velocity_threshold_rad_s` | float | No | `0.01` | Joints must also be slower than this to count as arrived. |
 | `robot_control_freq_hz` | float | No | `50` | Rate at which `MoveThroughJointPositions` pushes targets, up to 1000. |
 | `path_max_step_deg` | float | No | `2.0` | Largest per-joint step between pushed targets, up to 30. |
-| `kinematics_url` | string | With an `.xml` `mjcf` | the bundled arm's file; a `.urdf` `mjcf` pruned to `flange_link` | The arm's Viam kinematics file, served by `GetKinematics`: `.json` for SVA, `.urdf`, `.xml` or `.xacro` for URDF. `http(s)://`, `file://`, or a path like `mjcf`. Read when the arm is configured. |
-| `joints` | [string] | No | inferred | The arm's MJCF joint names, base to flange. |
+| `kinematics_url` | string | No | the bundled arm's file; derived from an `.xml` `mjcf`; for a `.urdf`, the file pruned to `flange_link` | The arm's Viam kinematics file, served by `GetKinematics`; null or empty counts as unset: `.json` for SVA, `.urdf`, `.xml` or `.xacro` for URDF. `http(s)://`, `file://`, or a path like `mjcf`. Read when the arm is configured. |
+| `joints` | [string] | No | inferred | The arm's MJCF joint names, base to flange. With derived kinematics it must be exactly the chain from the base to `flange_site`. |
 | `flange_site` | string | No | `"attachment_site"` | The MJCF site at the flange, where Viam's kinematics chain ends. Not for a `.urdf`. |
 | `flange_link` | string | With a `.urdf` that has several end links | the file's one end link | The URDF link at the flange. Only for a `.urdf`. |
 | `home_keyframe` | string | No | `"home"` | The MJCF keyframe whose `ctrl` is the start pose; all zeros without one. |
 | `base_offset` | pose | No | identity | From the arm's frame to the MJCF's world, for an MJCF whose base differs from its kinematics file. `{"translation": {"x", "y", "z"} mm, "orientation": {"o_x", "o_y", "o_z", "theta"} degrees}`. |
 | `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
-| `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
+| `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` (always `"mesh"` for derived kinematics) | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
+| `planning_geometry` | string | No | `"shapes"` | Derived kinematics only. `"shapes"`: a fitted box or capsule per link. `"mesh"`: the convex hulls of each link's MuJoCo collision geoms, so the planner and the 3D viewer see what MuJoCo collides. Needs `collision` `"mesh"`. See [Derived kinematics](#derived-kinematics). |
+| `visual_models` | bool | No | `false` | Derived kinematics only. Serve each link's visible geoms as a GLB through `Get3DModels`, for the 3D viewer. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -411,7 +414,8 @@ as it drives, so plan arm moves in the base's frame; see
 | `MoveThroughJointPositions` | Pushes waypoints at `robot_control_freq_hz`; used by the motion service. With extra `{"waitAtEnd": false}` (as the motion service's teleop sends) it returns at once and the next move continues from the commanded pose. |
 | `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time; each batch plays straight after the last. |
 | `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
-| `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes. |
+| `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes; for an `.xml` `mjcf` without one, the derived SVA file. |
+| `Get3DModels` | With `visual_models`, a GLB of each link's visible geoms keyed by link id; else none. |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
 | `Stop` | Holds the current target, or the measured position if it interrupted a trajectory. |
 | `MoveToPosition` | Not supported; use the motion service. |
@@ -426,11 +430,14 @@ as it drives, so plan arm moves in the base's frame; see
 
 ### Your own arm
 
-Give the arm `mjcf` and `kinematics_url` instead of `asset`. Everything else is
-read from the two files. An arm described by a URDF needs only the URDF; see
-[From a URDF](#from-a-urdf).
+Give the arm `mjcf` instead of `asset`. With an MJCF and no `kinematics_url`,
+the module derives the arm's Viam kinematics from the file. They match the sim
+exactly, so a MuJoCo Menagerie arm works as it comes (`franka_emika_panda/panda_nohand.xml`
+needs nothing else). Everything else is read from the file, and from
+`kinematics_url` if you give one. An arm described by a URDF needs only the
+URDF; see [From a URDF](#from-a-urdf).
 
-- **Joints.** The first N actuated hinge or slide joints in the MJCF's body
+- **Joints.** With a `kinematics_url`, the first N actuated hinge or slide joints in the MJCF's body
   tree, where N is the kinematics file's joint count. They must form one chain
   from the base; otherwise configuring fails and lists what it found. Set
   `joints` to choose them yourself.
@@ -442,6 +449,38 @@ read from the two files. An arm described by a URDF needs only the URDF; see
   joint `qpos` when the keyframe sets no `ctrl`.
 - **Gripper.** An actuator in the arm MJCF that drives none of the arm joints
   is its integrated gripper (see the gripper model).
+- **Options.** The arm file's own non-default `<option>` `cone` and
+  `impratio` go into the scene, as a gripper's or robot's do. This applies
+  with or without a `kinematics_url`.
+
+### Derived kinematics
+
+- **The chain.** The hinge and slide joints on `flange_site`'s body and its
+  ancestors, base first. A configured `joints` list must be exactly that
+  chain. A body with two joints, a ball or free joint, or a hinge whose `pos`
+  isn't zero is an error (a slide's `pos` is fine). Static bodies between
+  joints are folded into the shape of the jointed body above them. Set
+  `kinematics_url` for an arm like that.
+- **Limits.** Taken from each joint's `range`. A hinge without one gets
+  ±360° with a warning. A slide without one is an error.
+- **Shapes.** Each link's collision geoms are fitted to one box or capsule
+  for the planner. MuJoCo keeps colliding with the MJCF's own geoms
+  (`collision` defaults to `"mesh"`), because the fitted shapes are
+  conservative and can jam an arm in contact. `"kinematics"` makes MuJoCo use
+  them too.
+- **Meshes.** `planning_geometry` `"mesh"` serves each link's collision
+  geoms instead of the fitted shape: a mesh geom as its convex hull (what
+  MuJoCo collides), a primitive as triangles, merged into one PLY per link.
+  The planner's shapes then match the sim's, at some cost in planning time
+  (the Panda's mug pick planned no slower).
+- **3D models.** `visual_models` `true` serves each link's visible geoms
+  (groups 0–2, not transparent) through `Get3DModels` as a GLB, in their
+  colours. The 3D viewer draws them on the link's collider; set its arm
+  render setting to "model" to see them in place of the colliders. A link with
+  no collision geoms has no collider, so its model isn't drawn. A Menagerie
+  arm's models are about 5 MB in all.
+- **The frame check.** It still runs, and with derived kinematics it fails
+  only on a module bug.
 
 Configuring also checks that the two files describe the same arm: the MJCF's
 `flange_site`, with the offsets, must land within 5 mm and 2° of the
@@ -589,6 +628,7 @@ fingertip center: use the TCP value from the table above, or for your own
 | `GetCurrentInputs` / `GoToInputs` | One value: `0` open, `1` closed. |
 | `GetKinematics` | Not supported; RDK falls back to `GetGeometries`. |
 | `GetGeometries` | Its colliding geoms, open and closed, in its frame (see above); none for a gripper in its arm's own file (`lite6_gripper`, `aloha`, `tiago`). |
+| `DoCommand` | `{"command": "measure"}` returns `tcp_mm` (one number), and `jaw_gap_mm` and `finger_reach_mm` (each `{open, closed}`); for suction, `cup_diameter_mm` and `tcp_mm`. It measures a scratch copy of the gripper, never the live sim. `tcp_mm` is the fingertips' distance from the flange when open: set it as the gripper frame's `translation.z`. |
 
 `IsHoldingSomething` always fills `meta`:
 

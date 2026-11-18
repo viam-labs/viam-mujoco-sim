@@ -87,7 +87,7 @@ def validate_sim_component(
     config: ComponentConfig, needs_asset: bool = True, world_frame_only: bool = True
 ) -> Tuple[Sequence[str], Sequence[str]]:
     """Every component names its world (so viam-server starts it first) and,
-    when it spawns an arm, a known asset or its own mjcf and kinematics_url. Components placed by
+    when it spawns an arm, a known asset or its own mjcf (an .xml arm's kinematics_url is optional: derived when unset). Components placed by
     their frame must be framed on the world (frame_pose ignores the parent)
     unless they pass world_frame_only=False and mount on the parent's
     viam_frame themselves (a base is the one that doesn't)."""
@@ -103,17 +103,13 @@ def validate_sim_component(
         if mjcf is None and asset not in KNOWN_ASSETS:
             raise ValueError(
                 f"{config.name}: asset must be one of {sorted(KNOWN_ASSETS)}, "
-                f"got {asset!r}; or set mjcf and kinematics_url for your own robot"
+                f"got {asset!r}; or set mjcf for your own robot"
             )
         if mjcf is not None:
             if asset is not None:
                 raise ValueError(f"{config.name}: set asset or mjcf, not both")
             if not isinstance(mjcf, str) or not mjcf:
                 raise ValueError(f"{config.name}: mjcf must be a file path")
-            if not attrs.get("kinematics_url") and not mjcf.lower().endswith(".urdf"):
-                raise ValueError(
-                    f"{config.name}: mjcf needs kinematics_url, the arm's Viam kinematics file"
-                )
     if world_frame_only and config.HasField("frame") and config.frame.parent != "world":
         raise ValueError(
             f'{config.name}: frame.parent must be "world"; placing relative to '

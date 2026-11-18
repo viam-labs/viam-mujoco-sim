@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import itertools
+import json
 import math
 import random
 from collections import deque
@@ -201,22 +202,62 @@ class ArmHandle:
             flange = robots.flange_link(self.mjcf.read_bytes(), attrs.get("flange_link"), where)
         # served by GetKinematics with the kinematics: RDK reads a URDF's mesh collisions from them
         self.kinematics_meshes: dict[str, tuple[str, bytes]] = {}
-        if urdf and "kinematics_url" not in attrs:
+        self.derived = False
+        # Get3DModels: a GLB of each link's visible geoms, keyed by link id (derived arms only)
+        self.visual_models: dict[str, bytes] = {}
+        meshes = attrs.get("planning_geometry", "shapes") == "mesh"
+        derive = holder is None and not urdf and not attrs.get("kinematics_url")
+        if not derive and (meshes or attrs.get("visual_models")):
+            raise ValueError(
+                f"{label}: planning_geometry \"mesh\" and visual_models are only for an arm whose "
+                "kinematics are derived from its MJCF (an .xml mjcf with no kinematics_url)"
+            )
+        if meshes and attrs.get("collision") == "kinematics":
+            raise ValueError(
+                f'{label}: planning_geometry "mesh" needs collision "mesh" (MuJoCo can\'t collide a '
+                "planner mesh as a shape)"
+            )
+        if urdf and not attrs.get("kinematics_url"):
             self.kinematics_url = where
             self.kinematics_data = robots.prune_urdf(self.mjcf.read_bytes(), flange)
             self.kinematics_meshes = robots.kinematics_meshes(
                 self.kinematics_data, robots.mesh_folder(self.mjcf, mesh_dir), where
             )
+        elif derive:
+            # an MJCF arm with no kinematics file (MuJoCo Menagerie's): derive them from the file
+            from . import derive_kinematics
+
+            model = spec.compile()
+            site_name = str(attrs.get("flange_site", "attachment_site"))
+            site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
+            if site_id < 0:
+                raise ValueError(f"{where}: has no site {site_name!r}; set flange_site")
+            if attrs.get("joints"):
+                chain = derive_kinematics.given_joints(model, attrs["joints"], site_id, where)
+            else:
+                chain = derive_kinematics.chain_joints(model, site_id, where)
+            sva = derive_kinematics.derive_sva(
+                model, chain, site_id,
+                robots.parse_pose(attrs.get("base_offset"), f"{label}: base_offset"),
+                robots.parse_pose(attrs.get("flange_offset"), f"{label}: flange_offset"),
+                where,
+                meshes=meshes,
+                models=self.visual_models if attrs.get("visual_models") else None,
+            )
+            self.kinematics_url = f"{where} (derived)"
+            self.kinematics_data = json.dumps(sva, indent=1).encode()
+            self.derived = True
         else:
             # read here, not on first GetKinematics: building the arm needs it
             # ponytail: a cold-cache http(s) fetch blocks the event loop (up to the download timeout); fetch in validate_config or make reconfigure async if that bites
             self.kinematics_url = str(attrs["kinematics_url"])
             self.kinematics_data = robots.load_kinematics(self.kinematics_url, f"{label}: kinematics_url")
-        urdf_kinematics = robots.is_urdf(self.kinematics_url)
+        urdf_kinematics = not self.derived and robots.is_urdf(self.kinematics_url)
+        self.kinematics_urdf = urdf_kinematics
         self.kinematics = robots.parse_kinematics(self.kinematics_data, urdf_kinematics, self.kinematics_url)
         names = attrs.get("joints")
         # an MJCF arm's kinematics_url isn't checked: it never was (backward compatibility)
-        if urdf and urdf_kinematics and "kinematics_url" in attrs and robots.has_mesh_collisions(
+        if urdf and urdf_kinematics and attrs.get("kinematics_url") and robots.has_mesh_collisions(
             self.kinematics_data
         ):
             raise ValueError(
@@ -231,10 +272,12 @@ class ArmHandle:
                     "arm joint names in chain order"
                 )
             names = list(self.kinematics.joints)
+        if self.derived and names is None:
+            names = list(self.kinematics.joints)
         # The arm on its own (or its robot's file), as the file describes it.
         # Ids below index this model; names carry over into the scene with
         # file_prefix.
-        self.model = holder.model if holder is not None else spec.compile()
+        self.model = holder.model if holder is not None else (model if self.derived else spec.compile())
         self.joints = robots.arm_joints(self.model, len(self.kinematics.joints), where, names)
         if urdf:
             robots.prepare_urdf_arm(spec, [self.model.joint(j).name for j in self.joints], flange, where)
@@ -304,10 +347,18 @@ class ArmHandle:
                 raise ValueError(frame_error(
                     expected, label, has_offset="base_offset" in attrs, parent=parent if above else None
                 ))
-        robots.check_frames(
-            self.model, self.kinematics, self.joints, self.model.site(self.flange_site).id,
-            self._home, base_offset, flange_offset, label, base_body=chain_base,
-        )
+        try:
+            robots.check_frames(
+                self.model, self.kinematics, self.joints, self.model.site(self.flange_site).id,
+                self._home, base_offset, flange_offset, label, base_body=chain_base,
+            )
+        except ValueError as error:
+            if not self.derived:
+                raise
+            raise ValueError(
+                f"{error}. The kinematics were derived from the MJCF, so this is a bug in "
+                "viam-labs:mujoco-sim; set kinematics_url to work around it"
+            ) from None
         # per joint, SI: rad for hinges, m for slides (a torso lift)
         self.slides = self.model.jnt_type[self.joints] == mujoco.mjtJoint.mjJNT_SLIDE
         self._max_rad_s = np.where(
@@ -331,7 +382,10 @@ class ArmHandle:
         excluded: list[tuple[str, str]] = []
         has_shapes = any(frame.geometry for frame in self.kinematics.frames.values())
         # an arm in a robot file uses the file's own geoms
-        collision = attrs.get("collision") or ("kinematics" if has_shapes and holder is None else "mesh")
+        # a derived arm's fitted shapes are conservative (they jammed the Lite6): the planner uses them, MuJoCo the meshes
+        collision = attrs.get("collision") or (
+            "kinematics" if has_shapes and holder is None and not self.derived else "mesh"
+        )
         shapes: list[robots.Shape] = []
         if collision == "kinematics":
             if not has_shapes:
@@ -348,6 +402,17 @@ class ArmHandle:
             excluded += robots.home_contacts(child, self.joint_names(), self._home)
 
         arm_spec = spec
+        # attach keeps the scene's options; take the file's contact settings (Menagerie's Panda: impratio 10)
+        defaults = mujoco.MjSpec().option
+        file_options = (
+            {}
+            if holder is not None
+            else {
+                key: getattr(spec.option, key)
+                for key in ("cone", "impratio")
+                if getattr(spec.option, key) != getattr(defaults, key)
+            }
+        )
         robot_site = f"{self.robot}/{VIAM_FRAME_SITE}"
         arm_site = np.linalg.inv(base_offset)  # the arm's frame on its chain base
 
@@ -371,6 +436,8 @@ class ArmHandle:
             at_mount = at_frame @ base_offset
             child = arm_spec.copy()  # the file isn't read again
             robots.apply_shapes(child, shapes, label)
+            for key, value in file_options.items():
+                setattr(spec.option, key, value)
             frame = body.add_frame(pos=list(at_mount[:3, 3]), quat=list(robots.quat(at_mount)))
             spec.attach(child, prefix=self.file_prefix, frame=frame)
             # the arm's Viam frame, which end_pose is measured from
@@ -460,6 +527,11 @@ class ArmHandle:
         if self.robot is not None:
             return RuntimeError(f"arm {self.name!r}: robot {self.robot!r} is not in the scene")
         return RuntimeError(f"arm {self.name!r}: parent {self._parent!r} has no viam_frame in the scene")
+
+    @property
+    def home(self) -> tuple[float, ...]:
+        """The arm's home joint values, in `actuators` order."""
+        return self._home
 
     @property
     def flange_site_name(self) -> str:
@@ -1148,6 +1220,9 @@ class GripperHandle:
         self._robot: str | None = handle.robot
         if mjcf is None:
             model, prefix = handle.model, handle.file_prefix
+            self._measure_model = model
+            self._measure_site = model.site(handle.flange_site).id
+            self._measure_pin = (list(handle.joints), list(handle.home), list(handle.actuators))
             where = f"mount {arm} ({f'robot {handle.robot}' if handle.robot else handle.mjcf})"
             named = attrs.get("actuator")
             actuator = robots.gripper_actuator(
@@ -1170,6 +1245,8 @@ class GripperHandle:
                 robots.add_servos(gripper_spec, [robots.driven_joint(gripper_spec.compile(), where)], where)
             model = gripper_spec.compile()
             actuator = robots.gripper_actuator(model, where, name=attrs.get("actuator"))
+            self._measure_model, self._measure_site, self._measure_pin = model, None, None
+        self._measure_actuator = actuator
         kind = robots.control_type(model, actuator, where)
         self._position = kind == "position"
         self.suction = kind == "suction"
@@ -1192,6 +1269,7 @@ class GripperHandle:
                     )
             gripper_body = int(model.actuator_trnid[actuator, 0])
             self._cup = prefix + model.body(gripper_body).name
+            self._measure_cup = gripper_body
         else:
             if not model.actuator_ctrllimited[actuator] and not ("open" in attrs and "closed" in attrs):
                 raise ValueError(f"{where}: the gripper actuator has no ctrlrange; set open and closed")
@@ -1211,6 +1289,7 @@ class GripperHandle:
             roots = [b for b in range(1, model.nbody) if model.body_parentid[b] == 0]
         if not all(model.body(root).name for root in roots):
             raise ValueError(f"{where}: a gripper root body has no name; name the MJCF's gripper bodies")
+        self._measure_bodies = [b for r in roots for b in robots.subtree(model, r)]
         # Only roots are named; their subtrees are resolved in the current model.
         self._roots = tuple(prefix + model.body(root).name for root in roots)
         # Captures the arm's flange site, integrated-gripper conflict and root at build;
@@ -1301,6 +1380,36 @@ class GripperHandle:
         self._sim.run(detach)
         if self._attached or not self.suction:
             self._sim.remove_contribution(self.name)
+
+    def measure(self) -> dict:
+        """TCP, jaw gap and finger reach (or a suction cup's size), from a scratch model."""
+        from . import measure
+
+        model = self._measure_model
+        if self.suction:
+            return measure.suction_measure(model, mujoco.MjData(model), self._measure_cup, self._measure_site)
+
+        def pin(data: mujoco.MjData) -> None:
+            if self._measure_pin is None:
+                return
+            joints, home, actuators = self._measure_pin
+            mine = set(self._measure_bodies)
+            for j in range(model.njnt):  # every other limb, a floating base: held at rest
+                if j not in joints and int(model.jnt_bodyid[j]) not in mine:
+                    q, v = model.jnt_qposadr[j], model.jnt_dofadr[j]
+                    nq, nv = {0: (7, 6), 1: (4, 3)}.get(int(model.jnt_type[j]), (1, 1))  # free, ball, else 1 dof
+                    data.qpos[q:q + nq] = model.qpos0[q:q + nq]
+                    data.qvel[v:v + nv] = 0.0
+            for joint, value in zip(joints, home):
+                data.qpos[model.jnt_qposadr[joint]] = value
+                data.qvel[model.jnt_dofadr[joint]] = 0.0
+            for actuator, value in zip(actuators, home):
+                data.ctrl[actuator] = value
+
+        return measure.gripper_measure(
+            model, self._measure_actuator, self._command(self._open), self._command(self._closed),
+            self._measure_site, pin, self._measure_bodies,
+        )
 
     def _command(self, value: float) -> float:
         if self._position or self.suction:

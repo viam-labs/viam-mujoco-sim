@@ -28,7 +28,7 @@ import numpy as np
 from viam.logging import getLogger
 from viam.proto.common import Geometry
 
-from . import lighting
+from . import lighting, robots
 from .meshes import (
     UNTINTED_RGBA,
     MeshSource,
@@ -914,6 +914,34 @@ class SimManager:
             self.require_world()
             self._prop(name)
             return self._prop_pose(name)
+
+        return self.run(read)
+
+    def prop_extent(self, name: str) -> dict[str, Any]:
+        """A prop's world-frame axis-aligned size (m), the centre of that box
+        and the height of its top. A mesh prop's origin is its file's, which can
+        sit off its middle: grasp at center_m. Every geom of the prop's
+        subtree counts, visual-only ones too: it is the prop's visible size."""
+        from .derive_kinematics import geom_points
+
+        def read() -> dict[str, Any]:
+            self.require_world()
+            self._prop(name)  # unknown prop -> its usual error
+            model, data = self.model, self.data
+            bodies = set(robots.subtree(model, model.body(name).id))
+            # surface points (a mesh's vertices), not bounding-box corners, which
+            # inflate a turned mesh piece by up to 41 %
+            points = [
+                geom_points(model, g) @ data.geom_xmat[g].reshape(3, 3).T + data.geom_xpos[g]
+                for g in range(model.ngeom) if int(model.geom_bodyid[g]) in bodies
+            ]
+            if not points:
+                raise ValueError(f"prop {name!r} has no geoms")
+            points = np.vstack(points)
+            low, high = points.min(axis=0), points.max(axis=0)
+            return {"prop": name, "size_m": [round(float(v), 5) for v in high - low],
+                    "center_m": [round(float(v), 5) for v in (low + high) / 2],
+                    "top_z_m": round(float(high[2]), 5)}
 
         return self.run(read)
 

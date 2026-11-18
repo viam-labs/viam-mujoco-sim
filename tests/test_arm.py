@@ -2,12 +2,13 @@ import json
 import math
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import pytest
 
 from mujoco_module import robots
 from mujoco_module.handles import ArmHandle, JointTrajectoryPoint
-from mujoco_module.sim import WorldConfig
+from mujoco_module.sim import KNOWN_ASSETS, WorldConfig
 from viam.spatialmath import AxisAngle
 from conftest import BLOCK
 
@@ -376,3 +377,95 @@ def test_kinematics_collision_needs_geometries(sim, three_joint_files):
 def test_mesh_dir_is_only_for_a_urdf_arm(sim):
     with pytest.raises(ValueError, match="mesh_dir is for a .urdf mjcf"):
         make_arm(sim, mesh_dir="meshes")
+
+
+def test_an_mjcf_arm_without_kinematics_url_derives_them(sim, tmp_path):
+    mjcf = tmp_path / "three.xml"
+    mjcf.write_text(THREE_JOINT_MJCF)
+    arm = ArmHandle(sim, "mine", {"mjcf": str(mjcf)})
+    assert arm.joint_names() == ("a", "b", "c")
+    assert not arm.kinematics_urdf
+    sva = json.loads(arm.kinematics_data)
+    assert [j["id"] for j in sva["joints"]] == ["a", "b", "c"]
+    target = [0.5, -0.2, 0.4]
+    arm.set_joint_targets(target)
+    sim.advance(3.0)
+    assert arm.get_joint_positions() == pytest.approx(target, abs=0.01)
+
+
+@pytest.mark.parametrize("target", [[0.5, -0.3, 1.2, 0.2, 1.0, -0.4], [1.5, 0.8, 2.0, 1.0, 1.5, 0.5]])
+def test_the_bundled_lite6_mjcf_reaches_its_targets_without_its_kinematics_file(sim, target):
+    # fitted boxes are conservative; MuJoCo collides the arm's own meshes, so they can't jam it
+    attrs = {k: v for k, v in KNOWN_ASSETS["lite6"].items() if k != "kinematics_url"}
+    arm = ArmHandle(sim, "derived", attrs)
+    assert len(arm.joint_names()) == 6
+    arm.set_joint_targets(target)
+    sim.advance(6.0)
+    assert arm.get_joint_positions() == pytest.approx(target, abs=0.01)
+
+
+def viam_geoms(sim, arm):
+    return [g.name for g in map(sim.model.geom, range(sim.model.ngeom)) if g.name.startswith(f"{arm}/viam_")]
+
+
+def test_a_derived_arm_collides_as_its_mesh_but_a_kinematics_url_adds_fitted_shapes(sim, tmp_path):
+    attrs = {k: v for k, v in KNOWN_ASSETS["lite6"].items() if k != "kinematics_url"}
+    ArmHandle(sim, "derived", attrs)
+    assert viam_geoms(sim, "derived") == []
+    ArmHandle(sim, "vendor", dict(KNOWN_ASSETS["lite6"]))
+    assert viam_geoms(sim, "vendor")
+
+
+def test_an_arm_files_contact_options_reach_the_scene(sim, tmp_path, recwarn):
+    mjcf = tmp_path / "opt.xml"
+    mjcf.write_text(THREE_JOINT_MJCF.replace("<mujoco>", '<mujoco><option impratio="10" cone="elliptic"/>', 1))
+    ArmHandle(sim, "opt", {"mjcf": str(mjcf)})
+    assert sim.model.opt.impratio == 10
+    assert sim.model.opt.cone == mujoco.mjtCone.mjCONE_ELLIPTIC
+    assert not [w for w in recwarn if "ttach" in str(w.message)]
+
+
+def test_an_empty_kinematics_url_is_unset(sim, tmp_path):
+    mjcf = tmp_path / "three.xml"
+    mjcf.write_text(THREE_JOINT_MJCF)
+    assert ArmHandle(sim, "mine", {"mjcf": str(mjcf), "kinematics_url": ""}).derived
+
+
+def derived_lite6(**extra):
+    return {**{k: v for k, v in KNOWN_ASSETS["lite6"].items() if k != "kinematics_url"}, **extra}
+
+
+def test_a_derived_arm_serves_collision_hulls_and_visual_models_when_asked(sim):
+    shapes = ArmHandle(sim, "shapes", derived_lite6())
+    assert all("mesh_data" not in link.get("geometry", {}) for link in json.loads(shapes.kinematics_data)["links"])
+    assert shapes.visual_models == {}
+    meshes = ArmHandle(sim, "meshes", derived_lite6(planning_geometry="mesh", visual_models=True))
+    links = json.loads(meshes.kinematics_data)["links"]
+    shaped = [link["id"] for link in links if link.get("geometry")]
+    assert shaped and all(link["geometry"]["type"] == "mesh" for link in links if link.get("geometry"))
+    assert set(meshes.visual_models) == set(shaped)
+    # each GLB (visual meshes) sits on its PLY (collision hulls): the Lite6's differ by under 1 cm
+    import base64
+    import io
+
+    import trimesh
+
+    for link in links:
+        if link.get("geometry"):
+            lines = base64.b64decode(link["geometry"]["mesh_data"]).decode().splitlines()
+            count = int(next(line for line in lines if line.startswith("element vertex")).split()[-1])
+            first = lines.index("end_header") + 1
+            hull = np.array([[float(v) for v in line.split()] for line in lines[first:first + count]])
+            glb = trimesh.load(io.BytesIO(meshes.visual_models[link["id"]]), file_type="glb", force="scene").bounds
+            np.testing.assert_allclose(glb, [hull.min(axis=0), hull.max(axis=0)], atol=0.01, err_msg=link["id"])
+
+
+@pytest.mark.parametrize("extra", [{"planning_geometry": "mesh"}, {"visual_models": True}])
+def test_meshes_and_models_are_only_for_derived_kinematics(sim, extra):
+    with pytest.raises(ValueError, match="only for an arm whose kinematics are derived"):
+        ArmHandle(sim, "vendor", {**KNOWN_ASSETS["lite6"], **extra})
+
+
+def test_mesh_planning_geometry_cannot_be_kinematics_collision(sim):
+    with pytest.raises(ValueError, match='planning_geometry "mesh" needs collision "mesh"'):
+        ArmHandle(sim, "both", derived_lite6(planning_geometry="mesh", collision="kinematics"))

@@ -32,7 +32,7 @@ Attributes:
                         drops the default sun. See the README.
 
 DoCommand: status, play, pause, reset, set_prop_pose, get_prop_pose,
-park_props, reimport. Shapes match the viam-labs:isaac-sim world.
+measure, park_props, reimport. Shapes match the viam-labs:isaac-sim world.
 """
 
 import asyncio
@@ -302,6 +302,10 @@ class MujocoWorld(Generic, EasyResource):
                 raise ValueError("park_props requires props: a list of prop names")
             return sim.park_props(props)
         prop = str(command.get("prop", ""))
+        if cmd == "measure":
+            if not prop:
+                raise ValueError("measure requires prop")
+            return sim.prop_extent(prop)
         if cmd == "get_prop_pose":
             if not prop:
                 raise ValueError("get_prop_pose requires prop")

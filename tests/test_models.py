@@ -57,6 +57,12 @@ def test_validate_returns_world_and_arm_dependencies():
         )
 
 
+def test_world_measure_docommand(cell):
+    world, _, _ = cell
+    m = run(world.do_command({"command": "measure", "prop": "pick_block"}))
+    assert m["prop"] == "pick_block" and m["size_m"] == pytest.approx([0.0313] * 3, abs=1e-4)
+
+
 def test_world_commands(cell):
     world, _, _ = cell
     status = run(world.do_command({"command": "status"}))
@@ -768,12 +774,13 @@ def test_arm_kinematics_url_may_be_a_path(running_sim, tmp_path):
     "attrs, message",
     [
         ({"asset": "lite6", "mjcf": "x.xml", "kinematics_url": "k.json"}, "asset or mjcf, not both"),
-        ({"mjcf": "ufactory_lite6/lite6.xml"}, "mjcf needs kinematics_url"),
         ({"mjcf": "nope.xml", "kinematics_url": "ufactory_lite6/lite6_kinematics.json"}, "mjcf: file .*nope.xml not found"),
         ({"asset": "lite6", "joints": "joint1"}, "joints must be a list"),
         ({"asset": "lite6", "flange_site": 3}, "flange_site must be a name"),
         ({"asset": "lite6", "mesh_dir": 3}, "mesh_dir must be a folder path"),
         ({"asset": "lite6", "collision": "hull"}, 'collision must be "kinematics" or "mesh"'),
+        ({"asset": "lite6", "planning_geometry": "hull"}, 'planning_geometry must be "shapes" or "mesh"'),
+        ({"asset": "lite6", "visual_models": "yes"}, "visual_models must be true or false"),
         ({"asset": "lite6", "flange_offset": {"orientation": {"theta": "half"}}}, "flange_offset"),
     ],
 )
