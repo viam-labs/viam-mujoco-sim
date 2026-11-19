@@ -189,3 +189,40 @@ def test_point_cloud_projects_onto_the_color_image(sim):
     rows, cols = np.nonzero(shown)
     assert np.mean(u[block]) == pytest.approx(cols.mean(), abs=2)
     assert np.mean(v[block]) == pytest.approx(rows.mean(), abs=2)
+
+
+def test_a_slow_camera_stream_doesnt_hold_up_the_physics(running_sim, monkeypatch):
+    import threading
+    import time
+
+    import mujoco
+
+    from mujoco_module.sim import WorldConfig
+
+    running_sim.configure_world(WorldConfig.from_attrs({"props": []}))
+    camera = CameraHandle(running_sim, "cam", {"width": 64, "height": 48})
+    camera.get_rgb()
+    slow = mujoco.Renderer.render
+
+    def render(self, *args, **kwargs):
+        time.sleep(0.15)  # a frame slower than the step loop's 100 ms slip threshold
+        return slow(self, *args, **kwargs)
+
+    monkeypatch.setattr(mujoco.Renderer, "render", render)
+    stop, frames = threading.Event(), []
+
+    def stream():
+        while not stop.is_set():
+            frames.append(camera.get_rgb())
+
+    start_sim, slips = running_sim.run(lambda: running_sim.data.time), running_sim.slips
+    start = time.monotonic()
+    thread = threading.Thread(target=stream)
+    thread.start()
+    time.sleep(2.0)
+    stop.set()
+    thread.join()
+    advanced = running_sim.run(lambda: running_sim.data.time) - start_sim
+    assert len(frames) >= 8  # it streamed
+    assert running_sim.slips == slips  # the step loop never fell behind
+    assert advanced == pytest.approx(time.monotonic() - start, rel=0.1)
