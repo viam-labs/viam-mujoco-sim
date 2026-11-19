@@ -143,7 +143,7 @@ def test_the_gripper_model_serves_the_shape_in_its_configured_frame(running_sim)
 
 
 def test_a_gripper_in_its_arm_s_own_file_serves_its_bodies_open_and_closed(sim):
-    arm = ArmHandle(sim, "arm", {"asset": "lite6"})
+    ArmHandle(sim, "arm", {"asset": "lite6"})
     gripper = GripperHandle(sim, "g", "arm", {})
     served = by_label(gripper)
     assert served and len(served) == len(gripper.geometries)
