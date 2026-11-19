@@ -144,6 +144,13 @@ class RobotHandle:
             if name and f"actuator:{name}" not in claimed:
                 data.ctrl[model.actuator(self.prefix + name).id] = own.key_ctrl[self._key, actuator]
 
+    @property
+    def home_ctrl(self) -> np.ndarray:
+        """The home keyframe's controls (zeros without one), in the file's actuator order."""
+        if self._key < 0:
+            return np.zeros(self.model.nu)
+        return self.model.key_ctrl[self._key].copy()
+
     def geometries(self) -> list[Geometry]:
         """The file's fixed parts, in the robot's frame, mm: colliding geoms on
         bodies welded to its root, other than the bodies a jointed body hangs

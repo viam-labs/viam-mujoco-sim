@@ -24,6 +24,9 @@ Attributes:
   max_angular_dps (float)         - top yaw rate; scales SetPower (default as above)
   move_timeout_margin_sec (float) - sim time MoveStraight/Spin may go without
                                     progress before they fail as stalled (default 2)
+  planning_geometry (string)      - what GetGeometries serves: "box" (default), one box
+                                    around the chassis's collision geoms; "mesh", those
+                                    geoms' convex hulls as one mesh
 
 Place it with the standard frame; frame.parent must be "world". The frame is
 on the floor under the chassis, +Y forward, as in Viam's base frame.
@@ -37,7 +40,7 @@ import numpy as np
 from typing_extensions import Self
 from viam.components.base import Base
 from viam.proto.app.robot import ComponentConfig
-from viam.proto.common import Geometry, Pose, RectangularPrism, ResourceName, Vector3
+from viam.proto.common import Geometry, Mesh, Pose, RectangularPrism, ResourceName, Vector3
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
@@ -90,6 +93,8 @@ class MujocoBase(Base, EasyResource):
                 raise ValueError(f"{name}: mjcf must be an .xml (MJCF) or .urdf file, got {path.name}")
         if attrs.get("drive", "ideal") not in ("ideal", "wheels"):
             raise ValueError(f'{name}: drive must be "ideal" or "wheels"')
+        if attrs.get("planning_geometry", "box") not in ("box", "mesh"):
+            raise ValueError(f'{name}: planning_geometry must be "box" or "mesh"')
         if "chassis" in attrs and (not isinstance(attrs["chassis"], str) or not attrs["chassis"]):
             raise ValueError(f"{name}: chassis must be a body name")
         if "mesh_dir" in attrs and (not isinstance(attrs["mesh_dir"], str) or not attrs["mesh_dir"]):
@@ -196,8 +201,12 @@ class MujocoBase(Base, EasyResource):
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
         """A box around the chassis's collision geoms (not the wheels or
-        casters), in the base's frame."""
-        box = self._h().base.box
+        casters), or with planning_geometry "mesh" their convex hulls, in the base's frame."""
+        handle = self._h()
+        if handle.chassis_mesh is not None:
+            return [Geometry(center=Pose(o_z=1), mesh=Mesh(content_type="ply", mesh=handle.chassis_mesh),
+                             label=f"{self.name}-chassis")]
+        box = handle.base.box
         if box is None:
             return []
         (cx, cy, cz), (sx, sy, sz) = (value * 1000 for value in box)

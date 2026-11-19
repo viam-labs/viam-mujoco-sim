@@ -142,9 +142,34 @@ def test_the_gripper_model_serves_the_shape_in_its_configured_frame(running_sim)
     assert abs(served["right_pad1:open"].center.z) < 30  # round the configured tool point
 
 
-def test_a_gripper_in_its_arm_s_own_file_serves_nothing(sim):
+def test_a_gripper_in_its_arm_s_own_file_serves_its_bodies_open_and_closed(sim):
     ArmHandle(sim, "arm", {"asset": "lite6"})
-    assert GripperHandle(sim, "g", "arm", {}).geometries == []
+    gripper = GripperHandle(sim, "g", "arm", {})
+    served = by_label(gripper)
+    assert served and len(served) == len(gripper.geometries)
+    # only the gripper's geoms (its file names them gripper_*), not the arm's links
+    assert {label.split(":")[0] for label in served} == {
+        "gripper_lite_body_c", "gripper_left_finger_base", "gripper_left_finger",
+        "gripper_right_finger_base", "gripper_right_finger"}
+    assert any(label.endswith(":closed") for label in served)  # the jaws move
+    # measured from the flange: the Lite6's gripper hangs within ~90 mm below it (its frame's z)
+    z = np.concatenate([ply_vertices(g)[:, 2] for g in gripper.geometries])
+    assert z.min() > -20 and z.max() < 120
+
+
+def test_a_robot_files_gripper_serves_its_finger_open_and_closed(sim, tmp_path):
+    import test_robot_file
+
+    path = tmp_path
+    (path / "torso.xml").write_text(test_robot_file.TORSO)
+    (path / "left.json").write_text(json.dumps(test_robot_file.kinematics(-1)))
+    test_robot_file.robot(sim, path)
+    ArmHandle(sim, "left-arm", test_robot_file.limb(path, "left"))
+    served = by_label(GripperHandle(sim, "g", "left-arm", {}))
+    # the finger box (left/finger:0) slides 40 mm along the flange site's x; the forearm isn't served
+    assert set(served) == {"left/finger:0:open", "left/finger:0:closed"}
+    opened, closed = served["left/finger:0:open"].center, served["left/finger:0:closed"].center
+    assert (closed.x - opened.x, closed.y - opened.y, closed.z - opened.z) == pytest.approx((40, 0, 0), abs=0.5)
 
 
 def gripper_config(attrs, parent=None):

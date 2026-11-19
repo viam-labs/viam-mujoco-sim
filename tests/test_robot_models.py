@@ -33,6 +33,9 @@ def test_validate():
         ["sim-world", "tiago-base"], [])
     limb = config("left-arm", {"robot": "tiago", "asset": "tiago_arm_left"}, parent="torso")
     assert MujocoArm.validate_config(limb)[0] == ["sim-world", "torso"]
+    # with no kinematics_url, a limb's kinematics are derived from its robot's file
+    derived = config("left-arm", {"robot": "bot", "joints": ["left/shoulder"], "visual_models": True}, parent="bot")
+    assert MujocoArm.validate_config(derived)[0] == ["sim-world", "bot"]
 
 
 @pytest.mark.parametrize("cls,cfg,message", [
@@ -43,7 +46,6 @@ def test_validate():
     (MujocoArm, config("a", {"robot": "aloha", "mjcf": "x.xml"}, parent="aloha"), "set robot, or mjcf/asset, not both"),
     (MujocoArm, config("a", {"robot": "aloha", "asset": "ur5e"}, parent="aloha"), "set robot, or mjcf/asset, not both"),
     (MujocoArm, config("a", {"robot": "aloha"}, parent="aloha"), "needs joints"),
-    (MujocoArm, config("a", {"robot": "aloha", "joints": ["j"]}, parent="aloha"), "needs kinematics_url"),
     (MujocoArm, config("a", {"robot": "aloha", "asset": "aloha_left", "collision": "kinematics"}, parent="aloha"),
      'collision "kinematics" is not supported'),
     (MujocoArm, config("a", {"robot": "aloha", "asset": "aloha_left"}), 'needs frame.parent "aloha" or another of its arms'),

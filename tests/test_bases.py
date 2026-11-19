@@ -3,6 +3,7 @@ import shutil
 from pathlib import Path
 
 import mujoco
+import numpy as np
 import pytest
 
 from mujoco_module import bases, robots
@@ -83,6 +84,22 @@ def test_differential_drive_with_a_caster(tmp_path):
     assert base.mass == pytest.approx(2.22)
     center, size = base.box
     assert center == pytest.approx([0, 0, 0.08]) and size == pytest.approx([0.2, 0.3, 0.08])
+
+
+def ply_points(ply: bytes) -> np.ndarray:
+    head, body = ply.decode().split("end_header\n", 1)
+    count = int(next(line for line in head.splitlines() if line.startswith("element vertex")).split()[-1])
+    return np.array([[float(v) for v in row.split()] for row in body.splitlines()[:count]])
+
+
+@pytest.mark.parametrize("xml", ["DIFF", "SKID"])
+def test_the_chassis_mesh_spans_the_chassis_box_in_the_base_frame(tmp_path, xml):
+    model = base_model(tmp_path, globals()[xml])
+    base = bases.infer(model, "base.xml")
+    points = ply_points(bases.chassis_mesh(model, base))  # metres, the viam frame (turned and lifted)
+    center, size = base.box
+    assert points.min(axis=0) == pytest.approx(center - size / 2, abs=1e-6)
+    assert points.max(axis=0) == pytest.approx(center + size / 2, abs=1e-6)
 
 
 def test_take_chassis_drops_the_free_joint_and_the_file_pose(tmp_path):

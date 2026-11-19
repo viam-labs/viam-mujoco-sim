@@ -13,6 +13,9 @@ Attributes:
   depth (bool)             - GetImages also returns a "depth" image (default false)
   depth_width / depth_height (int) - depth image and point cloud size
                              (default half of width / height)
+  near_m (float)           - near clip plane in meters (default MuJoCo's: 1% of
+                             the scene's size); set it small for a camera that
+                             must see something a few cm away
 
 Place it with the standard frame (translation in mm). frame.parent is "world"
 or another mujoco-sim component: an arm, to mount the camera on its end
@@ -41,7 +44,7 @@ from viam.resource.types import Model, ModelFamily
 from .. import FAMILY, NAMESPACE
 from ..handles import CameraHandle, encode_depth, encode_pcd
 from ..sim import SimManager
-from .utils import apply_frame_to_attrs, get_attrs, validate_sim_component
+from .utils import apply_frame_to_attrs, get_attrs, positive_number, validate_sim_component
 
 
 class MujocoCamera(Camera, EasyResource):
@@ -83,6 +86,8 @@ class MujocoCamera(Camera, EasyResource):
             or not 0 < fov < 180
         ):
             raise ValueError(f"{config.name}: fov_deg must be finite and between 0 and 180")
+        if attrs.get("near_m") is not None:
+            positive_number(config.name, attrs, "near_m", 0.0)
         if not isinstance(attrs.get("depth", False), bool):
             raise ValueError(f"{config.name}: depth must be true or false")
         mounted = config.HasField("frame") and config.frame.parent != "world"

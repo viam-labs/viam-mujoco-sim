@@ -37,12 +37,15 @@ def check_joint(model: mujoco.MjModel, joint: int, label: str) -> None:
         )
 
 
-def chain_joints(model: mujoco.MjModel, flange_site: int, label: str) -> list[int]:
+def chain_joints(model: mujoco.MjModel, flange_site: int, label: str, base_body: int = 0) -> list[int]:
     """The arm's joints, base first: the hinge and slide joints on the flange
-    site's body and its ancestors. Each chain body has at most one joint."""
+    site's body and its ancestors below base_body (the file's world, or a robot
+    limb's chain base). Each chain body has at most one joint."""
     joints = []
     body = int(model.site_bodyid[flange_site])
-    while body != 0:
+    while body != base_body:
+        if body == 0:
+            raise ValueError(f"{label}: the flange site doesn't hang from {model.body(base_body).name!r}")
         if int(model.body_jntnum[body]):
             first = int(model.body_jntadr[body])
             check_joint(model, first, label)
@@ -53,11 +56,13 @@ def chain_joints(model: mujoco.MjModel, flange_site: int, label: str) -> list[in
     return joints[::-1]
 
 
-def given_joints(model: mujoco.MjModel, names: Sequence[str], flange_site: int, label: str) -> list[int]:
+def given_joints(
+    model: mujoco.MjModel, names: Sequence[str], flange_site: int, label: str, base_body: int = 0
+) -> list[int]:
     """The configured `joints` names as ids. They must be exactly the flange
-    site's chain, base first: a skipped joint would be planned as fixed while
-    the sim leaves it free."""
-    chain = chain_joints(model, flange_site, label)
+    site's chain (below base_body), base first: a skipped joint would be
+    planned as fixed while the sim leaves it free."""
+    chain = chain_joints(model, flange_site, label, base_body)
     ids = []
     for name in names:
         joint = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)
@@ -291,10 +296,12 @@ def derive_sva(
     label: str,
     meshes: bool = False,
     models: dict[str, bytes] | None = None,
+    base_body: int = 0,
 ) -> dict:
     """SVA kinematics for the chain `joints` (chain_joints) ending at
-    flange_site, in the arm frame (base_offset from the MJCF world), at all
-    arm joints zero. Each body's collision shape goes on the link after its
+    flange_site, in the arm frame (base_body's pose times inverse(base_offset):
+    the MJCF's world, or a robot limb's chain base), at all arm joints zero. The
+    first link carries base_body and the bodies below it, not a parent limb's. Each body's collision shape goes on the link after its
     joint, since RDK poses a link's geometry in its parent's frame: a fitted box
     or capsule, or with `meshes` its collision hulls. With `models`, fills it
     with a GLB of each shaped link's visible geoms, in its shape's frame (where
@@ -309,11 +316,13 @@ def derive_sva(
 
     bodies = [int(model.jnt_bodyid[j]) for j in joints]
     names = [model.joint(j).name for j in joints]
-    # every body on the path from the root to the flange, under the jointed body
-    # (None: the base) whose shape folds in its geoms
+    # every body on the path from the root (or a limb's chain base) to the flange,
+    # under the jointed body (None: the base) whose shape folds in its geoms
     path, body = [], int(model.site_bodyid[flange_site])
     while body != 0:
         path.append(body)
+        if body == base_body:
+            break
         body = int(model.body_parentid[body])
     carried: dict[int | None, list[int]] = {}
     owner: int | None = None
@@ -341,11 +350,11 @@ def derive_sva(
                 models[entry["id"]] = visual_glb(model, data, visible, frame @ sva_pose(geometry, entry["id"]))
         return entry
 
-    to_mj = np.linalg.inv(base_offset)  # the arm frame's world pose
+    to_mj = world(base_body) @ np.linalg.inv(base_offset)  # the arm frame's world pose (body 0: the identity)
     links, sva_joints, parent = [], [], "world"
     for i, (joint, body) in enumerate(zip(joints, bodies)):
         if i == 0:
-            entry = link(model.body(body).name, parent, base_offset @ world(body), None, to_mj)
+            entry = link(model.body(body).name, parent, np.linalg.inv(to_mj) @ world(body), None, to_mj)
         else:
             above = bodies[i - 1]
             entry = link(model.body(body).name, parent, np.linalg.inv(world(above)) @ world(body), above, world(above))

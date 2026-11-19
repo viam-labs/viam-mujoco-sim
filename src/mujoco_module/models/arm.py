@@ -31,7 +31,8 @@ Attributes:
                                      geoms are turned off (so a gripper's geoms
                                      sitting directly on the last link's body stop
                                      colliding; use "mesh" for such MJCFs)
-  planning_geometry (string)       - derived kinematics only: "shapes" (default), a
+  planning_geometry (string)       - derived kinematics only (an .xml mjcf or a robot
+                                     limb, no kinematics_url): "shapes" (default), a
                                      fitted box or capsule per link; "mesh", the
                                      convex hulls of the link's MuJoCo collision
                                      geoms (what MuJoCo collides; slower to plan)
@@ -53,7 +54,7 @@ Attributes:
   path_max_step_deg (float)        - max per-joint delta between pushed targets
                                      (default 2.0)
   kinematics_url (string)          - the arm's Viam kinematics file (optional for an
-                                     .xml mjcf, derived when unset) (.json = SVA,
+                                     .xml mjcf or a robot limb, derived when unset) (.json = SVA,
                                      .urdf = URDF): http(s)://, file://, or a path
                                      (absolute, ~, or relative to assets/). Read
                                      when the arm is configured. A .urdf mjcf's
@@ -235,9 +236,8 @@ def _validate_limb(config: ComponentConfig, attrs: Mapping[str, Any]) -> None:
             f"{sorted(ROBOT_LIMB_ASSETS)})"
         )
     merged = {**ROBOT_LIMB_ASSETS.get(str(asset), {}), **attrs}
-    for key in ("joints", "kinematics_url"):
-        if not merged.get(key):
-            raise ValueError(f"{name}: an arm in a robot file needs {key}")
+    if not merged.get("joints"):
+        raise ValueError(f"{name}: an arm in a robot file needs joints")
     if merged.get("collision") == "kinematics":
         raise ValueError(f'{name}: collision "kinematics" is not supported for an arm in a robot file yet')
     # the robot or another of its arms: only the arm's construction can tell which
