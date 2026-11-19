@@ -35,8 +35,9 @@ Attributes:
                                      fitted box or capsule per link; "mesh", the
                                      convex hulls of the link's MuJoCo collision
                                      geoms (what MuJoCo collides; slower to plan)
-  visual_models (bool)             - derived kinematics only: serve each link's
-                                     visible geoms as a GLB through Get3DModels, for
+  visual_models (bool)             - derived or URDF kinematics (no kinematics_url):
+                                     serve each link's visible geoms (a URDF's
+                                     <visual>s) as a GLB through Get3DModels, for
                                      the 3D viewer (default false)
   position ([x,y,z] meters)        - fallback placement when no frame is set
   orientation_wxyz ([w,x,y,z])     - fallback orientation when no frame is set
@@ -90,6 +91,7 @@ import numpy as np
 from typing_extensions import Self
 from viam.components import KinematicsReturn
 from viam.components.arm import Arm, JointPositions, KinematicsFileFormat, Mesh, Pose
+from viam.errors import MethodNotImplementedError
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, ResourceName
 from viam.resource.base import ResourceBase
@@ -594,6 +596,11 @@ class MujocoArm(Arm, EasyResource):
         )
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
+        h = self._h()
+        if h.derived or h.own_urdf_kinematics:
+            # viam-server then poses the served kinematics' geometry at the current joints,
+            # labelled "<arm>:<link>" (RDK >= 1.15); an empty reply would suppress that
+            raise MethodNotImplementedError("get_geometries")
         return []
 
     async def do_command(

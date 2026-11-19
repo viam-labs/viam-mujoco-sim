@@ -241,3 +241,47 @@ def test_urdf_gripper_needs_one_driven_joint(sim, tmp_path, old, new, found):
     path.write_text(GRIPPER.read_text().replace(old, new))
     with pytest.raises(ValueError, match=rf"needs one movable joint that isn't a <mimic>, found {re.escape(found)}; use an MJCF gripper"):
         GripperHandle(sim, "g", "arm", {"mjcf": str(path)})
+
+
+def test_get_geometries_is_unimplemented_so_viam_server_poses_the_kinematics(sim):
+    from viam.errors import MethodNotImplementedError
+
+    from mujoco_module.models.arm import MujocoArm
+
+    import asyncio
+
+    arm = object.__new__(MujocoArm)
+    arm._handle = urdf_arm(sim)
+    with pytest.raises(MethodNotImplementedError):
+        asyncio.run(arm.get_geometries())
+
+
+def test_a_urdf_arm_serves_a_glb_per_visual_link_when_asked(sim, tmp_path):
+    import io
+
+    import trimesh
+
+    visual = '<visual><origin xyz="0.1 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry><material name="r"><color rgba="1 0 0 1"/></material></visual>'
+    old = '<collision><origin xyz="0.1 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry></collision>'
+    path = edited_arm(tmp_path, old, old + visual)
+    assert ArmHandle(sim, "off", {"mjcf": path, "flange_link": "tool0"}).visual_models == {}
+    arm = ArmHandle(sim, "arm", {"mjcf": path, "flange_link": "tool0", "visual_models": True})
+    assert set(arm.visual_models) == {"link2"}
+    scene = trimesh.load(io.BytesIO(arm.visual_models["link2"]), file_type="glb", force="scene")
+    # in the collider's frame: the visual sits on the collision's origin
+    assert scene.bounds == pytest.approx(np.array([[-0.08, -0.02, -0.02], [0.08, 0.02, 0.02]]), abs=1e-6)
+
+
+def test_visual_models_are_refused_with_a_kinematics_url(sim, tmp_path):
+    pruned = tmp_path / "boxes.urdf"
+    pruned.write_bytes(re.sub(rb"<mesh [^>]*/>", b'<box size="0.05 0.05 0.05"/>', robots.prune_urdf(ARM.read_bytes(), "tool0")))
+    with pytest.raises(ValueError, match="only for an arm whose kinematics come from its own"):
+        urdf_arm(sim, kinematics_url=str(pruned), visual_models=True)
+
+
+def test_an_unreadable_visual_mesh_is_skipped(sim, tmp_path, caplog):
+    old = '<collision><origin xyz="0.1 0 0"/><geometry><box size="0.16 0.04 0.04"/></geometry></collision>'
+    path = edited_arm(tmp_path, old, old + '<visual><geometry><mesh filename="package://x/meshes/a.dae"/></geometry></visual>')
+    (Path(path).parent / "meshes" / "a.dae").write_text("not a mesh")
+    arm = ArmHandle(sim, "arm", {"mjcf": path, "flange_link": "tool0", "visual_models": True})
+    assert arm.visual_models == {} and "a.dae" in caplog.text

@@ -38,6 +38,8 @@ Every joint needs a nonzero `<limit effort>` (Nm), which sizes its servo, and so
 
 Set `"mjcf"` on the gripper. A URDF gripper needs exactly one driven (non-`mimic`) joint, with `<limit effort>`. Anything more complex needs an MJCF. Run `cell.py measure --gripper <name>` and set the frame's `translation.z` to its `tcp_mm`.
 
+Grippers whose fingers are linked (`mimic` in their URDF) usually have an MJCF in Menagerie that works as is. The xArm gripper (`viam:ufactory:gripper`): `"mjcf": "<abs>/ufactory_xarm7/hand.xml"` (checked at Menagerie commit 370c439: TCP 160.6 mm, jaws 88.9 mm open), `"mount"` set to its arm. Its vendor URDF's linked fingers need hand-tuned grip force instead.
+
 ### Object from a mesh
 
 Add a prop with `"type": "mesh"`, `"mesh"` set to a URL or absolute path, a `scale` that gives meters (YCB is already in meters), a realistic `mass` (a mug is about 0.3 kg), and `texture` if there is one. Place it in this order:

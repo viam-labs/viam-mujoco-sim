@@ -326,3 +326,101 @@ def test_validate_import_geometry():
     assert MujocoWorld.validate_config(cfg(["pallet"])) == ([], [])
     with pytest.raises(ValueError, match="import_geometry must be a list of component names"):
         MujocoWorld.validate_config(cfg("pallet"))
+
+
+def test_props_return_to_their_spawn_poses_when_the_import_lands_and_arms_stay(running_sim, monkeypatch, fast):
+    from mujoco_module.handles import ArmHandle
+
+    # a block spawned on the deck, whose component shows up after 20 refreshes (~0.2 s)
+    connect(monkeypatch, {"pallet": ([DECK], Pose(x=1000, o_z=1))}, after=20)
+    block = {**BLOCK, "position": [1.0, 0.0, 0.16]}
+
+    def z():
+        return running_sim.run(lambda: float(running_sim.data.body("pick_block").xpos[2]))
+
+    async def run():
+        world = make_world(["pallet"], [block])
+        arm = ArmHandle(running_sim, "pick-arm", {"asset": "lite6"})
+
+        arm.set_joint_targets([0.3] * len(arm.get_joint_positions()))
+        await asyncio.sleep(0.1)
+        bent = arm.get_joint_positions()
+        assert max(map(abs, bent)) > 0.1
+        assert z() < 0.05  # fell to the floor: nothing to land on yet
+        assert await world._import_task == {"imported": ["pallet"], "from_frame": [], "missing": []}
+        assert z() == pytest.approx(0.16, abs=0.001)  # back at its spawn pose
+        await asyncio.sleep(0.3)
+        assert z() > 0.144  # and rests on the deck
+        assert arm.get_joint_positions() == pytest.approx(bent, abs=0.05)  # arms keep their pose
+        await world.close()
+
+    asyncio.run(run())
+
+
+def test_a_reimport_does_not_park_props(running_sim, monkeypatch, fast):
+    connect(monkeypatch, {"pallet": ([DECK], Pose(x=1000, o_z=1))})
+    block = {**BLOCK, "position": [1.0, 0.0, 0.16]}
+
+    async def run():
+        world = make_world(["pallet"], [block])
+        await world._import_task
+        running_sim.set_prop_pose("pick_block", [1.0, 0.3, 0.2], [1, 0, 0, 0])
+        await world.do_command({"command": "reimport"})
+        assert running_sim.run(lambda: float(running_sim.data.body("pick_block").xpos[1])) == pytest.approx(0.3, abs=0.01)
+        await world.close()
+
+    asyncio.run(run())
+
+
+def test_a_later_retry_does_not_park_again(running_sim, monkeypatch, fast):
+    parent = connect(monkeypatch, {"pallet": ([DECK], Pose(x=1000, o_z=1)), "late": ([BALL], Pose(o_z=1))})
+    late_ready = False
+    get_component = parent.get_component
+
+    def gated(name):
+        if name.name == "late" and not late_ready:
+            raise RuntimeError("not there yet")
+        return get_component(name)
+
+    parent.get_component = gated
+    block = {**BLOCK, "position": [1.0, 0.0, 0.16]}
+
+    async def run():
+        nonlocal late_ready
+        world = make_world(["pallet", "late"], [block])
+        while geom(running_sim, "import/pallet/deck") is None:  # the first landing
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        running_sim.set_prop_pose("pick_block", [1.0, 0.3, 0.2], [1, 0, 0, 0])
+        late_ready = True
+        assert (await world._import_task)["imported"] == ["late", "pallet"]
+        assert running_sim.run(lambda: float(running_sim.data.body("pick_block").xpos[1])) == pytest.approx(0.3, abs=0.01)
+        await world.close()
+
+    asyncio.run(run())
+
+
+def test_reconfigure_parks_props_only_for_a_new_import_component(running_sim, monkeypatch, fast):
+    connect(monkeypatch, {"pallet": ([DECK], Pose(x=1000, o_z=1)), "fence": ([BALL], Pose(o_z=1))})
+    block = {**BLOCK, "position": [1.0, 0.0, 0.16]}
+
+    def config(names, **extra):
+        attrs = {"real_time": False, "props": [block], "import_geometry": names, **extra}
+        return ComponentConfig(name="sim-world", attributes=dict_to_struct(attrs))
+
+    def y():
+        return running_sim.run(lambda: float(running_sim.data.body("pick_block").xpos[1]))
+
+    async def run():
+        world = make_world(["pallet"], [block])
+        await world._import_task
+        running_sim.set_prop_pose("pick_block", [1.0, 0.3, 0.2], [1, 0, 0, 0])
+        world.reconfigure(config(["pallet"], lighting={"headlight": 0.5}), {})  # lighting only
+        await world._import_task
+        assert y() == pytest.approx(0.3, abs=0.01)
+        world.reconfigure(config(["pallet", "fence"]), {})  # a new component
+        await world._import_task
+        assert y() == pytest.approx(0.0, abs=0.01)  # back at spawn
+        await world.close()
+
+    asyncio.run(run())

@@ -203,14 +203,17 @@ class ArmHandle:
         # served by GetKinematics with the kinematics: RDK reads a URDF's mesh collisions from them
         self.kinematics_meshes: dict[str, tuple[str, bytes]] = {}
         self.derived = False
-        # Get3DModels: a GLB of each link's visible geoms, keyed by link id (derived arms only)
+        # Get3DModels: a GLB of each link's visible geoms, keyed by link id (an arm whose kinematics
+        # come from its own MJCF or URDF)
         self.visual_models: dict[str, bytes] = {}
         meshes = attrs.get("planning_geometry", "shapes") == "mesh"
         derive = holder is None and not urdf and not attrs.get("kinematics_url")
-        if not derive and (meshes or attrs.get("visual_models")):
+        # the arm's own kinematics carry its geometry; GetGeometries leaves it to viam-server's fallback
+        self.own_urdf_kinematics = holder is None and urdf and not attrs.get("kinematics_url")
+        if not (derive or self.own_urdf_kinematics) and (meshes or attrs.get("visual_models")):
             raise ValueError(
                 f"{label}: planning_geometry \"mesh\" and visual_models are only for an arm whose "
-                "kinematics are derived from its MJCF (an .xml mjcf with no kinematics_url)"
+                "kinematics come from its own MJCF or URDF (no kinematics_url)"
             )
         if meshes and attrs.get("collision") == "kinematics":
             raise ValueError(
@@ -223,6 +226,10 @@ class ArmHandle:
             self.kinematics_meshes = robots.kinematics_meshes(
                 self.kinematics_data, robots.mesh_folder(self.mjcf, mesh_dir), where
             )
+            if attrs.get("visual_models"):
+                self.visual_models = robots.urdf_visual_glbs(
+                    self.kinematics_data, robots.mesh_folder(self.mjcf, mesh_dir), where
+                )
         elif derive:
             # an MJCF arm with no kinematics file (MuJoCo Menagerie's): derive them from the file
             from . import derive_kinematics
@@ -880,6 +887,8 @@ class BaseHandle:
         spec_cache = spec
 
         def build(spec: mujoco.MjSpec) -> None:
+            if sim.cfg is not None and sim.cfg.floor_z != 0.0:
+                raise ValueError(f"{label}: floor_z isn't supported with a mobile base")
             child = spec_cache.copy()  # the file isn't read again
             if self.drive == "ideal":
                 for actuator in list(child.actuators):
@@ -2274,10 +2283,10 @@ class ScaleHandle:
         return self._sim.run(apply)
 
 
-PARK_POSITION = (0.0, 0.0, -2.0)  # parked parcels wait here, collisions off, out of sight
+PARK_POSITION = (0.0, 0.0, -2.0)  # below the floor (floor_z); parked parcels wait here, collisions off, out of sight
 PARKED_HALF_M = (0.05, 0.05, 0.05)
 PARKED_KG = 0.1
-DESPAWN_BELOW_M = -0.5
+DESPAWN_BELOW_M = -0.5  # below the floor (floor_z)
 INFEED_GAP_M = 0.01  # between the belt's -Y end and the infeed spot
 MAX_SPAWN_YAW_RAD = math.radians(10)
 
@@ -2409,7 +2418,7 @@ class SpawnerHandle:
         def build(spec: mujoco.MjSpec) -> None:
             for i in range(self.pool_size):
                 body_name = self.body_name(i)
-                body = spec.worldbody.add_body(name=body_name, pos=list(PARK_POSITION))
+                body = spec.worldbody.add_body(name=body_name, pos=self._park_position())
                 body.add_freejoint(name=body_name)
                 parcel = self._live.get(i)
                 body.add_geom(
@@ -2505,13 +2514,20 @@ class SpawnerHandle:
         data.qpos[:] = qpos
         mujoco.mj_forward(model, data)
 
+    def _floor_z(self) -> float:
+        return self._sim.cfg.floor_z if self._sim.cfg is not None else 0.0
+
+    def _park_position(self) -> list[float]:
+        x, y, z = PARK_POSITION
+        return [x, y, self._floor_z() + z]
+
     def _park(self, model: mujoco.MjModel, data: mujoco.MjData, indices: Sequence[int]) -> None:
         ids = self._resolve(model) if model is not self._sim.model else self._now()
         for i in indices:
             self._live.pop(i, None)
             self._sim.dynamic_props.pop(self.body_name(i), None)
             self._set_fields(model, ids, i, None)
-            data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*PARK_POSITION, 1.0, 0.0, 0.0, 0.0]
+            data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*self._park_position(), 1.0, 0.0, 0.0, 0.0]
             data.qvel[ids.dof[i] : ids.dof[i] + 6] = 0.0
         self._settle(model, data)
 
@@ -2521,7 +2537,7 @@ class SpawnerHandle:
         ids = self._now()
         for i in range(self.pool_size):
             if i not in self._live:
-                sim.data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*PARK_POSITION, 1.0, 0.0, 0.0, 0.0]
+                sim.data.qpos[ids.qpos[i] : ids.qpos[i] + 7] = [*self._park_position(), 1.0, 0.0, 0.0, 0.0]
                 sim.data.qvel[ids.dof[i] : ids.dof[i] + 6] = 0.0
         gone = [i for i in self._live if self._despawned(sim.data.xpos[ids.body[i]])]
         if gone:
@@ -2533,7 +2549,7 @@ class SpawnerHandle:
             self._next_s = self.interval_s  # spawned, or skipped for want of a free parcel
 
     def _despawned(self, position: np.ndarray) -> bool:
-        return position[2] < DESPAWN_BELOW_M or any(
+        return position[2] < self._floor_z() + DESPAWN_BELOW_M or any(
             np.all(np.abs(position - center) <= half) for center, half in self._despawn
         )
 

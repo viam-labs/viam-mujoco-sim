@@ -462,7 +462,7 @@ def test_a_derived_arm_serves_collision_hulls_and_visual_models_when_asked(sim):
 
 @pytest.mark.parametrize("extra", [{"planning_geometry": "mesh"}, {"visual_models": True}])
 def test_meshes_and_models_are_only_for_derived_kinematics(sim, extra):
-    with pytest.raises(ValueError, match="only for an arm whose kinematics are derived"):
+    with pytest.raises(ValueError, match="only for an arm whose kinematics come from its own MJCF or URDF"):
         ArmHandle(sim, "vendor", {**KNOWN_ASSETS["lite6"], **extra})
 
 

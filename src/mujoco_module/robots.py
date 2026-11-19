@@ -65,6 +65,15 @@ def quat(matrix: np.ndarray) -> np.ndarray:
     return result
 
 
+def _origin(element: ElementTree.Element | None) -> np.ndarray:
+    """A URDF <origin> (xyz, rpy) as a pose; identity without one."""
+    get = lambda key: _numbers(element.get(key) if element is not None else None, "0 0 0")
+    roll, pitch, yaw = get("rpy")
+    result = _axis_angle((0, 0, 1), yaw) @ _axis_angle((0, 1, 0), pitch) @ _axis_angle((1, 0, 0), roll)
+    result[:3, 3] = get("xyz")
+    return result
+
+
 def _axis_angle(axis: Sequence[float], angle: float) -> np.ndarray:
     axis = np.asarray(axis, float) / np.linalg.norm(axis)
     return transform(quat=(math.cos(angle / 2), *(math.sin(angle / 2) * axis)))
@@ -307,10 +316,7 @@ def _parse_urdf(root: ElementTree.Element, label: str) -> Kinematics:
     for joint in joints:
         name, kind = joint.get("name"), joint.get("type")
         origin = joint.find("origin")
-        xyz = _numbers(origin.get("xyz") if origin is not None else None, "0 0 0")
-        roll, pitch, yaw = _numbers(origin.get("rpy") if origin is not None else None, "0 0 0")
-        offset = _axis_angle((0, 0, 1), yaw) @ _axis_angle((0, 1, 0), pitch) @ _axis_angle((1, 0, 0), roll)
-        offset[:3, 3] = xyz
+        offset = _origin(origin)
         axis = None
         if kind in ("revolute", "continuous", "prismatic"):
             element = joint.find("axis")
@@ -394,6 +400,55 @@ def kinematics_meshes(data: bytes, folder: Path, label: str) -> dict[str, tuple[
         key = re.sub(r"^package://[^/]+/", "", filename)
         meshes[key] = (kind, (folder / Path(filename).name).read_bytes())
     return meshes
+
+
+def urdf_visual_glbs(data: bytes, folder: Path, label: str) -> dict[str, bytes]:
+    """A GLB (m) of each link's <visual> geometry, keyed by link name, in the frame of the
+    link's <collision> (where a viewer draws a link's 3D model); a link with no collision gets
+    none (RDK merges a cylinder and two spheres into a capsule, which then sits at the first
+    collision's origin, offset from the others). A mesh that can't be read is skipped with a warning.
+    Meshes (STL, PLY, OBJ) are read by file name from `folder`, colours from the
+    <material>, textures dropped."""
+    import trimesh
+
+    root = ElementTree.fromstring(data)
+    colors = {m.get("name"): m.find("color").get("rgba") for m in root.iterfind("material") if m.find("color") is not None}
+    models = {}
+    for link in root.iterfind("link"):
+        collision, visuals = link.find("collision"), link.findall("visual")
+        if collision is None or not visuals:
+            continue
+        frame = np.linalg.inv(_origin(collision.find("origin")))
+        scene = trimesh.Scene()
+        for i, visual in enumerate(visuals):
+            shape = visual.find("geometry")[0]
+            if shape.tag == "mesh":
+                path = folder / Path(shape.get("filename")).name
+                try:
+                    mesh = trimesh.load_mesh(path, force="mesh")
+                except Exception as error:
+                    LOGGER.warning("%s: visual mesh %s skipped, can't be read (%s); Get3DModels takes STL, PLY or OBJ", label, path, error)
+                    continue
+                mesh.apply_scale(_numbers(shape.get("scale"), "1 1 1"))
+            elif shape.tag == "box":
+                mesh = trimesh.creation.box(extents=_numbers(shape.get("size"), "1 1 1"))
+            elif shape.tag == "cylinder":
+                mesh = trimesh.creation.cylinder(radius=float(shape.get("radius")), height=float(shape.get("length")))
+            else:
+                mesh = trimesh.creation.icosphere(radius=float(shape.get("radius")))
+            material = visual.find("material")
+            rgba = None
+            if material is not None:
+                own = material.find("color")
+                rgba = own.get("rgba") if own is not None else colors.get(material.get("name"))
+            rgba = _numbers(rgba, "0.5 0.5 0.5 1")
+            mesh.visual = trimesh.visual.TextureVisuals(
+                material=trimesh.visual.material.PBRMaterial(baseColorFactor=np.round(np.asarray(rgba) * 255).astype(np.uint8)))
+            mesh.apply_transform(frame @ _origin(visual.find("origin")))
+            scene.add_geometry(mesh, geom_name=f"visual{i}")
+        if scene.geometry:
+            models[link.get("name")] = scene.export(file_type="glb")
+    return models
 
 
 def parse_kinematics(data: bytes, urdf: bool, label: str) -> Kinematics:

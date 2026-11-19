@@ -150,6 +150,7 @@ viam-server starts it first. Sim time is paced to wall time by default.
 | `import_geometry` | list | No | `[]` | Names of components, of any module, whose geometry becomes fixed and physical; see [Importing geometry from other modules](#importing-geometry-from-other-modules). |
 | `floor_texture` | string | No | | A `.png` or `.jpg` image tiled across the floor: a path, an assets-relative path (the module bundles `textures/concrete.png` and `textures/cardboard.png`) or an https URL. |
 | `floor_texture_size` | float | No | `1` | One floor tile's edge in meters. Only with `floor_texture`. |
+| `floor_z` | float | No | `0` | Height of the floor in meters, at or below 0. Lower it when the world origin isn't on the floor, as in a twin of a real cell whose origin is the arm base on a table. Not supported with a mobile base. Conveyor, rail and gantry legs still end at z = 0 and float above a lowered floor. |
 | `lighting` | object | No | | Lights, headlight, skybox and render quality for cameras; see [Lighting](#lighting). |
 
 Each prop:
@@ -254,7 +255,7 @@ They are not dependencies: viam-server would otherwise rebuild the world, and
 reset the sim, whenever one of them changed. A component that isn't there yet
 (or a lost connection) is retried every 2 s for 60 s, then logged as an error.
 mujoco-sim's own components (already in the scene) are skipped. Run `reimport`
-after editing an imported component.
+after editing an imported component. When imported geometry first arrives after the world is configured, movable props go back to their spawn poses, so props can rest on it; arms, parcels and props spawned later are left alone.
 
 When a component doesn't implement `GetGeometries`, or returns no box, sphere
 or capsule, the import falls back to the `geometry` in that component's
@@ -360,7 +361,7 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
 | `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` (always `"mesh"` for derived kinematics) | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
 | `planning_geometry` | string | No | `"shapes"` | Derived kinematics only. `"shapes"`: a fitted box or capsule per link. `"mesh"`: the convex hulls of each link's MuJoCo collision geoms, so the planner and the 3D viewer see what MuJoCo collides. Needs `collision` `"mesh"`. See [Derived kinematics](#derived-kinematics). |
-| `visual_models` | bool | No | `false` | Derived kinematics only. Serve each link's visible geoms as a GLB through `Get3DModels`, for the 3D viewer. |
+| `visual_models` | bool | No | `false` | Derived kinematics, or a URDF with no `kinematics_url`. Serve each link's visible geoms (a URDF's `<visual>`s) as a GLB through `Get3DModels`, for the 3D viewer. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -415,7 +416,8 @@ as it drives, so plan arm moves in the base's frame; see
 | `MoveThroughJointPositionsStreamed` | Follows timestamped points in sim time; each batch plays straight after the last. |
 | `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
 | `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes; for an `.xml` `mjcf` without one, the derived SVA file. |
-| `Get3DModels` | With `visual_models`, a GLB of each link's visible geoms keyed by link id; else none. |
+| `Get3DModels` | With `visual_models` (derived or URDF kinematics), a GLB of each link's visible geoms keyed by link id; else none. |
+| `GetGeometries` | Unimplemented for derived or URDF kinematics, so viam-server (RDK 1.15+) poses the kinematics' geometry itself, labelled `<arm>:<link>`; otherwise none. |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
 | `Stop` | Holds the current target, or the measured position if it interrupted a trajectory. |
 | `MoveToPosition` | Not supported; use the motion service. |
@@ -509,6 +511,18 @@ to get one from a xacro) and leave out `kinematics_url`:
   configuring fails and lists them. An explicit `kinematics_url` still wins:
   an SVA file needs `joints` set, and a URDF one can't have mesh collisions
   (the planner gets no mesh bytes with it).
+- **Geometries.** The collision geometry rides in `GetKinematics`, and
+  `GetGeometries` answers "unimplemented" so viam-server poses it at the
+  current joints itself (labelled `<arm>:<link>`; RDK 1.15 or later). It's
+  what the planner reads too.
+- **3D models.** `visual_models` `true` serves each link's `<visual>`s
+  (STL, PLY or OBJ meshes, boxes, cylinders, spheres, in their `<material>`
+  colours, textures dropped) through `Get3DModels` as a GLB keyed by link
+  name, in the frame of the link's first `<collision>` (RDK merges a cylinder
+  and two spheres into one capsule, so such a link's model may sit offset). A
+  link with no collision has no collider to draw on, so gets no model. A
+  visual mesh that can't be read (a DAE) is skipped with a warning. Not with
+  a `kinematics_url`.
 - **Joints and servos.** The arm's joints are the kinematics' joints. Each
   gets a position servo that reaches the joint's `<limit effort>` at about 2°
   of error, damped by the joint's inertia; a joint without an effort limit is

@@ -1,11 +1,11 @@
 ---
 name: mujoco-sim-cell
-description: Build a working simulated robot cell on Viam with the viam-labs:mujoco-sim MuJoCo module from a plain-language description ("a UR5e picks blocks into a bin behind a wall"). Creates the machine, writes its config, runs viam-server locally, runs and checks a pick-and-place task, and iterates until it works. Use when the user wants to simulate, prototype or try out a robot arm, gripper, conveyor, gantry or mobile base cell with Viam.
+description: Build a working simulated robot cell on Viam with the viam-labs:mujoco-sim MuJoCo module from a plain-language description ("a UR5e picks blocks into a bin behind a wall"). Creates the machine, writes its config, runs viam-server locally, runs and checks a pick-and-place task, and iterates until it works. Use when the user wants to simulate, prototype or try out a robot arm, gripper, conveyor, gantry or mobile base cell with Viam, or wants a sim twin of an existing Viam machine to test its code.
 ---
 
 # Build a mujoco-sim cell from a prompt
 
-MODULE_VERSION: 0.17.1
+MODULE_VERSION: 0.18.0
 
 Every config you write uses this registry module, pinned:
 
@@ -42,6 +42,10 @@ Turn the prompt into robot, end effector, objects, goal and sensors. Ask only ab
 ## 2a. Custom assets
 
 Only when something in the prompt isn't bundled: read `references/assets.md` (in this skill's directory) and follow it to source, place and check each asset before you compose. Custom assets need `MODULE_VERSION` 0.17.0 or later.
+
+## 2b. Twin of a real machine
+
+When the user names a real Viam machine to copy, read `references/twin.md` (in this skill's directory) and follow it instead of composing from scratch. It needs `MODULE_VERSION` 0.18.0 or later.
 
 ## 2. Compose
 

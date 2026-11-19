@@ -23,6 +23,9 @@ Attributes:
                         the same kind of image, on each of its faces. Cameras
                         see textures; the 3D viewer uses color.
   floor_texture_size (float) - one floor tile's edge in meters (default 1)
+  floor_z (float)     - the floor's height in meters, at or below 0 (default
+                        0). Lower it when the origin isn't on the floor.
+                        Not with a mobile base.
   lighting (object)   - how cameras see the scene: lights ({type:
                         "directional" | "spot" | "point", position,
                         direction, color, shadows, cutoff_deg}; replaces the
@@ -146,6 +149,7 @@ class MujocoWorld(Generic, EasyResource):
         self._import_names: list[str] = []
         self._import_task: asyncio.Task | None = None
         self._imported = False  # this world set the import contribution
+        self._park_on_import = False  # set by reconfigure: the first landing parks the props
 
     @classmethod
     def new(
@@ -184,9 +188,11 @@ class MujocoWorld(Generic, EasyResource):
             textures["floor"] = load_texture("floor_texture", cfg.floor_texture)
         sim = SimManager.get()
         sim.configure_world(cfg, pieces, textures)
-        self._import_names = _import_names(attrs)
+        old_names, self._import_names = self._import_names, _import_names(attrs)
         if self._import_names:
-            # new() runs on the module's event loop; the components come later
+            # new() runs on the module's event loop; the components come later.
+            # Props can only have fallen if no import is in the scene yet or a component is new.
+            self._park_on_import = not self._imported or bool(set(self._import_names) - set(old_names))
             self._start_import()
         else:
             sim.remove_contribution(IMPORT)
@@ -251,6 +257,10 @@ class MujocoWorld(Generic, EasyResource):
             if added:
                 await asyncio.to_thread(SimManager.get().set_contribution, IMPORT, _contribution(dict(imported)))
                 self._imported = True
+                if self._park_on_import:  # not on a reimport or a later retry
+                    self._park_on_import = False
+                    # props fell for want of this geometry: back to their spawn poses
+                    await asyncio.to_thread(SimManager.get().park_movable_props)
             if not pending or loop.time() >= deadline:
                 break
             await asyncio.sleep(IMPORT_RETRY_S)

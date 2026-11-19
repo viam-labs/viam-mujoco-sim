@@ -265,3 +265,43 @@ def test_world_component_loads_its_textures(running_sim, tmp_path):
 @pytest.mark.parametrize("name", ["textures/cardboard.png", "textures/concrete.png"])
 def test_bundled_textures_load(name):
     assert load_texture("bundled", name)[:2] == (512, 512)
+
+
+def floor_z(sim):
+    return float(sim.model.geom("floor").pos[2])
+
+
+def test_floor_is_at_zero_by_default(sim):
+    assert floor_z(sim) == 0.0
+
+
+def test_floor_z_lowers_the_floor(sim):
+    prop = {"name": "p", "size": 0.1, "position": [0, 0, -0.5]}
+    sim.configure_world(WorldConfig.from_attrs({"floor_z": -0.9, "props": [prop]}))
+    assert floor_z(sim) == pytest.approx(-0.9)
+    sim.advance(1.5)
+    assert sim.data.body("p").xpos[2] == pytest.approx(-0.85, abs=0.01)
+
+
+@pytest.mark.parametrize("value,message", [
+    (0.1, "floor_z must be at or below 0"),
+    ("low", "floor_z must be a number"),
+    (float("nan"), "floor_z must be finite"),
+])
+def test_floor_z_validation(value, message):
+    with pytest.raises(ValueError, match=message):
+        WorldConfig.from_attrs({"floor_z": value})
+
+
+def test_floor_z_is_validated_by_the_world_model():
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.world import MujocoWorld
+
+    def check(attrs):
+        return MujocoWorld.validate_config(ComponentConfig(name="w", attributes=dict_to_struct(attrs)))
+
+    assert check({"floor_z": -0.9}) == ([], [])
+    with pytest.raises(ValueError, match="floor_z"):
+        check({"floor_z": 1})

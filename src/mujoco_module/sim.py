@@ -364,6 +364,7 @@ class WorldConfig:
     props: tuple[PropSpec, ...] = ()
     floor_texture: str | None = None  # image source; the world loads it
     floor_texture_size: float = 1.0  # one tile's edge, meters
+    floor_z: float = 0.0  # the floor's height, meters, at or below the origin
     lighting: LightingConfig = LightingConfig()
 
     @classmethod
@@ -377,6 +378,9 @@ class WorldConfig:
             floor_texture = parse_texture("floor_texture", attrs["floor_texture"])
         elif "floor_texture_size" in attrs:
             raise ValueError("floor_texture_size only applies with floor_texture")
+        floor_z = _finite(attrs.get("floor_z", 0.0), "floor_z")
+        if floor_z > 0.0:
+            raise ValueError("floor_z must be at or below 0, the origin")
         return cls(
             physics_dt=_positive(attrs.get("physics_dt", 0.002), "physics_dt"),
             real_time=_strict_bool(attrs.get("real_time", True), "real_time"),
@@ -385,6 +389,7 @@ class WorldConfig:
             floor_texture_size=_positive(
                 attrs.get("floor_texture_size", 1.0), "floor_texture_size"
             ),
+            floor_z=floor_z,
             lighting=LightingConfig.parse(
                 {} if attrs.get("lighting") is None else attrs["lighting"]
             ),
@@ -505,7 +510,7 @@ class SimManager:
         self._rtf_samples: deque[tuple[float, float]] = deque()
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._warned: set[str] = set()
-        self._floor_warned: list[str] = []  # the floor-replacing scenes last warned about
+        self._floor_warned: tuple[list[str], tuple[str, ...]] = ([], ())  # the floor-replacing scenes last warned about
         self._skybox_warned: list[str] = []  # the skyboxes last warned about
 
     # ------------------------------------------------------------------
@@ -656,12 +661,21 @@ class SimManager:
             spec, self.cfg.lighting, any(c.brings_lights for c in self._contributions.values())
         )
         floored = sorted(n for n, c in self._contributions.items() if c.replaces_floor)
-        if floored and self.cfg.floor_texture is not None and self._floor_warned != floored:
-            LOGGER.warning("floor_texture is ignored: scene %s brings its own floor", ", ".join(floored))
-        self._floor_warned = floored if self.cfg.floor_texture is not None else []
+        ignored = [
+            what for what, used in (("floor_texture", self.cfg.floor_texture is not None),
+                                    ("floor_z", self.cfg.floor_z != 0.0)) if used
+        ]
+        key = (floored, tuple(ignored))
+        if floored and ignored and self._floor_warned != key:
+            if "floor_texture" in ignored:
+                LOGGER.warning("floor_texture is ignored: scene %s brings its own floor", ", ".join(floored))
+            if "floor_z" in ignored:
+                LOGGER.warning("floor_z is ignored: scene %s brings its own floor", ", ".join(floored))
+        self._floor_warned = key if ignored else ([], ())
         if not floored:
             floor = spec.worldbody.add_geom(
                 name="floor",
+                pos=[0, 0, self.cfg.floor_z],
                 type=mujoco.mjtGeom.mjGEOM_PLANE,
                 size=[0, 0, 0.05],
                 rgba=[0.3, 0.35, 0.4, 1],
@@ -944,6 +958,16 @@ class SimManager:
                     "top_z_m": round(float(high[2]), 5)}
 
         return self.run(read)
+
+    def park_movable_props(self) -> None:
+        """park_props for every non-fixed prop, world's and scenes' (not arms)."""
+        def park() -> None:
+            if self.cfg is None:
+                return
+            names = [p.name for p in (*self.cfg.props, *self.scene_props()) if not p.fixed]
+            self.park_props(names)
+
+        self.run(park)
 
     def park_props(self, names: Sequence[str]) -> dict[str, Any]:
         def park() -> dict[str, Any]:

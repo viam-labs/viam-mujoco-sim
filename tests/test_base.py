@@ -394,3 +394,17 @@ def test_a_missing_mesh_names_the_file(sim, tmp_path):
     path.write_text('<mujoco><asset><mesh file="nope.stl"/></asset><worldbody><body name="b"/></worldbody></mujoco>')
     with pytest.raises(ValueError, match=r"cannot load mjcf .*missing.xml"):
         BaseHandle(sim, "b", {"mjcf": str(path)})
+
+
+def test_base_refuses_a_lowered_floor(sim):
+    from mujoco_module.sim import WorldConfig
+
+    sim.configure_world(WorldConfig.from_attrs({"floor_z": -0.9}))
+    with pytest.raises(ValueError, match="floor_z isn't supported with a mobile base"):
+        BaseHandle(sim, "rover", {"asset": "viam_rover"})
+
+
+def test_lowering_the_floor_under_a_base_rolls_back(rover, sim):
+    with pytest.raises(ValueError, match="floor_z isn't supported with a mobile base"):
+        sim.configure_world(WorldConfig.from_attrs({"floor_z": -0.9}))
+    assert sim.cfg.floor_z == 0.0

@@ -358,3 +358,30 @@ def test_urdf_named_xml_rejected(tmp_path):
     path.write_text('<robot name="r"><link name="a"/></robot>')
     with pytest.raises(ValueError, match="got a URDF"):
         load_scene("s", str(path))
+
+
+def test_floor_z_warning_with_a_scene_floor(sim, tmp_path, monkeypatch):
+    from mujoco_module import sim as sim_module
+    from mujoco_module.models.obstacle import obstacle_contribution
+    from mujoco_module.sim import WorldConfig
+    from test_obstacle import BOX, config as obstacle_config
+
+    warned = []
+    monkeypatch.setattr(sim_module.LOGGER, "warning", lambda *args: warned.append(args))
+    sim.configure_world(WorldConfig.from_attrs({"floor_z": -0.9}))
+    attach(sim, tmp_path)
+    sim.set_contribution("table", obstacle_contribution(obstacle_config(BOX, translation=(0, -1000, 10))))
+    assert [a[0] for a in warned].count("floor_z is ignored: scene %s brings its own floor") == 1
+
+
+def test_floor_z_added_after_a_scene_still_warns(sim, tmp_path, monkeypatch):
+    from mujoco_module import sim as sim_module
+    from mujoco_module.sim import WorldConfig
+    from test_textures import halves
+
+    warned = []
+    monkeypatch.setattr(sim_module.LOGGER, "warning", lambda *args: warned.append(args))
+    sim.configure_world(WorldConfig.from_attrs({"floor_texture": "/unused.png"}), textures={"floor": halves()})
+    attach(sim, tmp_path)
+    sim.configure_world(WorldConfig.from_attrs({"floor_texture": "/unused.png", "floor_z": -0.9}), textures={"floor": halves()})
+    assert [a[0] for a in warned].count("floor_z is ignored: scene %s brings its own floor") == 1

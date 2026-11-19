@@ -148,3 +148,42 @@ def test_parse_key_reads_the_clis_output_and_never_echoes_it():
     with pytest.raises(ValueError) as error:
         cell.parse_key("Key Value: s3cret\n")
     assert "s3cret" not in str(error.value)
+
+
+def test_twin_pose_reports_the_arm_that_failed_and_moves_the_rest(tmp_path, monkeypatch, capsys):
+    import argparse
+    import asyncio
+    import json
+    from contextlib import asynccontextmanager
+
+    from viam.components.arm import Arm
+
+    cell = load()
+    (tmp_path / "joints.json").write_text(json.dumps({"a": [0.0], "b": [1.0]}))
+
+    class FakeArm:
+        def __init__(self, name):
+            self.name = name
+
+        async def move_to_joint_positions(self, positions):
+            if self.name == "b":
+                raise RuntimeError("stuck")
+
+    @asynccontextmanager
+    async def fake_connect(path):
+        yield object()
+
+    monkeypatch.setattr(cell, "connect", fake_connect)
+    monkeypatch.setattr(Arm, "from_robot", staticmethod(lambda robot, name: FakeArm(name)))
+    asyncio.run(cell.twin_pose(argparse.Namespace(cell="x", dir=str(tmp_path))))
+    assert json.loads(capsys.readouterr().out) == {"moved": ["a"], "failed": {"b": "stuck"}}
+
+
+def test_twin_pose_without_joints_json_skips(tmp_path, capsys):
+    import argparse
+    import asyncio
+    import json
+
+    asyncio.run(load().twin_pose(argparse.Namespace(cell="x", dir=str(tmp_path))))
+    out = json.loads(capsys.readouterr().out)
+    assert out["moved"] == [] and out["failed"] == {} and "no joints.json" in out["skipped"]
