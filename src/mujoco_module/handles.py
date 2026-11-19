@@ -129,6 +129,8 @@ class _BaseIds:
     ctrl: np.ndarray  # ideal: the x, y and yaw actuators; wheels: each wheel's
     wheel_qpos: np.ndarray
     wheel_dof: np.ndarray
+    steer_qpos: np.ndarray  # swerve: each module's steer joint (ideal: set kinematically)
+    steer_dof: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -846,7 +848,8 @@ class BaseHandle:
         except ValueError as e:
             raise ValueError(f"{where}: cannot load mjcf {self.mjcf}: {e}") from e
         self.base = base = bases.infer(
-            model, where, attrs.get("wheels"), attrs.get("forward_axis"), attrs.get("wheel_radius_m")
+            model, where, attrs.get("wheels"), attrs.get("forward_axis"), attrs.get("wheel_radius_m"),
+            attrs.get("kinematics"),
         )
         # GetGeometries: the chassis's collision hulls, with planning_geometry "mesh" (else its box)
         self.chassis_mesh = bases.chassis_mesh(model, base) if attrs.get("planning_geometry") == "mesh" else None
@@ -864,6 +867,9 @@ class BaseHandle:
             attrs.get("move_timeout_margin_sec", DEFAULT_BASE_MOVE_MARGIN_S)
         )
         self.drive = str(attrs.get("drive", "ideal"))
+        self.swerve = base.kinematics == "swerve"
+        if self.swerve and self.drive == "wheels":
+            raise ValueError(f'{label}: drive "wheels" isn\'t supported for a swerve base yet; use "ideal"')
         self._linear_accel = float(meta.get("max_linear_accel_mps2", DEFAULT_BASE_ACCEL_MPS2))
         self._angular_accel = float(
             meta.get("max_angular_accel_rad_s2", 2 * self._linear_accel / base.track)
@@ -879,6 +885,8 @@ class BaseHandle:
         self._signs = np.array([wheel.sign for wheel in base.wheels])
         self._sides = np.array([-1.0 if wheel.left else 1.0 for wheel in base.wheels])
         self._v = 0.0  # latched forward speed, m/s
+        self._u = 0.0  # latched sideways speed (+ right), m/s: swerve only
+        self._steer = np.zeros(len(base.modules))  # swerve, ideal: the modules' steer angles, rad
         self._w = 0.0  # latched yaw rate, rad/s
         self._yaw = 0.0  # unwrapped yaw of the viam frame in the spawn frame
         self._goal: _BaseGoal | None = None
@@ -954,7 +962,8 @@ class BaseHandle:
 
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             data.ctrl[self._resolve(model).ctrl] = 0.0
-            self._v = self._w = self._yaw = self._integral = 0.0
+            self._v = self._u = self._w = self._yaw = self._integral = 0.0
+            self._steer = np.zeros(len(base.modules))
             self._drop_goal(RuntimeError(f"base {name!r} was reset"))
 
         sim.set_contribution(name, Contribution(build=build, init=init))
@@ -963,7 +972,7 @@ class BaseHandle:
     def close(self) -> None:
         def detach() -> None:
             self._sim.step_callbacks.pop(self._callback_key, None)
-            self._v = self._w = 0.0
+            self._v = self._u = self._w = 0.0
             self._drop_goal(
                 RuntimeError(f"base {self.name!r} was closed (removed or reconfigured)")
             )
@@ -978,6 +987,8 @@ class BaseHandle:
 
     def _resolve(self, model: mujoco.MjModel) -> _BaseIds:
         wheels = [model.joint(self._prefix + wheel.joint) for wheel in self.base.wheels]
+        wheels += [model.joint(self._prefix + module.drive) for module in self.base.modules]
+        steers = [model.joint(self._prefix + module.steer) for module in self.base.modules]
         if self.drive == "wheels":
             actuators = [self._wheel_actuators[wheel.joint] for wheel in self.base.wheels]
         else:
@@ -987,6 +998,8 @@ class BaseHandle:
             ctrl=np.array([model.actuator(self._prefix + name).id for name in actuators]),
             wheel_qpos=np.array([joint.qposadr[0] for joint in wheels]),
             wheel_dof=np.array([joint.dofadr[0] for joint in wheels]),
+            steer_qpos=np.array([joint.qposadr[0] for joint in steers], dtype=int),
+            steer_dof=np.array([joint.dofadr[0] for joint in steers], dtype=int),
         )
 
     def _now(self) -> tuple[mujoco.MjData, _BaseIds]:
@@ -1046,7 +1059,20 @@ class BaseHandle:
             sides = v + self._sides * w * self.base.track / 2
             data.ctrl[ids.ctrl] = self._signs * sides / self.base.radius
             return
-        data.ctrl[ids.ctrl] = (-self._v * math.sin(yaw), self._v * math.cos(yaw), self._w)
+        c, s = math.cos(yaw), math.sin(yaw)
+        data.ctrl[ids.ctrl] = (self._u * c - self._v * s, self._u * s + self._v * c, self._w)
+        if self.swerve:
+            # each module steers to the commanded motion (as a real swerve's controller does: the
+            # measured one wobbles at rest), and its wheel rolls as far as the base moved its way
+            angles, _ = bases.swerve_targets(self.base.modules, self._u, self._v, self._w, self._steer)
+            self._steer = angles
+            data.qpos[ids.steer_qpos] = angles
+            rolls = bases.swerve_rolls(
+                self.base.modules, angles, float(velocity[3]), float(velocity[4]), float(velocity[2])
+            )
+            data.qpos[ids.wheel_qpos] += rolls * dt / self.base.radius
+            data.qvel[ids.steer_dof] = data.qvel[ids.wheel_dof] = 0.0
+            return
         # turn the wheels by the distance each side travelled
         speeds = velocity[4] + self._sides * velocity[2] * self.base.track / 2
         data.qpos[ids.wheel_qpos] += self._signs * speeds * dt / self.base.radius
@@ -1097,7 +1123,7 @@ class BaseHandle:
         `error` when given. Sim thread only."""
         goal, self._goal = self._goal, None
         if goal is not None:
-            self._v = self._w = 0.0
+            self._v = self._u = self._w = 0.0
             if error is not None:
                 _fail(goal.future, error)
 
@@ -1106,23 +1132,28 @@ class BaseHandle:
 
     # -- public API ---------------------------------------------------------
 
-    def set_velocity(self, linear_mps: float, angular_rad_s: float) -> None:
-        """Latch forward speed and yaw rate (positive = left), clamped to the maxima."""
-        if not (math.isfinite(linear_mps) and math.isfinite(angular_rad_s)):
+    def set_velocity(self, linear_mps: float, angular_rad_s: float, lateral_mps: float = 0.0) -> None:
+        """Latch forward speed, yaw rate (positive = left) and, for a swerve base,
+        sideways speed (positive = right), clamped to the maxima (the two linear
+        speeds together, as one vector)."""
+        if not all(math.isfinite(value) for value in (linear_mps, angular_rad_s, lateral_mps)):
             raise ValueError("velocity must be finite")
-        v = float(np.clip(linear_mps, -self.max_linear_mps, self.max_linear_mps))
+        if lateral_mps and not self.swerve:
+            raise ValueError(f"base {self.name!r}: sideways motion needs a swerve base")
+        scale = min(1.0, self.max_linear_mps / max(math.hypot(linear_mps, lateral_mps), 1e-12))
+        v, u = float(linear_mps * scale), float(lateral_mps * scale)
         w = float(np.clip(angular_rad_s, -self.max_angular_rad_s, self.max_angular_rad_s))
 
         def apply() -> None:
             self._replace_goal("move was superseded by a new command")
-            self._v, self._w = v, w
+            self._v, self._u, self._w = v, u, w
 
         self._sim.run(apply)
 
     def stop(self) -> None:
         def apply() -> None:
             self._replace_goal("move was stopped")
-            self._v = self._w = 0.0
+            self._v = self._u = self._w = 0.0
 
         self._sim.run(apply)
 

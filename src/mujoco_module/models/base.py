@@ -24,6 +24,9 @@ Attributes:
   max_angular_dps (float)         - top yaw rate; scales SetPower (default as above)
   move_timeout_margin_sec (float) - sim time MoveStraight/Spin may go without
                                     progress before they fail as stalled (default 2)
+  kinematics (string)             - "differential" or "swerve" (each wheel on its own steer
+                                    hinge: SetVelocity/SetPower linear.x drives it sideways);
+                                    default swerve when two or more steer hinges are actuated
   planning_geometry (string)      - what GetGeometries serves: "box" (default), one box
                                     around the chassis's collision geoms; "mesh", those
                                     geoms' convex hulls as one mesh
@@ -93,6 +96,8 @@ class MujocoBase(Base, EasyResource):
                 raise ValueError(f"{name}: mjcf must be an .xml (MJCF) or .urdf file, got {path.name}")
         if attrs.get("drive", "ideal") not in ("ideal", "wheels"):
             raise ValueError(f'{name}: drive must be "ideal" or "wheels"')
+        if attrs.get("kinematics", "differential") not in ("differential", "swerve"):
+            raise ValueError(f'{name}: kinematics must be "differential" or "swerve"')
         if attrs.get("planning_geometry", "box") not in ("box", "mesh"):
             raise ValueError(f'{name}: planning_geometry must be "box" or "mesh"')
         if "chassis" in attrs and (not isinstance(attrs["chassis"], str) or not attrs["chassis"]):
@@ -177,12 +182,13 @@ class MujocoBase(Base, EasyResource):
     async def set_power(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         handle = self._h()
         forward = float(np.clip(linear.y, -1.0, 1.0)) * handle.max_linear_mps
+        sideways = float(np.clip(linear.x, -1.0, 1.0)) * handle.max_linear_mps  # +x: right (swerve)
         turn = float(np.clip(angular.z, -1.0, 1.0)) * handle.max_angular_rad_s
-        await asyncio.to_thread(handle.set_velocity, forward, turn)
+        await asyncio.to_thread(handle.set_velocity, forward, turn, sideways)
 
     async def set_velocity(self, linear: Vector3, angular: Vector3, **kwargs) -> None:
         await asyncio.to_thread(
-            self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z)
+            self._h().set_velocity, linear.y / 1000.0, math.radians(angular.z), linear.x / 1000.0
         )
 
     async def stop(self, **kwargs) -> None:

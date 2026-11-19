@@ -877,10 +877,12 @@ error saying the camera is not in the scene.
 
 ## Model viam-labs:mujoco-sim:base
 
-A differential-drive or skid-steer base: a bundled Viam Rover 2 or Clearpath
-Husky, or your own from an MJCF or URDF file. Its chassis and driven wheels
-are read from the file. It drives either ideally, exactly as commanded with
-the wheels turning to match, or through its wheels on the floor.
+A differential-drive, skid-steer or swerve base: a bundled Viam Rover 2 or
+Clearpath Husky, or your own from an MJCF or URDF file. Its chassis and driven
+wheels are read from the file. It drives either ideally, exactly as commanded
+with the wheels turning to match, or through its wheels on the floor. A swerve
+base (each wheel on its own steering hinge) also drives sideways and
+diagonally: see [Swerve](#swerve).
 
 | Asset | What it is |
 |---|---|
@@ -933,7 +935,8 @@ yard with a LIDAR on its top plate, odometry and an overview camera.
 | `drive` | string | No | `"ideal"` | `"ideal"` or `"wheels"`; see [Drive modes](#drive-modes). |
 | `chassis` | string | No | the file's one top-level body | The chassis body, as named in the file. |
 | `wheels` | object | No | inferred | The driven wheel joints, `{"left": ["joint", ...], "right": ["joint", ...]}`, as named in the file. |
-| `forward_axis` | string | No | inferred | The chassis's forward axis: `"+x"`, `"-x"`, `"+y"` or `"-y"`. |
+| `forward_axis` | string | No | inferred | The chassis's forward axis: `"+x"`, `"-x"`, `"+y"` or `"-y"`. A swerve base's defaults to `"+x"` (ROS): its axles steer, so they can't tell. |
+| `kinematics` | string | No | inferred | `"differential"` or `"swerve"`. Swerve when two or more steer hinges are actuated; set it for a swerve file with no actuators. |
 | `wheel_radius_m` | float | No | inferred | Wheel radius in meters. |
 | `max_linear_mps` | float | Asset's, else from the file | | Top speed in meters per second; scales `SetPower`. Required when neither the asset nor the wheels' velocity actuators give it. |
 | `max_angular_dps` | float | Asset's, else from the file | | Top yaw rate in degrees per second; scales `SetPower`. Same default. |
@@ -980,6 +983,30 @@ In both modes a move succeeds when the base reaches or passes its target
 (measured along the starting heading, or in yaw), and fails as stalled when
 the remaining distance or angle hasn't shrunk for `move_timeout_margin_sec`
 of sim time.
+
+### Swerve
+
+A swerve module is a vertical hinge (the steer) on a body fixed to the
+chassis, with one horizontal hinge (the wheel) somewhere below it. A file with
+two or more such modules whose steer hinges carry actuators is a swerve base
+(a caster's swivel is unactuated, so a caster doesn't count); `kinematics`
+says so for a file without actuators.
+
+`SetVelocity` and `SetPower` take `linear.x` (positive: right, the base frame's
++X) as well as `linear.y` and `angular.z`, so it drives sideways, diagonally,
+and turning while it does. The two linear speeds are capped together at
+`max_linear_mps`. A differential base rejects a nonzero `linear.x`.
+`MoveStraight` and `Spin` work as for any base.
+
+Each module steers to its own velocity (the base's plus the yaw rate across
+its position from the center), choosing whichever of the wheel's two
+directions is the shorter turn and reversing the wheel for the other; a
+module that would barely move keeps its angle. In `ideal` drive the steer and
+wheel joints are set to match the chassis's motion, as a differential base's
+wheels are. The speed limits come from the wheels' velocity actuators: the
+top speed is ctrl × radius, and the top yaw rate puts the module furthest
+from the center at that speed. `drive: "wheels"` isn't supported for a
+swerve base yet.
 
 ### How the file is read
 
@@ -1050,8 +1077,8 @@ This one sits 120 mm ahead of the origin and 150 mm up:
 |---|---|
 | `MoveStraight` | Returns when the base has gone the distance; a zero distance returns at once, and a zero velocity is rejected. Fails as stalled (see [Drive modes](#drive-modes)), and when stopped, superseded, reset or closed. |
 | `Spin` | Same as `MoveStraight`, for an angle: a zero angle returns at once and a zero velocity is rejected. |
-| `SetVelocity` | `linear.y` in mm/s and `angular.z` in degrees/s; other axes are ignored. Clamped to the maxima. |
-| `SetPower` | `linear.y` and `angular.z`, each in [-1, 1] of the maxima. |
+| `SetVelocity` | `linear.y` in mm/s and `angular.z` in degrees/s, and for a swerve base `linear.x` (right) in mm/s; other axes are ignored. Clamped to the maxima. |
+| `SetPower` | `linear.y`, `angular.z` and (swerve) `linear.x`, each in [-1, 1] of the maxima. |
 | `Stop` | Stops the base. |
 | `IsMoving` | True while the base is commanded to move or is moving. |
 | `GetProperties` | Width is the track, 0 turning radius, wheel circumference 2π × radius (Rover: 0.356 m and 0.381 m; Husky: 0.555 m and 1.037 m). |
