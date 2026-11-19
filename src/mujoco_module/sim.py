@@ -19,7 +19,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any
 
@@ -509,6 +509,9 @@ class SimManager:
         self._anchor_sim = 0.0
         self._rtf_samples: deque[tuple[float, float]] = deque()
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
+        self._renderers_model: mujoco.MjModel | None = None  # the model they draw
+        # the render thread (main_loop): renderers live there, so frames never hold up the steps
+        self._render_pool: ThreadPoolExecutor | None = None
         self._warned: set[str] = set()
         self._floor_warned: tuple[list[str], tuple[str, ...]] = ([], ())  # the floor-replacing scenes last warned about
         self._skybox_warned: list[str] = []  # the skyboxes last warned about
@@ -543,6 +546,7 @@ class SimManager:
 
     def main_loop(self) -> None:
         self.bind_current_thread()
+        self._render_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mujoco-render")
         try:
             while not self._stop.is_set():
                 self._drain_tasks()
@@ -558,7 +562,10 @@ class SimManager:
                     break
                 if future.set_running_or_notify_cancel():
                     future.set_exception(RuntimeError("the simulator has stopped"))
-            self._close_renderers()
+            pool, self._render_pool = self._render_pool, None
+            if pool is not None:
+                pool.submit(self._close_renderers)  # on the thread that made them
+                pool.shutdown(wait=True)
 
     def _drain_tasks(self) -> None:
         while True:
@@ -745,11 +752,21 @@ class SimManager:
             if init is not None:
                 init(model, data)
         mujoco.mj_forward(model, data)
-        self._close_renderers()
         self.model, self.data, self._built = model, data, built
         self.generation += 1
-        for size in {size for c in self._contributions.values() for size in c.render_sizes}:
-            self._renderer(*size).render()  # the first draw uploads the scene to the GPU
+        # the first draw of a model uploads it to the GPU: do it now, not on a camera's first frame
+        sizes = {size for c in self._contributions.values() for size in c.render_sizes}
+        assert self.cfg is not None
+        lights = self.cfg.lighting
+
+        def warm() -> None:
+            for size in sizes:
+                self._renderer(model, lights, *size).render()
+
+        if self._render_pool is None:
+            warm()
+        elif sizes:
+            self._render_pool.submit(warm)
         self._reanchor()
 
     # ------------------------------------------------------------------
@@ -984,15 +1001,51 @@ class SimManager:
     # rendering
     # ------------------------------------------------------------------
 
-    def _renderer(self, width: int, height: int) -> mujoco.Renderer:
-        assert self.model is not None
+    def _renderer(self, model: mujoco.MjModel, lights: Any, width: int, height: int) -> mujoco.Renderer:
+        """A renderer for `model` at this size, on the rendering thread; a new model
+        closes the old one's renderers."""
+        if self._renderers_model is not model:
+            self._close_renderers()
+            self._renderers_model = model
         renderer = self._renderers.get((width, height))
         if renderer is None:
-            renderer = mujoco.Renderer(self.model, height=height, width=width)
-            assert self.cfg is not None
-            lighting.set_render_flags(renderer.scene, self.cfg.lighting)
+            renderer = mujoco.Renderer(model, height=height, width=width)
+            lighting.set_render_flags(renderer.scene, lights)
             self._renderers[(width, height)] = renderer
         return renderer
+
+    def _draw(
+        self,
+        model: mujoco.MjModel,
+        data: mujoco.MjData,
+        lights: Any,
+        camera: str,
+        width: int,
+        height: int,
+        depth_size: tuple[int, int] | None,
+        near_m: float | None,
+    ) -> tuple[np.ndarray, np.ndarray | None]:
+        default_near = model.vis.map.znear
+        if near_m is not None:
+            model.vis.map.znear = near_m / model.stat.extent
+        try:
+            renderer = self._renderer(model, lights, width, height)
+            renderer.update_scene(data, camera=camera)
+            rgb = renderer.render().copy()
+            if depth_size is None:
+                return rgb, None
+            renderer = self._renderer(model, lights, *depth_size)
+            renderer.update_scene(data, camera=camera)
+            renderer.enable_depth_rendering()
+            try:
+                meters = renderer.render().copy()
+            finally:
+                renderer.disable_depth_rendering()
+        finally:
+            model.vis.map.znear = default_near
+        far = model.vis.map.zfar * model.stat.extent
+        meters[meters >= far * 0.999] = 0.0
+        return rgb, meters
 
     def render(
         self,
@@ -1005,39 +1058,31 @@ class SimManager:
         """RGB at width x height and, with depth_size, depth in meters along
         the optical axis at that size, both from the same sim state. Depth is
         0 where nothing is in view. near_m: this render's near clip plane
-        (MuJoCo's is one for the model, a fraction of the scene's extent)."""
+        (MuJoCo's is one for the model, a fraction of the scene's extent).
 
-        def draw() -> tuple[np.ndarray, np.ndarray | None]:
+        With the main loop running, the sim thread only copies its state (well
+        under a millisecond) and the render thread draws it, so however long a
+        frame takes, the physics keeps stepping in real time. A sim driven
+        inline (tests) draws on its own thread."""
+
+        def snapshot() -> tuple[mujoco.MjModel, mujoco.MjData, Any]:
             self.require_world()
-            assert self.model is not None
+            assert self.model is not None and self.data is not None and self.cfg is not None
             if mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_CAMERA, camera) < 0:
                 raise RuntimeError(
                     f"camera {camera!r} is not in the scene; if its frame parent is "
                     "another mujoco-sim component, configure that component"
                 )
-            default_near = self.model.vis.map.znear
-            if near_m is not None:
-                self.model.vis.map.znear = near_m / self.model.stat.extent
-            try:
-                renderer = self._renderer(width, height)
-                renderer.update_scene(self.data, camera=camera)
-                rgb = renderer.render().copy()
-                if depth_size is None:
-                    return rgb, None
-                renderer = self._renderer(*depth_size)
-                renderer.update_scene(self.data, camera=camera)
-                renderer.enable_depth_rendering()
-                try:
-                    meters = renderer.render().copy()
-                finally:
-                    renderer.disable_depth_rendering()
-            finally:
-                self.model.vis.map.znear = default_near
-            far = self.model.vis.map.zfar * self.model.stat.extent
-            meters[meters >= far * 0.999] = 0.0
-            return rgb, meters
+            if self._render_pool is None:
+                return self.model, self.data, self.cfg.lighting
+            data = mujoco.MjData(self.model)
+            mujoco.mj_copyData(data, self.model, self.data)
+            return self.model, data, self.cfg.lighting
 
-        return self.run(draw)
+        args = (camera, width, height, depth_size, near_m)
+        if self._render_pool is None:
+            return self.run(lambda: self._draw(*snapshot(), *args))
+        return self._render_pool.submit(self._draw, *self.run(snapshot), *args).result(timeout=30.0)
 
     def _close_renderers(self) -> None:
         for renderer in self._renderers.values():
