@@ -445,6 +445,7 @@ def test_camera_on_the_rover_looks_forward(rover_cell):
         ({"mjcf": "viam_rover/rover.xml", "max_angular_dps": "fast"}, "max_angular_dps"),
         ({"asset": "viam_rover", "move_timeout_margin_sec": "soon"}, "move_timeout_margin_sec"),
         ({"asset": "viam_rover", "planning_geometry": "hull"}, 'planning_geometry must be "box" or "mesh"'),
+        ({"asset": "viam_rover", "kinematics": "mecanum"}, 'kinematics must be "differential" or "swerve"'),
     ],
 )
 def test_base_validate_rejects_bad_values(attrs, message):
@@ -987,3 +988,19 @@ def test_example_sensors_validate(example, model):
     deps, _ = cls.validate_config(component)
     assert deps[0] == "sim-world"
     assert item["frame"]["parent"] in {c["name"] for c in cfg["components"]}
+
+
+def test_a_swerve_base_takes_sideways_velocity_and_power(running_sim, tmp_path):
+    from test_bases import SWERVE
+    from viam.proto.common import Vector3
+
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    path = tmp_path / "swerve.xml"
+    path.write_text(SWERVE)
+    base = MujocoBase.new(config("swerve", {"world": "sim-world", "mjcf": str(path)}), {})
+    handle = base._h()
+    run(base.set_velocity(Vector3(x=200, y=100), Vector3(z=10)))  # mm/s right and forward, deg/s left
+    assert (handle._u, handle._v, handle._w) == pytest.approx((0.2, 0.1, math.radians(10)))
+    run(base.set_power(Vector3(x=-0.5), Vector3()))  # half power to the left
+    assert (handle._u, handle._v) == pytest.approx((-0.5 * handle.max_linear_mps, 0.0))
+    run(base.close())

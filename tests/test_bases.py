@@ -251,3 +251,99 @@ def test_unreadable_files_name_the_path(tmp_path):
 def test_zero_track_is_an_error(tmp_path):
     with pytest.raises(ValueError, match=r"same lateral offset .*; set wheels"):
         infer(tmp_path, SKID, wheels={"left": ["fl"], "right": ["rl"]})
+
+
+# ---- swerve -------------------------------------------------------------------
+
+# A ROS-axes swerve base (forward +X): four modules, each a steer hinge (vertical) on a housing
+# fixed to the chassis with a drive wheel under it (axle along the housing's y). The front-right
+# housing is turned a quarter turn, as Mabel's are, so its wheel rolls along y at steer 0.
+SWERVE = """<mujoco>
+  <worldbody>
+    <body name="chassis">
+      <geom type="box" size="0.25 0.25 0.05" pos="0 0 0.1" mass="10"/>
+      <body name="fl" pos="0.2 0.2 0"><body name="fl_steer"><joint name="fl_steer" axis="0 0 1"/>
+        <geom type="box" size="0.01 0.01 0.01" mass="0.1"/>
+        <body name="fl_wheel" pos="0 0 -0.02"><joint name="fl_drive" axis="0 1 0"/>
+          <geom type="cylinder" size="0.05 0.02" euler="90 0 0" mass="0.5"/></body></body></body>
+      <body name="fr" pos="0.2 -0.2 0" euler="0 0 90"><body name="fr_steer"><joint name="fr_steer" axis="0 0 1"/>
+        <geom type="box" size="0.01 0.01 0.01" mass="0.1"/>
+        <body name="fr_wheel" pos="0 0 -0.02"><joint name="fr_drive" axis="0 1 0"/>
+          <geom type="cylinder" size="0.05 0.02" euler="90 0 0" mass="0.5"/></body></body></body>
+      <body name="rl" pos="-0.2 0.2 0"><body name="rl_steer"><joint name="rl_steer" axis="0 0 1"/>
+        <geom type="box" size="0.01 0.01 0.01" mass="0.1"/>
+        <body name="rl_wheel" pos="0 0 -0.02"><joint name="rl_drive" axis="0 1 0"/>
+          <geom type="cylinder" size="0.05 0.02" euler="90 0 0" mass="0.5"/></body></body></body>
+      <body name="rr" pos="-0.2 -0.2 0"><body name="rr_steer"><joint name="rr_steer" axis="0 0 1"/>
+        <geom type="box" size="0.01 0.01 0.01" mass="0.1"/>
+        <body name="rr_wheel" pos="0 0 -0.02"><joint name="rr_drive" axis="0 1 0"/>
+          <geom type="cylinder" size="0.05 0.02" euler="90 0 0" mass="0.5"/></body></body></body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position joint="fl_steer" kp="50" kv="1"/><velocity joint="fl_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="fr_steer" kp="50" kv="1"/><velocity joint="fr_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="rl_steer" kp="50" kv="1"/><velocity joint="rl_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="rr_steer" kp="50" kv="1"/><velocity joint="rr_drive" kv="2" ctrlrange="-20 20"/>
+  </actuator>
+</mujoco>"""
+
+
+def test_a_swerve_base_is_found_from_its_actuated_steer_hinges(tmp_path):
+    base = infer(tmp_path, SWERVE)
+    assert base.kinematics == "swerve" and base.wheels == ()
+    assert [(m.steer, m.drive) for m in base.modules] == [
+        ("fl_steer", "fl_drive"), ("fr_steer", "fr_drive"), ("rl_steer", "rl_drive"), ("rr_steer", "rr_drive")]
+    # forward defaults to +X (ROS): the file's +X is the viam frame's +Y, its +Y (left) is -X
+    assert base.forward == "+x" and base.yaw == pytest.approx(math.pi / 2)
+    positions = {m.steer: m.position for m in base.modules}
+    assert positions["fl_steer"] == pytest.approx((-0.2, 0.2))
+    assert positions["rr_steer"] == pytest.approx((0.2, -0.2))
+    # at steer 0 a wheel rolls along its axle x up: the file's +X (viam +Y, 90 deg) for the plain
+    # housings, and the turned one's along the file's +Y (viam -X, 180 deg)
+    roll = {m.steer: math.degrees(m.roll0) for m in base.modules}
+    assert roll["fl_steer"] == pytest.approx(90) and roll["fr_steer"] == pytest.approx(180)
+    assert base.radius == pytest.approx(0.05)
+    assert base.lift == pytest.approx(0.07)  # the wheels reach 7 cm below the chassis origin
+
+
+def test_a_caster_doesnt_make_a_base_swerve(tmp_path):
+    base = infer(tmp_path, DIFF)  # its swivel is a vertical hinge with a wheel, but unactuated
+    assert base.kinematics == "differential" and base.modules == ()
+
+
+def test_kinematics_overrides_the_inference(tmp_path):
+    with pytest.raises(ValueError, match='kinematics "swerve" needs steer hinges'):
+        infer(tmp_path, SKID, kinematics="swerve")
+    plain = SWERVE.split("<actuator>")[0] + "</mujoco>"  # no actuators: not inferred, but stated
+    assert len(infer(tmp_path, plain, kinematics="swerve").modules) == 4
+
+
+def test_swerve_targets_forward_sideways_and_spinning(tmp_path):
+    modules = {m.steer: m for m in infer(tmp_path, SWERVE).modules}
+    fl, fr = modules["fl_steer"], modules["fr_steer"]
+    zero = [0.0, 0.0]
+    # forward (viam +Y): fl already rolls that way at 0; fr (rolling 180 deg at 0) turns -90 deg
+    angles, speeds = bases.swerve_targets([fl, fr], 0.0, 1.0, 0.0, zero)
+    assert np.degrees(angles) == pytest.approx([0, -90]) and speeds == pytest.approx([1, 1])
+    # sideways right (viam +X): fl turns -90 deg; fr already lies along x, so it rolls backward
+    angles, speeds = bases.swerve_targets([fl, fr], 1.0, 0.0, 0.0, zero)
+    assert np.degrees(angles) == pytest.approx([-90, 0]) and speeds == pytest.approx([1, -1])
+    # spinning left in place: each wheel at w x r, square to its position
+    angles, speeds = bases.swerve_targets([fl], 0.0, 0.0, 1.0, [0.0])
+    direction = fl.roll0 + fl.steer_sign * angles[0]
+    # the wheel's ground velocity (either wheel direction): w x position = (-0.2, -0.2)
+    assert speeds[0] * np.array([math.cos(direction), math.sin(direction)]) == pytest.approx([-0.2, -0.2])
+
+
+def test_swerve_targets_flip_for_the_shorter_turn_and_hold_when_still(tmp_path):
+    fl = next(m for m in infer(tmp_path, SWERVE).modules if m.steer == "fl_steer")
+    # backward from a wheel at 0: reverse the wheel rather than turn it 180 deg
+    angles, speeds = bases.swerve_targets([fl], 0.0, -1.0, 0.0, [0.0])
+    assert angles[0] == pytest.approx(0.0) and speeds[0] == pytest.approx(-1.0)
+    # from 350 deg (unwrapped), forward is 360, not 0
+    angles, _ = bases.swerve_targets([fl], 0.0, 1.0, 0.0, [math.radians(350)])
+    assert math.degrees(angles[0]) == pytest.approx(360)
+    # stopped: keep the angle, no speed
+    angles, speeds = bases.swerve_targets([fl], 0.0, 0.0, 0.0, [0.7])
+    assert angles[0] == pytest.approx(0.7) and speeds[0] == 0.0
