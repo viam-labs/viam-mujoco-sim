@@ -437,6 +437,26 @@ def wheel_actuators(model: mujoco.MjModel, base: Base, label: str) -> dict[str, 
     return found
 
 
+def swerve_actuators(model: mujoco.MjModel, base: Base, label: str) -> tuple[dict[str, str], dict[str, str]]:
+    """The file's actuators on a swerve base's modules, by joint name: (steer, drive).
+    A steer actuator is a position servo (anything but a velocity actuator); a
+    drive actuator must be a velocity actuator."""
+    steer: dict[str, str] = {}
+    drive: dict[str, str] = {}
+    joints = {model.joint(m.steer).id: (m.steer, steer, False) for m in base.modules}
+    joints.update({model.joint(m.drive).id: (m.drive, drive, True) for m in base.modules})
+    for a in range(model.nu):
+        if model.actuator_trntype[a] != _TRN_JOINT or int(model.actuator_trnid[a, 0]) not in joints:
+            continue
+        joint, found, velocity = joints[int(model.actuator_trnid[a, 0])]
+        name = _name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, a)
+        if _is_velocity(model, a) != velocity:
+            kind = "a velocity actuator" if velocity else "a position servo"
+            raise ValueError(f'{label}: actuator {name!r} on {joint!r} must be {kind} for drive "wheels"')
+        found.setdefault(joint, name)
+    return steer, drive
+
+
 def speed_limits(model: mujoco.MjModel, base: Base) -> tuple[float, float] | None:
     """(m/s, deg/s) from the driven wheels' velocity actuators' ctrlrange;
     None when no driven wheel has a limited velocity actuator."""

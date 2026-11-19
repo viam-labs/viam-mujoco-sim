@@ -1003,10 +1003,20 @@ its position from the center), choosing whichever of the wheel's two
 directions is the shorter turn and reversing the wheel for the other; a
 module that would barely move keeps its angle. In `ideal` drive the steer and
 wheel joints are set to match the chassis's motion, as a differential base's
-wheels are. The speed limits come from the wheels' velocity actuators: the
-top speed is ctrl × radius, and the top yaw rate puts the module furthest
-from the center at that speed. `drive: "wheels"` isn't supported for a
-swerve base yet.
+wheels are. In `wheels` drive the steer servos and drive motors move it
+through floor friction: each steer servo (the file's position actuator, or one
+the module adds) targets its module's angle, and each drive motor (the file's
+velocity actuator, or one added as for a differential base) its module's
+speed, scaled by how well the module is aligned yet, so the wheels don't fight
+while they turn. Moving without turning holds the heading it set off on, as a
+swerve drivetrain does; `MoveStraight` and `Spin` close the loop as for any
+base. From a standstill the wheels slip for a few tenths of a second. A steer
+servo needs damping (`kv`): an undamped one on a light module chatters at
+MuJoCo's step and the wheels lose grip.
+
+The speed limits come from the wheels' velocity actuators: the top speed is
+ctrl × radius, and the top yaw rate puts the module furthest from the center
+at that speed.
 
 ### How the file is read
 

@@ -91,6 +91,8 @@ BASE_PROGRESS = 1e-3  # m or rad: less is no progress (the stall check)
 DEFAULT_BASE_MOVE_MARGIN_S = 2.0
 # drive "wheels"
 GRAVITY = 9.81
+SWERVE_STEER_KP = 20.0  # N m/rad: an added steer servo (the file's own wins)
+SWERVE_STEER_KV = 1.0  # N m s/rad
 BASE_WHEEL_SPEED_ERROR = 1.0  # rad/s at which an added wheel actuator reaches its force cap (stiffer chatters)
 DEFAULT_BASE_ACCEL_MPS2 = 1.0  # braking ramp; the angular one is 2 a / track
 BASE_MIN_MPS = 0.02  # the braking ramp's least speed (or 10 % of the command)
@@ -131,6 +133,7 @@ class _BaseIds:
     wheel_dof: np.ndarray
     steer_qpos: np.ndarray  # swerve: each module's steer joint (ideal: set kinematically)
     steer_dof: np.ndarray
+    steer_ctrl: np.ndarray  # swerve, wheels: each module's steer servo
 
 
 @dataclass(frozen=True)
@@ -868,25 +871,33 @@ class BaseHandle:
         )
         self.drive = str(attrs.get("drive", "ideal"))
         self.swerve = base.kinematics == "swerve"
-        if self.swerve and self.drive == "wheels":
-            raise ValueError(f'{label}: drive "wheels" isn\'t supported for a swerve base yet; use "ideal"')
         self._linear_accel = float(meta.get("max_linear_accel_mps2", DEFAULT_BASE_ACCEL_MPS2))
         self._angular_accel = float(
             meta.get("max_angular_accel_rad_s2", 2 * self._linear_accel / base.track)
         )
         # wheels: each driven wheel's actuator, the file's or one added at build
-        own = bases.wheel_actuators(model, base, where) if self.drive == "wheels" else {}
-        self._wheel_actuators = {w.joint: own.get(w.joint, f"{w.joint}_drive") for w in base.wheels}
+        own_steer: dict[str, str] = {}
+        if self.drive != "wheels":
+            own = {}
+        elif self.swerve:
+            own_steer, own = bases.swerve_actuators(model, base, where)
+        else:
+            own = bases.wheel_actuators(model, base, where)
+        drives = [w.joint for w in base.wheels] + [m.drive for m in base.modules]
+        self._wheel_actuators = {joint: own.get(joint, f"{joint}_drive") for joint in drives}
+        self._steer_actuators = {m.steer: own_steer.get(m.steer, f"{m.steer}_servo") for m in base.modules}
         caps = {
-            w.joint: bases.traction(model, w.joint) * base.mass * GRAVITY * base.radius / len(base.wheels)
-            for w in base.wheels if w.joint not in own
+            joint: bases.traction(model, joint) * base.mass * GRAVITY * base.radius / len(drives)
+            for joint in drives if joint not in own
         }
+        steer_added = [m.steer for m in base.modules if m.steer not in own_steer]
         self._integral = 0.0  # of the yaw-rate error: rad (MoveStraight), or relative (Spin), s
         self._signs = np.array([wheel.sign for wheel in base.wheels])
         self._sides = np.array([-1.0 if wheel.left else 1.0 for wheel in base.wheels])
         self._v = 0.0  # latched forward speed, m/s
         self._u = 0.0  # latched sideways speed (+ right), m/s: swerve only
-        self._steer = np.zeros(len(base.modules))  # swerve, ideal: the modules' steer angles, rad
+        self._steer = np.zeros(len(base.modules))  # swerve: the modules' steer angles, rad
+        self._hold_yaw: float | None = None  # swerve, wheels: the heading held while not turning
         self._w = 0.0  # latched yaw rate, rad/s
         self._yaw = 0.0  # unwrapped yaw of the viam frame in the spawn frame
         self._goal: _BaseGoal | None = None
@@ -937,6 +948,13 @@ class BaseHandle:
                     actuator.set_to_velocity(kv=cap / BASE_WHEEL_SPEED_ERROR)
                     actuator.forcelimited = True
                     actuator.forcerange = [-cap, cap]
+                for joint in steer_added:
+                    actuator = spec.add_actuator(
+                        name=self._prefix + self._steer_actuators[joint],
+                        target=self._prefix + joint,
+                        trntype=mujoco.mjtTrn.mjTRN_JOINT,
+                    )
+                    actuator.set_to_position(kp=SWERVE_STEER_KP, kv=SWERVE_STEER_KV)
                 return
             c, s = math.cos(base.yaw), math.sin(base.yaw)
             # the spawn frame's x and y in the (turned) chassis frame
@@ -990,7 +1008,7 @@ class BaseHandle:
         wheels += [model.joint(self._prefix + module.drive) for module in self.base.modules]
         steers = [model.joint(self._prefix + module.steer) for module in self.base.modules]
         if self.drive == "wheels":
-            actuators = [self._wheel_actuators[wheel.joint] for wheel in self.base.wheels]
+            actuators = list(self._wheel_actuators.values())
         else:
             actuators = list(BASE_JOINTS)
         return _BaseIds(
@@ -1000,6 +1018,10 @@ class BaseHandle:
             wheel_dof=np.array([joint.dofadr[0] for joint in wheels]),
             steer_qpos=np.array([joint.qposadr[0] for joint in steers], dtype=int),
             steer_dof=np.array([joint.dofadr[0] for joint in steers], dtype=int),
+            steer_ctrl=np.array(
+                [model.actuator(self._prefix + self._steer_actuators[m.steer]).id for m in self.base.modules]
+                if self.drive == "wheels" else [], dtype=int,
+            ),
         )
 
     def _now(self) -> tuple[mujoco.MjData, _BaseIds]:
@@ -1054,6 +1076,28 @@ class BaseHandle:
             except Exception as exc:
                 # halt, fail the move, and keep the callback registered
                 self._drop_goal(exc)
+        if self.drive == "wheels" and self.swerve:
+            if goal is not None and self._goal is not None:
+                v, w = self._wheel_command(remaining, yaw, float(velocity[2]), dt)
+                u = 0.0
+            else:
+                u, v, w = self._u, self._v, self._w
+                # moving without turning holds the heading it set off on, as swerve drivetrains
+                # do: modules turning to a new direction scrub, and would twist the base
+                if w == 0.0 and (u or v):
+                    if self._hold_yaw is None:
+                        self._hold_yaw = yaw
+                    w = BASE_HEADING_GAIN * (self._hold_yaw - yaw)
+                else:
+                    self._hold_yaw = None
+            angles, speeds = bases.swerve_targets(self.base.modules, u, v, w, self._steer)
+            self._steer = angles
+            # a module still turning toward its angle drives only its aligned share (a
+            # real swerve's cosine scaling), so the wheels don't fight while they steer
+            align = np.clip(np.cos(data.qpos[ids.steer_qpos] - angles), 0.0, 1.0)
+            data.ctrl[ids.steer_ctrl] = angles
+            data.ctrl[ids.ctrl] = speeds * align / self.base.radius
+            return
         if self.drive == "wheels":
             v, w = self._wheel_command(remaining, yaw, float(velocity[2]), dt)
             sides = v + self._sides * w * self.base.track / 2

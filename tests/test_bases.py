@@ -281,10 +281,10 @@ SWERVE = """<mujoco>
     </body>
   </worldbody>
   <actuator>
-    <position joint="fl_steer" kp="50"/><velocity joint="fl_drive" kv="2" ctrlrange="-20 20"/>
-    <position joint="fr_steer" kp="50"/><velocity joint="fr_drive" kv="2" ctrlrange="-20 20"/>
-    <position joint="rl_steer" kp="50"/><velocity joint="rl_drive" kv="2" ctrlrange="-20 20"/>
-    <position joint="rr_steer" kp="50"/><velocity joint="rr_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="fl_steer" kp="50" kv="1"/><velocity joint="fl_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="fr_steer" kp="50" kv="1"/><velocity joint="fr_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="rl_steer" kp="50" kv="1"/><velocity joint="rl_drive" kv="2" ctrlrange="-20 20"/>
+    <position joint="rr_steer" kp="50" kv="1"/><velocity joint="rr_drive" kv="2" ctrlrange="-20 20"/>
   </actuator>
 </mujoco>"""
 
