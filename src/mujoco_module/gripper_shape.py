@@ -27,13 +27,25 @@ MOVED_RAD = 0.001  # or turns more than this
 
 
 def collision_geometries(
-    spec: mujoco.MjSpec, actuator: int, commands: Sequence[float], frame: np.ndarray
+    spec: mujoco.MjSpec,
+    actuator: int,
+    commands: Sequence[float],
+    frame: np.ndarray,
+    bodies: Sequence[int] | None = None,
+    site: str | None = None,
+    ctrl: Sequence[float] | None = None,
 ) -> list[Geometry]:
     """The colliding geoms of a gripper's own file (attached at its mount's
     flange) at each actuator command in `commands`, as Viam geometries in mm,
     moved by `frame` (4x4, metres: from the file's world to the gripper's
     Viam frame). A geom that moves between the poses is served at each, its
-    label suffixed with the pose's index name (`:open`, `:closed`)."""
+    label suffixed with the pose's index name (`:open`, `:closed`).
+
+    A gripper in its arm's (or robot's) file: `bodies` are the gripper's own (ids
+    in that file, compiled as the arm compiled it; a finger body may be unnamed),
+    `site` is the arm's flange site (the geoms are measured from it, as the file's
+    world is for an attached gripper) and `ctrl` the file's home controls, which
+    hold everything but the gripper's actuator."""
     copy = spec.copy()  # the scene's hulls are the physics' contacts: reduce only this one's
     for mesh in copy.meshes:
         mesh.maxhullvert = HULL_VERTICES
@@ -41,10 +53,12 @@ def collision_geometries(
     # as the scene integrates: Euler goes unstable on a light jaw under a stiff, damped servo
     copy.option.integrator = mujoco.mjtIntegrator.mjINT_IMPLICITFAST
     model = copy.compile()
-    poses = [_settled(model, actuator, command) for command in commands]
+    poses = [_settled(model, actuator, command, ctrl) for command in commands]
+    keep = None if bodies is None else set(bodies)
     geoms = [
         g for g in range(model.ngeom)
-        if (model.geom_contype[g] or model.geom_conaffinity[g])
+        if (keep is None or int(model.geom_bodyid[g]) in keep)
+        and (model.geom_contype[g] or model.geom_conaffinity[g])
         and model.geom_type[g] not in (  # no Viam shape for these
             mujoco.mjtGeom.mjGEOM_PLANE, mujoco.mjtGeom.mjGEOM_HFIELD, mujoco.mjtGeom.mjGEOM_SDF,
         )
@@ -59,14 +73,27 @@ def collision_geometries(
             for p in poses[1:]
         )
         for pose, name in zip(poses if moved else poses[:1], names):
-            out.append(geom_geometry(model, _moved(pose, frame), geom, f"{label}:{name}" if moved else label))
+            moved_by = frame if site is None else frame @ np.linalg.inv(_site_pose(model, pose, site))
+            out.append(geom_geometry(model, _moved(pose, moved_by), geom, f"{label}:{name}" if moved else label))
     return out
 
 
-def _settled(model: mujoco.MjModel, actuator: int, command: float) -> mujoco.MjData:
-    """The gripper held at `command` until its joints stop (gravity off, base
-    fixed): its linkage's equality constraints settle with it."""
+def _site_pose(model: mujoco.MjModel, data: mujoco.MjData, site: str) -> np.ndarray:
+    pose = np.eye(4)
+    pose[:3, :3] = data.site(site).xmat.reshape(3, 3)
+    pose[:3, 3] = data.site(site).xpos
+    return pose
+
+
+def _settled(
+    model: mujoco.MjModel, actuator: int, command: float, ctrl: Sequence[float] | None = None
+) -> mujoco.MjData:
+    """The gripper held at `command` (the other actuators at `ctrl`) until its
+    joints stop (gravity off, base fixed): its linkage's equality constraints
+    settle with it."""
     data = mujoco.MjData(model)
+    if ctrl is not None:
+        data.ctrl[:] = ctrl
     data.ctrl[actuator] = command
     still = 0
     for step in range(SETTLE_STEPS[1]):

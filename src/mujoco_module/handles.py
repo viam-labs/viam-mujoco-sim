@@ -17,6 +17,7 @@ from collections import deque
 from collections.abc import Sequence
 from concurrent.futures import Future, InvalidStateError
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Literal
 
 import mujoco
@@ -182,9 +183,8 @@ class ArmHandle:
                     f'{label}: collision "kinematics" is not supported for an arm in a robot file yet; '
                     "the file's own geoms are used"
                 )
-            for key in ("joints", "kinematics_url"):
-                if not attrs.get(key):
-                    raise ValueError(f"{label}: an arm in a robot file needs {key}")
+            if not attrs.get("joints"):
+                raise ValueError(f"{label}: an arm in a robot file needs joints")
             self.file_prefix = holder.prefix
             self.mjcf = holder.mjcf
             where = f"robot {self.robot} ({holder.mjcf})"
@@ -207,7 +207,8 @@ class ArmHandle:
         # come from its own MJCF or URDF)
         self.visual_models: dict[str, bytes] = {}
         meshes = attrs.get("planning_geometry", "shapes") == "mesh"
-        derive = holder is None and not urdf and not attrs.get("kinematics_url")
+        # an .xml arm with no kinematics file, on its own or a limb of a robot file: derive them
+        derive = not urdf and not attrs.get("kinematics_url")
         own_urdf = holder is None and urdf and not attrs.get("kinematics_url")
         if not (derive or own_urdf) and (meshes or attrs.get("visual_models")):
             raise ValueError(
@@ -233,13 +234,20 @@ class ArmHandle:
             # an MJCF arm with no kinematics file (MuJoCo Menagerie's): derive them from the file
             from . import derive_kinematics
 
-            model = spec.compile()
+            model = holder.model if holder is not None else spec.compile()
             site_name = str(attrs.get("flange_site", "attachment_site"))
             site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, site_name)
             if site_id < 0:
                 raise ValueError(f"{where}: has no site {site_name!r}; set flange_site")
+            # a limb's chain starts at its chain base (the first joint's parent body), not the file's world
+            base_body = 0
+            if holder is not None:
+                first = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, str(attrs["joints"][0]))
+                if first < 0:
+                    raise ValueError(f"{where}: no joint {attrs['joints'][0]!r}")
+                base_body = int(model.body_parentid[model.jnt_bodyid[first]])
             if attrs.get("joints"):
-                chain = derive_kinematics.given_joints(model, attrs["joints"], site_id, where)
+                chain = derive_kinematics.given_joints(model, attrs["joints"], site_id, where, base_body)
             else:
                 chain = derive_kinematics.chain_joints(model, site_id, where)
             sva = derive_kinematics.derive_sva(
@@ -249,6 +257,7 @@ class ArmHandle:
                 where,
                 meshes=meshes,
                 models=self.visual_models if attrs.get("visual_models") else None,
+                base_body=base_body,
             )
             self.kinematics_url = f"{where} (derived)"
             self.kinematics_data = json.dumps(sva, indent=1).encode()
@@ -1340,6 +1349,28 @@ class GripperHandle:
             frame = np.linalg.inv(configured) @ np.linalg.inv(flange_offset)
             commands = [self._ctrl] if self.suction else [self._ctrl, self._command(self._closed)]
             self.geometries = collision_geometries(gripper_spec, actuator, commands, frame)
+        elif Path(handle.mjcf).suffix.lower() == ".xml":
+            # a gripper in its arm's (or robot's) file: its own bodies, from that file settled at
+            # its home with the jaw open and closed, measured from the arm's flange site
+            from .gripper_shape import collision_geometries
+
+            site = handle.model.site(handle.flange_site)
+            flange_offset = np.linalg.inv(robots.transform(site.pos, site.quat)) @ handle.end_offset
+            configured = robots.transform(
+                [float(v) for v in attrs.get("position", (0.0, 0.0, 0.0))],
+                [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))],
+            )
+            frame = np.linalg.inv(configured) @ np.linalg.inv(flange_offset)
+            holder = sim.run(lambda: sim.robots.get(handle.robot)) if handle.robot else None
+            ctrl = holder.home_ctrl if holder is not None else robots.home(
+                model, "home", list(range(model.nu))
+            )
+            commands = [self._ctrl] if self.suction else [self._ctrl, self._command(self._closed)]
+            self.geometries = collision_geometries(
+                robots.load_mjcf(Path(handle.mjcf)), actuator, commands, frame,
+                bodies=list(self._measure_bodies),
+                site=handle.flange_site, ctrl=ctrl,
+            )
         if self._attached:
             flange = handle.flange_site_name
 

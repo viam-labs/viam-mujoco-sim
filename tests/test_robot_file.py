@@ -394,6 +394,57 @@ def test_a_parent_arm_must_be_bound_to_the_same_robot(sim, torso):
         ArmHandle(sim, "left-arm", limb(torso, "left", parent="other"))
 
 
+def derived(config):
+    """A limb's config without its kinematics file: derived from the robot's."""
+    return {key: value for key, value in config.items() if key != "kinematics_url"}
+
+
+def test_a_limb_without_a_kinematics_url_derives_them_from_the_robot_file(sim, lifted):
+    lifted_robot(sim, lifted)
+    torso = ArmHandle(sim, "torso", derived(lift(lifted)))
+    left = ArmHandle(sim, "left-arm", derived(limb(lifted, "left", parent="torso", position=ON_LIFT)))
+    assert torso.derived and left.derived
+    sva = json.loads(left.kinematics_data)
+    # in the limb's frame (its chain base, the lift body), not the file's world: what kinematics(-1) says
+    assert [j["id"] for j in sva["joints"]] == ["left/shoulder", "left/elbow"]
+    base = sva["links"][0]["translation"]
+    assert (base["x"], base["y"], base["z"]) == pytest.approx((-200, 0, 200), abs=1e-6)
+    top = json.loads(torso.kinematics_data)["links"][-1]["translation"]
+    assert (top["x"], top["y"], top["z"]) == pytest.approx((0, 0, 100), abs=1e-6)
+    # and they drive like the hand-written ones (test_an_arm_on_an_arm)
+    sim.advance(0.5)
+    start, _ = left.get_end_pose()
+    torso.set_joint_targets([0.1])
+    sim.advance(2.0)
+    assert left.get_end_pose()[0] == pytest.approx(start, abs=1e-4)
+
+
+def test_a_derived_limbs_first_link_carries_only_its_own_chain_base(sim, lifted):
+    lifted_robot(sim, lifted)
+    torso = ArmHandle(sim, "torso", derived(lift(lifted)))
+    left = ArmHandle(sim, "left-arm", derived(limb(lifted, "left", parent="torso", position=ON_LIFT)))
+    # the lift carries the torso's box (its chain base); the left arm's base is the lift body,
+    # whose box collides with nothing, so the torso box isn't planned twice
+    assert "geometry" in json.loads(torso.kinematics_data)["links"][0]
+    assert "geometry" not in json.loads(left.kinematics_data)["links"][0]
+
+
+def test_a_derived_limb_serves_mesh_planning_geometry_and_visual_models(sim, lifted):
+    lifted_robot(sim, lifted)
+    ArmHandle(sim, "torso", derived(lift(lifted)))
+    left = ArmHandle(sim, "left-arm", derived(limb(
+        lifted, "left", parent="torso", position=ON_LIFT, planning_geometry="mesh", visual_models=True)))
+    shaped = [link for link in json.loads(left.kinematics_data)["links"] if "geometry" in link]
+    assert shaped and all(link["geometry"]["type"] == "mesh" for link in shaped)
+    assert set(left.visual_models) == {link["id"] for link in shaped}
+
+
+def test_a_limb_with_a_kinematics_url_still_cant_have_meshes(sim, torso):
+    robot(sim, torso)
+    with pytest.raises(ValueError, match="only for an arm whose kinematics come from"):
+        ArmHandle(sim, "left-arm", limb(torso, "left", visual_models=True))
+
+
 def test_a_parent_arm_must_be_in_the_scene(sim, torso):
     robot(sim, torso)
     with pytest.raises(ValueError, match="arm 'right-arm' is not in the scene; configure it first"):

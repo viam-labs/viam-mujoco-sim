@@ -360,8 +360,8 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `base_offset` | pose | No | identity | From the arm's frame to the MJCF's world, for an MJCF whose base differs from its kinematics file. `{"translation": {"x", "y", "z"} mm, "orientation": {"o_x", "o_y", "o_z", "theta"} degrees}`. |
 | `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
 | `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` (always `"mesh"` for derived kinematics) | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
-| `planning_geometry` | string | No | `"shapes"` | Derived kinematics only. `"shapes"`: a fitted box or capsule per link. `"mesh"`: the convex hulls of each link's MuJoCo collision geoms, so the planner and the 3D viewer see what MuJoCo collides. Needs `collision` `"mesh"`. See [Derived kinematics](#derived-kinematics). |
-| `visual_models` | bool | No | `false` | Derived kinematics, or a URDF with no `kinematics_url`. Serve each link's visible geoms (a URDF's `<visual>`s) as a GLB through `Get3DModels`, for the 3D viewer. |
+| `planning_geometry` | string | No | `"shapes"` | Derived kinematics only (an `.xml` arm or a robot limb with no `kinematics_url`). `"shapes"`: a fitted box or capsule per link. `"mesh"`: the convex hulls of each link's MuJoCo collision geoms, so the planner and the 3D viewer see what MuJoCo collides. Needs `collision` `"mesh"`. See [Derived kinematics](#derived-kinematics). |
+| `visual_models` | bool | No | `false` | Derived kinematics (an `.xml` arm or a robot limb), or a URDF, with no `kinematics_url`. Serve each link's visible geoms (a URDF's `<visual>`s) as a GLB through `Get3DModels`, for the 3D viewer. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -566,7 +566,7 @@ contacts, so a violent move can tear the object off.
 
 | `asset` | Gripper | On | Frame `translation.z` (TCP) | Its shape for the planner |
 |---|---|---|---|---|
-| `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | none served: give the frame a `geometry`, box 78 × 78 × 70 mm at `z: -35` |
+| `lite6_gripper` (default) | The Lite6's own, in its MJCF | `lite6` | 81.1 mm | its file's gripper bodies, open and closed |
 | `robotiq_2f85` | Robotiq 2F-85 | `ur5e` or your own arm | 155.8 mm | served (fingers open along x, ~100 mm across the pads open) |
 | `robotiq_epick` | Robotiq ePick (suction, one 45 mm cup) | `ur5e` or your own arm | 130 mm | served |
 | `aloha` | ALOHA's own, in its robot file (open and closed swapped to match its actuator) | `aloha_left`, `aloha_right` | 0 mm (the arm's end effector is the gripper) | none: the arm's kinematics carry it |
@@ -580,9 +580,12 @@ twice, open and closed (labelled `:open` and `:closed`), so a plan clears the
 fingers either way; the 2F-85 serves 26 shapes. RDK asks for them because
 the gripper serves no kinematics, and checks them as well as any frame
 `geometry`, so an existing frame box now adds to the served shape: remove
-it. Its `frame.parent` must be its `mount` (or `arm`). A gripper in its arm's own file (`lite6_gripper`) serves none: give
-its frame the box above, or the planner can pass the arm but clip the
-gripper.
+it. Its `frame.parent` must be its `mount` (or `arm`). A gripper in its arm's
+or robot's own file (`lite6_gripper`, `aloha`, `tiago`, a robot's hand) serves
+its own bodies the same way, measured from the arm's flange site with the file
+settled at its home: the frame box the Lite6's gripper needed before is no
+longer needed, and adds to the served shape.
+
 Every jaw gripper, and the ePick, switches the whole scene to elliptic friction
 cones with `impratio` 10 while configured. The 2F-85 and the ePick take them
 from their own MJCF options, and every other jaw gripper gets them by default.
@@ -641,7 +644,7 @@ fingertip center: use the TCP value from the table above, or for your own
 | `IsHoldingSomething` | See below. |
 | `GetCurrentInputs` / `GoToInputs` | One value: `0` open, `1` closed. |
 | `GetKinematics` | Not supported; RDK falls back to `GetGeometries`. |
-| `GetGeometries` | Its colliding geoms, open and closed, in its frame (see above); none for a gripper in its arm's own file (`lite6_gripper`, `aloha`, `tiago`). |
+| `GetGeometries` | Its colliding geoms, open and closed, in its frame (see above). A gripper in its arm's or robot's own file (`lite6_gripper`, `aloha`, `tiago`) serves its own bodies' geoms (the subtree below the arm's last link that its actuator drives), from the file settled at its home with the jaw open and closed. |
 | `DoCommand` | `{"command": "measure"}` returns `tcp_mm` (one number), and `jaw_gap_mm` and `finger_reach_mm` (each `{open, closed}`); for suction, `cup_diameter_mm` and `tcp_mm`. It measures a scratch copy of the gripper, never the live sim. `tcp_mm` is the fingertips' distance from the flange when open: set it as the gripper frame's `translation.z`. |
 
 `IsHoldingSomething` always fills `meta`:
@@ -1452,8 +1455,12 @@ prefix `<name>/`.
 Each arm with `robot` set takes:
 
 - `joints`: the limb's joint names in the file, base to flange, one chain;
-- `kinematics_url`: its Viam kinematics, base to flange, with joint limits
-  equal to the file's ranges;
+- `kinematics_url` (optional): its Viam kinematics, base to flange, with joint
+  limits equal to the file's ranges. Without it they're derived from the robot's
+  file, as for an `.xml` arm ([Derived kinematics](#derived-kinematics)), from
+  the limb's chain base: its first link carries the chain base and the bodies
+  down to the first joint, not a parent limb's. `planning_geometry` and
+  `visual_models` work then too;
 - `flange_site`, `home_keyframe`, `base_offset`, `flange_offset` and the speed
   limits, as for any arm. The `aloha_left`, `aloha_right` and `tiago_*`
   presets set them.
