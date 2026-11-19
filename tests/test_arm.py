@@ -469,3 +469,117 @@ def test_meshes_and_models_are_only_for_derived_kinematics(sim, extra):
 def test_mesh_planning_geometry_cannot_be_kinematics_collision(sim):
     with pytest.raises(ValueError, match='planning_geometry "mesh" needs collision "mesh"'):
         ArmHandle(sim, "both", derived_lite6(planning_geometry="mesh", collision="kinematics"))
+
+
+NO_GEOMETRY = {
+    "type": "", "x": 0, "y": 0, "z": 0, "r": 0, "l": 0,
+    "translation": {"x": 0, "y": 0, "z": 0}, "orientation": {"type": ""}, "label": "",
+}
+
+
+def real_driver_sva():
+    """THREE_JOINT_SVA as a real Viam driver serves it (the UFactory xArm's): Go-style
+    uppercase translation and axis keys, null orientations, an empty placeholder
+    geometry on every link, and extra joint fields."""
+    return {
+        "name": "three",
+        "links": [
+            {
+                "id": link["id"], "parent": link["parent"], "orientation": None,
+                "translation": {k.upper(): v for k, v in link["translation"].items()},
+                "geometry": dict(NO_GEOMETRY),
+            }
+            for link in THREE_JOINT_SVA["links"]
+        ],
+        "joints": [
+            {
+                **joint, "axis": {k.upper(): v for k, v in joint["axis"].items()},
+                "min": -3.0, "max": 3.0, "max_velocity": 3.14, "max_acceleration": 10,
+            }
+            for joint in THREE_JOINT_SVA["joints"]
+        ],
+    }
+
+
+def test_an_arm_accepts_the_kinematics_a_real_driver_serves(sim, three_joint_files, tmp_path):
+    import asyncio
+
+    from mujoco_module.models.arm import MujocoArm
+
+    path = tmp_path / "real.json"
+    path.write_text(json.dumps(real_driver_sva()))
+    arm = ArmHandle(sim, "mine", {**three_joint_files, "kinematics_url": str(path)})
+    assert arm.joint_names() == ("a", "b", "c")
+    # served as the file is, for RDK to read with its own case-insensitive keys
+    served = object.__new__(MujocoArm)
+    served._handle = arm
+    _, data, *_ = asyncio.run(served.get_kinematics())
+    assert json.loads(data) == real_driver_sva()
+    q = [0.1, 0.2, 0.3]
+    real = robots.parse_kinematics(path.read_bytes(), urdf=False, label="real")
+    plain = robots.parse_kinematics(json.dumps(THREE_JOINT_SVA).encode(), urdf=False, label="plain")
+    assert real.forward(q)["tool"] == pytest.approx(plain.forward(q)["tool"])
+    assert real.forward(q)["tool"][:3, 3] != pytest.approx([0, 0, 0])
+    assert not any(frame.geometry for frame in real.frames.values())
+    assert arm.kinematics_url == str(path)
+
+
+@pytest.mark.parametrize("orientation, expected", [
+    ({"type": "axis_angles", "value": {"x": 0, "y": 0, "z": 1, "th": math.pi / 2}}, [[0, -1, 0], [1, 0, 0], [0, 0, 1]]),
+    ({"type": "quaternion", "value": {"w": 0.7071067811865476, "x": 0, "y": 0, "z": 0.7071067811865476}}, [[0, -1, 0], [1, 0, 0], [0, 0, 1]]),
+    ({"type": "euler_angles", "value": {"roll": 0, "pitch": 0, "yaw": math.pi / 2}}, [[0, -1, 0], [1, 0, 0], [0, 0, 1]]),
+    ({"type": "ov_radians", "value": {"x": 0, "y": 0, "z": 1, "th": math.pi / 2}}, [[0, -1, 0], [1, 0, 0], [0, 0, 1]]),
+    (None, np.eye(3)),
+    ({"type": ""}, np.eye(3)),
+])
+def test_sva_orientation_types(orientation, expected):
+    assert robots.sva_pose({"orientation": orientation}, "x")[:3, :3] == pytest.approx(np.array(expected), abs=1e-9)
+
+
+def test_unknown_sva_orientation_type_names_the_supported_ones():
+    with pytest.raises(ValueError, match="'spin' is not supported; use ov_degrees"):
+        robots.sva_pose({"orientation": {"type": "spin"}}, "x")
+
+
+def test_every_kind_of_arm_leaves_get_geometries_to_viam_server(sim, three_joint_files):
+    import asyncio
+
+    from viam.errors import MethodNotImplementedError
+
+    from mujoco_module.models.arm import MujocoArm
+
+    for attrs in (dict(KNOWN_ASSETS["lite6"]), three_joint_files):  # kinematics_url: vendor SVA, custom SVA
+        arm = object.__new__(MujocoArm)
+        arm._handle = ArmHandle(sim, f"arm{len(attrs)}", attrs)
+        assert asyncio.run(arm.get_kinematics())[1]  # served, so viam-server has geometry to pose
+        with pytest.raises(MethodNotImplementedError):
+            asyncio.run(arm.get_geometries())
+
+
+def test_an_untyped_geometry_is_inferred_like_rdk_does(sim):
+    """The xArm driver serves type "" with real sizes: x/y/z set is a box, else l a
+    capsule, else r a sphere; nothing set is none."""
+    geometry = robots._geometry
+    assert geometry({**NO_GEOMETRY, "r": 0, "l": 0}) is None
+    assert geometry({"type": "", "x": 0, "y": 0, "z": 0, "r": 1, "l": 0})["type"] == "sphere"
+    capsule = geometry({"type": "", "x": 0, "y": 0, "z": 0, "r": 50, "l": 320})
+    box = geometry({"type": "", "x": 80, "y": 180, "z": 250, "r": 0, "l": 0})
+    assert (capsule["type"], box["type"]) == ("capsule", "box")
+    assert robots._mj_shape(capsule)[:2] == ("capsule", pytest.approx((0.05, 0.11)))
+    assert robots._mj_shape(box)[:2] == ("box", pytest.approx((0.04, 0.09, 0.125)))
+    assert robots._mj_shape({"x": 20, "y": 20, "z": 20, "type": "box"})[0] == "box"  # our own files omit type
+    assert robots._mj_shape(geometry({"x": 20, "y": 20, "z": 20}))[0] == "box"
+
+
+def test_a_real_drivers_untyped_geometry_becomes_shapes(sim, three_joint_files, tmp_path):
+    sva = real_driver_sva()
+    sva["links"][1]["geometry"] = {**NO_GEOMETRY, "r": 50, "l": 320}
+    sva["links"][2]["geometry"] = {**NO_GEOMETRY, "x": 80, "y": 180, "z": 250}
+    path = tmp_path / "real.json"
+    path.write_text(json.dumps(sva))
+    ArmHandle(sim, "mine", {**three_joint_files, "kinematics_url": str(path), "collision": "kinematics"})
+    assert viam_geoms(sim, "mine") == ["mine/viam_upper", "mine/viam_fore"]
+    upper, fore = sim.model.geom("mine/viam_upper"), sim.model.geom("mine/viam_fore")
+    assert (upper.type[0], fore.type[0]) == (mujoco.mjtGeom.mjGEOM_CAPSULE, mujoco.mjtGeom.mjGEOM_BOX)
+    assert upper.size[:2] == pytest.approx([0.05, 0.11])
+    assert fore.size == pytest.approx([0.04, 0.09, 0.125])

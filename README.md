@@ -417,7 +417,7 @@ as it drives, so plan arm moves in the base's frame; see
 | `GetEndPosition` | Viam's end-effector frame (the flange with `flange_offset`) in the arm's frame, in mm. |
 | `GetKinematics` | The `kinematics_url` file; for a `.urdf` `mjcf` without one, the URDF from its root to `flange_link` and its collision meshes; for an `.xml` `mjcf` without one, the derived SVA file. |
 | `Get3DModels` | With `visual_models` (derived or URDF kinematics), a GLB of each link's visible geoms keyed by link id; else none. |
-| `GetGeometries` | Unimplemented for derived or URDF kinematics, so viam-server (RDK 1.15+) poses the kinematics' geometry itself, labelled `<arm>:<link>`; otherwise none. |
+| `GetGeometries` | Unimplemented, so viam-server (RDK 1.15+) poses the served kinematics' geometry itself, labelled `<arm>:<link>` (none if the file has no geometry). |
 | `IsMoving` | True while a `MoveToJointPositions` or `MoveThroughJointPositions` call is in flight. |
 | `Stop` | Holds the current target, or the measured position if it interrupted a trajectory. |
 | `MoveToPosition` | Not supported; use the motion service. |

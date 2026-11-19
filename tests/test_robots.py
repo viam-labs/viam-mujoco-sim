@@ -447,3 +447,19 @@ def test_prune_urdf_keeps_the_path_from_the_root_to_the_link():
     assert [joint.get("name") for joint in root.findall("joint")] == ["mount", "j1", "j2"]
     with pytest.raises(ValueError, match=r"expected one chain with one end frame, found ends \['tool', 'sensor'\]"):
         robots.parse_kinematics(WORLD_URDF.encode(), urdf=True, label="two")
+
+
+def test_mesh_and_point_geometry_stay_out_of_mujoco_collision():
+    """A hand-written SVA with mesh or point geometry: the planner keeps it, MuJoCo can't collide it."""
+    import pytest
+
+    from mujoco_module import robots
+
+    assert robots.is_primitive({"type": "", "x": 80, "y": 180, "z": 250})
+    assert robots.is_primitive({"type": "capsule", "r": 50, "l": 320})
+    assert not robots.is_primitive({"type": "mesh", "mesh_data": "x", "mesh_content_type": "ply"})
+    assert not robots.is_primitive({"type": "point"})
+    assert not robots.is_primitive({"type": "", "r": 0})
+    assert not robots.is_primitive(None)
+    with pytest.raises(ValueError, match="can't collide in MuJoCo"):
+        robots._mj_shape({"type": "mesh", "mesh_data": "x"})

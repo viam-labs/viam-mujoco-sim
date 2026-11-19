@@ -596,12 +596,10 @@ class MujocoArm(Arm, EasyResource):
         )
 
     async def get_geometries(self, **kwargs) -> List[Geometry]:
-        h = self._h()
-        if h.derived or h.own_urdf_kinematics:
-            # viam-server then poses the served kinematics' geometry at the current joints,
-            # labelled "<arm>:<link>" (RDK >= 1.15); an empty reply would suppress that
-            raise MethodNotImplementedError("get_geometries")
-        return []
+        # every arm serves GetKinematics; viam-server (RDK >= 1.15) then poses the kinematics'
+        # geometry at the current joints, labelled "<arm>:<link>" (empty if the file has none).
+        # An empty reply here would suppress that
+        raise MethodNotImplementedError("get_geometries")
 
     async def do_command(
         self,

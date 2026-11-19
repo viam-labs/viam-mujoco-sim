@@ -214,18 +214,32 @@ class Kinematics:
 
 
 def _sva_orientation(raw: Any, where: str) -> np.ndarray:
-    if not raw:
+    """An SVA orientation as a rotation. Null, absent or an empty type is the
+    identity (what RDK's drivers serve for "none"); values are radians except
+    ov_degrees."""
+    if not raw or not raw.get("type"):
         return np.eye(4)
-    kind, value = raw.get("type"), raw.get("value", {})
-    if kind not in ("ov_degrees", "ov_radians"):
-        raise ValueError(f"{where}: orientation type {kind!r} is not supported; use ov_degrees")
-    theta = float(value.get("th", 0.0))
-    if kind == "ov_degrees":
-        theta = math.radians(theta)
-    q = OrientationVector(
-        float(value.get("x", 0.0)), float(value.get("y", 0.0)), float(value.get("z", 1.0)), theta
-    ).to_quaternion()
-    return transform(quat=(q.w, q.i, q.j, q.k))
+    kind, v = raw["type"], raw.get("value") or {}
+    n = lambda key, default=0.0: float(v.get(key, default))
+    if kind in ("ov_degrees", "ov_radians"):
+        theta = math.radians(n("th")) if kind == "ov_degrees" else n("th")
+        q = OrientationVector(n("x"), n("y"), n("z", 1.0), theta).to_quaternion()
+        return transform(quat=(q.w, q.i, q.j, q.k))
+    if kind == "axis_angles":
+        return _axis_angle(_unit([n("x"), n("y"), n("z")], where, "orientation"), n("th"))
+    if kind == "quaternion":
+        w, x, y, z = n("w", 1.0), n("x"), n("y"), n("z")
+        norm = math.sqrt(w * w + x * x + y * y + z * z) or 1.0
+        return transform(quat=(w / norm, x / norm, y / norm, z / norm))
+    if kind == "euler_angles":  # RDK's roll about x, pitch about y, yaw about z
+        return (
+            _axis_angle((0, 0, 1), n("yaw")) @ _axis_angle((0, 1, 0), n("pitch"))
+            @ _axis_angle((1, 0, 0), n("roll"))
+        )
+    raise ValueError(
+        f"{where}: orientation type {kind!r} is not supported; use ov_degrees, ov_radians, "
+        "axis_angles, quaternion or euler_angles"
+    )
 
 
 def sva_pose(raw: Mapping[str, Any], where: str) -> np.ndarray:
@@ -234,6 +248,16 @@ def sva_pose(raw: Mapping[str, Any], where: str) -> np.ndarray:
     result = _sva_orientation(raw.get("orientation"), where)
     result[:3, 3] = [float(t.get(key, 0.0)) / 1000 for key in "xyz"]
     return result
+
+
+def _lower_keys(value: Any) -> Any:
+    """RDK reads SVA JSON with case-insensitive keys (real drivers serve "X");
+    lowercase every key once so the readers needn't care."""
+    if isinstance(value, dict):
+        return {k.lower(): _lower_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_lower_keys(v) for v in value]
+    return value
 
 
 def _chain(frames: dict[str, Frame], label: str) -> Kinematics:
@@ -277,6 +301,22 @@ def _unit(axis: Sequence[float], label: str, name: str) -> np.ndarray:
     return np.asarray(axis, float) / norm
 
 
+def _geometry(raw: Any) -> Any:
+    """A link's geometry with its type resolved, or None for none. An empty
+    type is inferred like RDK's GeometryConfig.ParseConfig: a box if any of
+    x, y, z is set, else a capsule if l is, else a sphere if r > 0, else none
+    (real drivers serve type "" with real sizes). An explicit type is kept."""
+    if not raw:
+        return None
+    kind = raw.get("type") or (
+        "box" if any(raw.get(key) for key in "xyz")
+        else "capsule" if raw.get("l")
+        else "sphere" if raw.get("r", 0) > 0
+        else None
+    )
+    return {**raw, "type": kind} if kind else None
+
+
 def _parse_sva(doc: Mapping[str, Any], label: str) -> Kinematics:
     frames: dict[str, Frame] = {}
     for link in doc.get("links", []):
@@ -284,7 +324,7 @@ def _parse_sva(doc: Mapping[str, Any], label: str) -> Kinematics:
             name=link["id"],
             parent=link["parent"],
             offset=sva_pose(link, f"{label}: link {link['id']!r}"),
-            geometry=link.get("geometry"),
+            geometry=_geometry(link.get("geometry")),
         ), label)
     for joint in doc.get("joints", []):
         kind = joint.get("type", "revolute")
@@ -457,7 +497,7 @@ def parse_kinematics(data: bytes, urdf: bool, label: str) -> Kinematics:
     try:
         if urdf:
             return _parse_urdf(ElementTree.fromstring(data), label)
-        return _parse_sva(json.loads(data), label)
+        return _parse_sva(_lower_keys(json.loads(data)), label)
     except (KeyError, TypeError, AttributeError, ElementTree.ParseError, json.JSONDecodeError) as error:
         kind = "URDF" if urdf else "SVA JSON"
         raise ValueError(f"{label}: not a valid {kind} kinematics file ({error!r})") from None
@@ -825,13 +865,25 @@ class Shape:
     real: bool  # at least MIN_SHAPE_M in every dimension
 
 
+PRIMITIVES = ("box", "sphere", "capsule")  # the SVA geometry types MuJoCo can collide as
+
+
+def is_primitive(geometry: Mapping[str, Any] | None) -> bool:
+    """True for a box, sphere or capsule (type given or inferred as RDK does); a mesh or point isn't."""
+    resolved = _geometry(geometry) if geometry else None
+    return bool(resolved) and resolved["type"] in PRIMITIVES
+
+
 def _mj_shape(geometry: Mapping[str, Any]) -> tuple[str, tuple[float, ...], float]:
     """(kind, MuJoCo size, smallest dimension), all m, from an SVA geometry (mm)."""
-    if "x" in geometry:
-        full = [geometry[key] / 1000 for key in "xyz"]
+    geometry = _geometry(geometry) or {"type": "sphere", "r": 0}
+    if geometry["type"] not in PRIMITIVES:
+        raise ValueError(f"geometry type {geometry['type']!r} can't collide in MuJoCo; use a box, sphere or capsule")
+    if geometry["type"] == "box":
+        full = [geometry.get(key, 0) / 1000 for key in "xyz"]
         return "box", tuple(v / 2 for v in full), min(full)
     radius = geometry["r"] / 1000
-    length = geometry.get("l", 0) / 1000
+    length = geometry.get("l", 0) / 1000 if geometry["type"] == "capsule" else 0
     if length > 2 * radius:
         return "capsule", (radius, length / 2 - radius), 2 * radius
     return "sphere", (radius,), 2 * radius
@@ -857,7 +909,7 @@ def kinematics_shapes(
     to_mj = np.linalg.inv(base_offset)
     shapes = []
     for frame in kin.frames.values():
-        if not frame.geometry:
+        if not is_primitive(frame.geometry):  # a mesh or point stays the planner's; MuJoCo collides the file's geoms
             continue
         rider = frame.parent
         while rider != "world" and kin.frames[rider].axis is None:

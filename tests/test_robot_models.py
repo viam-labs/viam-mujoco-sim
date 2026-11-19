@@ -55,6 +55,8 @@ def test_validate_rejects(cls, cfg, message):
 
 
 def test_robot_model(running_sim):
+    from viam.errors import MethodNotImplementedError
+
     from mujoco_module.models.world import MujocoWorld
 
     MujocoWorld.new(ComponentConfig(name="sim-world", attributes=dict_to_struct({})), {})
@@ -69,6 +71,8 @@ def test_robot_model(running_sim):
 
     async def run():
         assert await robot_model.get_geometries() == []
+        with pytest.raises(MethodNotImplementedError):  # a limb's kinematics carry its geometry
+            await left.get_geometries()
         await asyncio.sleep(0.3)
         positions = await left.get_joint_positions()
         assert [math.radians(v) for v in positions.values] == pytest.approx([0, -0.96, 1.16, 0, -0.3, 0], abs=1e-2)

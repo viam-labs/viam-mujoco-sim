@@ -208,9 +208,8 @@ class ArmHandle:
         self.visual_models: dict[str, bytes] = {}
         meshes = attrs.get("planning_geometry", "shapes") == "mesh"
         derive = holder is None and not urdf and not attrs.get("kinematics_url")
-        # the arm's own kinematics carry its geometry; GetGeometries leaves it to viam-server's fallback
-        self.own_urdf_kinematics = holder is None and urdf and not attrs.get("kinematics_url")
-        if not (derive or self.own_urdf_kinematics) and (meshes or attrs.get("visual_models")):
+        own_urdf = holder is None and urdf and not attrs.get("kinematics_url")
+        if not (derive or own_urdf) and (meshes or attrs.get("visual_models")):
             raise ValueError(
                 f"{label}: planning_geometry \"mesh\" and visual_models are only for an arm whose "
                 "kinematics come from its own MJCF or URDF (no kinematics_url)"
@@ -387,7 +386,7 @@ class ArmHandle:
         self._callback_key = f"arm:{name}"
         self._parent: str | None = attrs.get("parent")
         excluded: list[tuple[str, str]] = []
-        has_shapes = any(frame.geometry for frame in self.kinematics.frames.values())
+        has_shapes = any(robots.is_primitive(frame.geometry) for frame in self.kinematics.frames.values())
         # an arm in a robot file uses the file's own geoms
         # a derived arm's fitted shapes are conservative (they jammed the Lite6): the planner uses them, MuJoCo the meshes
         collision = attrs.get("collision") or (
