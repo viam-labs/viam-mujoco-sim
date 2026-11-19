@@ -1000,10 +1000,12 @@ class SimManager:
         width: int,
         height: int,
         depth_size: tuple[int, int] | None = None,
+        near_m: float | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None]:
         """RGB at width x height and, with depth_size, depth in meters along
         the optical axis at that size, both from the same sim state. Depth is
-        0 where nothing is in view."""
+        0 where nothing is in view. near_m: this render's near clip plane
+        (MuJoCo's is one for the model, a fraction of the scene's extent)."""
 
         def draw() -> tuple[np.ndarray, np.ndarray | None]:
             self.require_world()
@@ -1013,18 +1015,24 @@ class SimManager:
                     f"camera {camera!r} is not in the scene; if its frame parent is "
                     "another mujoco-sim component, configure that component"
                 )
-            renderer = self._renderer(width, height)
-            renderer.update_scene(self.data, camera=camera)
-            rgb = renderer.render().copy()
-            if depth_size is None:
-                return rgb, None
-            renderer = self._renderer(*depth_size)
-            renderer.update_scene(self.data, camera=camera)
-            renderer.enable_depth_rendering()
+            default_near = self.model.vis.map.znear
+            if near_m is not None:
+                self.model.vis.map.znear = near_m / self.model.stat.extent
             try:
-                meters = renderer.render().copy()
+                renderer = self._renderer(width, height)
+                renderer.update_scene(self.data, camera=camera)
+                rgb = renderer.render().copy()
+                if depth_size is None:
+                    return rgb, None
+                renderer = self._renderer(*depth_size)
+                renderer.update_scene(self.data, camera=camera)
+                renderer.enable_depth_rendering()
+                try:
+                    meters = renderer.render().copy()
+                finally:
+                    renderer.disable_depth_rendering()
             finally:
-                renderer.disable_depth_rendering()
+                self.model.vis.map.znear = default_near
             far = self.model.vis.map.zfar * self.model.stat.extent
             meters[meters >= far * 0.999] = 0.0
             return rgb, meters

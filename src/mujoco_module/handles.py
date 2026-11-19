@@ -848,6 +848,8 @@ class BaseHandle:
         self.base = base = bases.infer(
             model, where, attrs.get("wheels"), attrs.get("forward_axis"), attrs.get("wheel_radius_m")
         )
+        # GetGeometries: the chassis's collision hulls, with planning_geometry "mesh" (else its box)
+        self.chassis_mesh = bases.chassis_mesh(model, base) if attrs.get("planning_geometry") == "mesh" else None
         limits = bases.speed_limits(model, base)
         linear = attrs.get("max_linear_mps", limits and limits[0])
         angular = attrs.get("max_angular_dps", limits and limits[1])
@@ -1624,6 +1626,9 @@ class CameraHandle:
         self.width = int(attrs.get("width", 640))
         self.height = int(attrs.get("height", 480))
         self.fov_deg = float(attrs.get("fov_deg", 60.0))
+        # the near clip plane, m: MuJoCo's default is a fraction of the scene's size, which in a
+        # big scene clips what's a few cm away (a wrist camera's own palm)
+        self.near_m = float(attrs["near_m"]) if attrs.get("near_m") is not None else None
         # depth defaults to half the color size: raw depth is 2 bytes a pixel, uncompressed
         self.depth_width = int(attrs.get("depth_width", max(1, self.width // 2)))
         self.depth_height = int(attrs.get("depth_height", max(1, self.height // 2)))
@@ -1658,12 +1663,13 @@ class CameraHandle:
         self._sim.remove_contribution(self.name)
 
     def get_rgb(self) -> np.ndarray:
-        return self._sim.render(self.name, self.width, self.height)[0]
+        return self._sim.render(self.name, self.width, self.height, near_m=self.near_m)[0]
 
     def get_rgbd(self) -> tuple[np.ndarray, np.ndarray]:
         """RGB and depth in meters (0 = nothing in view) from one sim state."""
         rgb, depth = self._sim.render(
-            self.name, self.width, self.height, depth_size=(self.depth_width, self.depth_height)
+            self.name, self.width, self.height, depth_size=(self.depth_width, self.depth_height),
+            near_m=self.near_m,
         )
         assert depth is not None
         return rgb, depth

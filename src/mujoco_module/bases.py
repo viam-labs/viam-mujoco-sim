@@ -215,13 +215,10 @@ def infer(
         rotation = data.ximat[body].reshape(3, 3)
         izz += float((rotation @ np.diag(model.body_inertia[body]) @ rotation.T)[2, 2])
         izz += float(model.body_mass[body] * (data.xipos[body, 0] ** 2 + data.xipos[body, 1] ** 2))
-    static = static_bodies(model)
-    chassis_geoms = [g for g in collision if model.geom_bodyid[g] in static]
+    chassis_geoms = _chassis_geoms(model)
     box = None
     if chassis_geoms:
-        c, s = math.cos(yaw), math.sin(yaw)
-        turn = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-        points = np.vstack([_corners(model, data, g) for g in chassis_geoms]) @ turn.T + (0.0, 0.0, lift)
+        points = _to_viam(np.vstack([_corners(model, data, g) for g in chassis_geoms]), yaw, lift)
         low, high = points.min(axis=0), points.max(axis=0)
         box = ((low + high) / 2, high - low)
     return Base(
@@ -238,6 +235,43 @@ def infer(
         izz=izz,
         box=box,
     )
+
+
+def _chassis_geoms(model: mujoco.MjModel) -> list[int]:
+    """The chassis's colliding geoms: on bodies fixed to it, not the wheels or casters."""
+    static = static_bodies(model)
+    return [
+        g for g in range(model.ngeom)
+        if model.geom_bodyid[g] != 0 and model.geom_bodyid[g] in static and _collides(model, g)
+    ]
+
+
+def _to_viam(points: np.ndarray, yaw: float, lift: float) -> np.ndarray:
+    """Points in the file's frame (chassis at the origin) into the base's Viam frame:
+    turned so the base's forward is +Y, and lifted onto the floor."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    turn = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    return points @ turn.T + (0.0, 0.0, lift)
+
+
+def chassis_mesh(model: mujoco.MjModel, base: Base) -> bytes | None:
+    """The geoms base.box bounds, as one PLY (metres) in the base's Viam frame: a mesh's
+    convex hull (what MuJoCo collides), a primitive tessellated. None without any."""
+    from .derive_kinematics import geom_piece
+    from .meshes import pieces_ply
+
+    flat = (int(mujoco.mjtGeom.mjGEOM_PLANE), int(mujoco.mjtGeom.mjGEOM_HFIELD))
+    geoms = [g for g in _chassis_geoms(model) if int(model.geom_type[g]) not in flat]
+    if not geoms:
+        return None
+    data = mujoco.MjData(model)
+    mujoco.mj_kinematics(model, data)
+    pieces = []
+    for g in geoms:
+        vertices, faces = geom_piece(model, g, hull=True)
+        world = vertices @ data.geom_xmat[g].reshape(3, 3).T + data.geom_xpos[g]
+        pieces.append((_to_viam(world, base.yaw, base.lift), faces))
+    return pieces_ply(pieces)
 
 
 def _is_velocity(model: mujoco.MjModel, actuator: int) -> bool:

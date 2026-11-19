@@ -211,6 +211,8 @@ def test_arm_rejects_non_finite_targets(cell):
         (MujocoArm, {"asset": "lite6", "path_tolerance_delta_deg": True}),
         (MujocoCamera, {"width": 640.5}),
         (MujocoCamera, {"fov_deg": 180}),
+        (MujocoCamera, {"near_m": 0}),
+        (MujocoCamera, {"near_m": "close"}),
     ],
 )
 def test_validate_config_rejects_bad_values(model, attrs):
@@ -442,6 +444,7 @@ def test_camera_on_the_rover_looks_forward(rover_cell):
         ({"asset": "viam_rover", "max_angular_dps": -5}, "max_angular_dps"),
         ({"mjcf": "viam_rover/rover.xml", "max_angular_dps": "fast"}, "max_angular_dps"),
         ({"asset": "viam_rover", "move_timeout_margin_sec": "soon"}, "move_timeout_margin_sec"),
+        ({"asset": "viam_rover", "planning_geometry": "hull"}, 'planning_geometry must be "box" or "mesh"'),
     ],
 )
 def test_base_validate_rejects_bad_values(attrs, message):
@@ -476,6 +479,24 @@ def test_a_base_from_a_file_reports_its_inferred_shape(running_sim, tmp_path):
     assert (geometry.box.dims_mm.x, geometry.box.dims_mm.y, geometry.box.dims_mm.z) == pytest.approx((400, 600, 100))
     assert (geometry.center.x, geometry.center.y, geometry.center.z) == pytest.approx((0, 0, 200))
     assert geometry.label == "skid-chassis"
+    run(base.close())
+
+
+def test_a_base_serves_its_chassis_mesh_when_asked(running_sim, tmp_path):
+    from test_base import ROS_BASE
+    from test_bases import ply_points
+
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    path = tmp_path / "skid.xml"
+    path.write_text(ROS_BASE)
+    base = MujocoBase.new(config("skid", {
+        "world": "sim-world", "mjcf": str(path), "max_linear_mps": 1, "max_angular_dps": 90,
+        "planning_geometry": "mesh"}), {})
+    (geometry,) = run(base.get_geometries())
+    assert geometry.label == "skid-chassis" and geometry.mesh.content_type == "ply"
+    points = ply_points(geometry.mesh.mesh) * 1000  # the box's span, as a mesh
+    assert points.max(axis=0) - points.min(axis=0) == pytest.approx((400, 600, 100), abs=1e-3)
+    assert (points.max(axis=0) + points.min(axis=0)) / 2 == pytest.approx((0, 0, 200), abs=1e-3)
     run(base.close())
 
 

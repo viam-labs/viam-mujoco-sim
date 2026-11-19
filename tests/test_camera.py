@@ -89,6 +89,20 @@ def test_depth_and_point_cloud_measure_the_floor(sim):
     assert points[:, 0].min() < 0 < points[:, 0].max()
 
 
+def test_near_m_lets_a_camera_see_what_is_close(sim):
+    # looking down at the floor from half MuJoCo's default near plane (a fraction of the scene's size)
+    look_down = {"orientation_wxyz": [0, 1, 0, 0], "width": 16, "height": 12}
+    default = CameraHandle(sim, "default", {**look_down, "position": [-1, 0, 1.0]})
+    default.get_rgb()  # builds the scene
+    height = 0.5 * sim.model.vis.map.znear * sim.model.stat.extent
+    default = CameraHandle(sim, "default", {**look_down, "position": [-1, 0, height]})
+    assert not default.get_rgbd()[1].any()  # clipped: it sees through the floor to nothing
+    _, depth = CameraHandle(sim, "near", {**look_down, "position": [-1, 0, height], "near_m": height / 3}).get_rgbd()
+    assert depth == pytest.approx(np.full_like(depth, height), rel=0.05)
+    # the setting is the camera's own: the default camera still clips
+    assert not default.get_rgbd()[1].any()
+
+
 def test_depth_is_zero_where_nothing_is_in_view(sim):
     camera = CameraHandle(
         sim, "up", {"position": [0, 0, 1.0], "orientation_wxyz": [1, 0, 0, 0], "width": 16, "height": 12}

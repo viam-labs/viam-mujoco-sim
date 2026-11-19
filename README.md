@@ -833,6 +833,7 @@ gantry's) end effector by making the arm (or gantry) its frame parent.
 | `fov_deg` | float | No | `60` | Vertical field of view, between 0 and 180. |
 | `width` | int | No | `640` | Image width in pixels. |
 | `height` | int | No | `480` | Image height in pixels. |
+| `near_m` | float | No | MuJoCo's: 1% of the scene's size | Near clip plane in meters. In a big scene (a room) the default is several centimeters, so a camera next to what it must see (a wrist camera's palm) clips it: set a few millimeters. |
 | `position` | [x, y, z] | No | `[1, 1, 1]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -937,6 +938,7 @@ yard with a LIDAR on its top plate, odometry and an overview camera.
 | `max_linear_mps` | float | Asset's, else from the file | | Top speed in meters per second; scales `SetPower`. Required when neither the asset nor the wheels' velocity actuators give it. |
 | `max_angular_dps` | float | Asset's, else from the file | | Top yaw rate in degrees per second; scales `SetPower`. Same default. |
 | `move_timeout_margin_sec` | float | No | `2` | Sim time `MoveStraight` and `Spin` may go without getting closer before they fail as stalled. |
+| `planning_geometry` | string | No | `"box"` | What `GetGeometries` serves: `"box"`, one box around the chassis's collision geoms; `"mesh"`, their convex hulls as one mesh. |
 | `position` | [x, y, z] | No | `[0, 0, 0]` | Placement in meters, used when no frame is set. |
 | `orientation_wxyz` | [w, x, y, z] | No | | Orientation, used when no frame is set. |
 | `orientation_rpy_deg` | [r, p, y] | No | | Same as roll, pitch, yaw in degrees; `orientation_wxyz` wins if both are set. |
@@ -1053,7 +1055,7 @@ This one sits 120 mm ahead of the origin and 150 mm up:
 | `Stop` | Stops the base. |
 | `IsMoving` | True while the base is commanded to move or is moving. |
 | `GetProperties` | Width is the track, 0 turning radius, wheel circumference 2π × radius (Rover: 0.356 m and 0.381 m; Husky: 0.555 m and 1.037 m). |
-| `GetGeometries` | One box around the chassis's collision geoms, not the wheels or casters, in the base's frame (Rover: 260 x 300 x 100 mm, centered 80 mm up). |
+| `GetGeometries` | One box around the chassis's collision geoms, not the wheels or casters, in the base's frame (Rover: 260 x 300 x 100 mm, centered 80 mm up). With `planning_geometry` `"mesh"`, those geoms' convex hulls (a primitive tessellated) as one mesh instead. |
 
 ## Model viam-labs:mujoco-sim:lidar
 
