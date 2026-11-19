@@ -149,7 +149,7 @@ def test_convert_maps_a_bundled_arm_and_gripper():
     assert gripper["model"] == "viam-labs:mujoco-sim:gripper"
     assert gripper["attributes"] == {"world": world, "mount": "arm", "asset": "lite6_gripper"}
     assert gripper["frame"]["translation"] == GRIPPER["frame"]["translation"]  # the real TCP offset is kept
-    assert gripper["frame"]["geometry"]["type"] == "box"  # the Lite6 gripper serves no shape of its own
+    assert "geometry" not in gripper["frame"]  # the Lite6 gripper serves its own shape
     assert outcome(report, "arm")["outcome"] == "mapped"
     assert comp(config, world)["model"] == "viam-labs:mujoco-sim:world"
     assert {"type": "registry", "name": "viam-labs_mujoco-sim", "module_id": "viam-labs:mujoco-sim",

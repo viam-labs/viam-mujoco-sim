@@ -5,7 +5,7 @@ description: Build a working simulated robot cell on Viam with the viam-labs:muj
 
 # Build a mujoco-sim cell from a prompt
 
-MODULE_VERSION: 0.18.1
+MODULE_VERSION: 0.19.0
 
 Every config you write uses this registry module, pinned:
 
@@ -36,7 +36,7 @@ Turn the prompt into robot, end effector, objects, goal and sensors. Ask only ab
 - An object with no bundled asset becomes a primitive. A plate, for example, becomes a thin fixed box prop.
 - A named arm, gripper, object or environment that isn't bundled is sourced (step 2a), not substituted. Substitute only when no trusted source has it and the user doesn't give one, and record it as a scope change.
 - Bundled arms: `lite6`, `ur5e`. Bundled grippers: `lite6_gripper` (the default, the Lite6's own), `robotiq_2f85`, `robotiq_epick`.
-- Bundled bases: `viam_rover`, `clearpath_husky`, `pal_tiago_base`.
+- Bundled bases: `viam_rover`, `clearpath_husky`, `pal_tiago_base`. A base from your own file whose wheels each sit on a steer hinge is a swerve base: `SetVelocity` and `SetPower` take `linear.x` (sideways).
 - Bundled robots: `aloha`, `tiago`.
 
 ## 2a. Custom assets
@@ -74,7 +74,7 @@ Rules:
 - **Props are invisible to the motion planner,** fixed or not. Every table, wall or bin the arm must avoid is an `obstacle` component. `cell.py pick` handles the prop being picked.
 - **Always add an `overview` camera.** It is a `viam-labs:mujoco-sim:camera` on the world, about 1 m out and 0.7 m up from the work area, with `target` at the work area's center, 1280×720. It's how you see the cell.
 - A gripper's frame `translation.z` is its TCP (fingertip center). Keep the example's value.
-- The Lite6's own gripper needs a box `geometry` on its frame, 78×78×70 mm centered at z −35 mm, or the planner can clip it. `lite6-pick.json` doesn't have one, so add it. Check the README's gripper section for the others.
+- Every gripper serves its own collision shape to the planner, the Lite6's own included: don't add a box `geometry` to a gripper's frame (it adds to the served shape). Check the README's gripper section.
 
 ### Geometry reference
 

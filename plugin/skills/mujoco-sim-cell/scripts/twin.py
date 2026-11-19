@@ -228,10 +228,10 @@ ARMS = {
     "viam:ufactory:lite6": {"asset": "lite6"},
 }
 # Real gripper model -> (mujoco-sim gripper attributes, the sim arm asset it needs or None for any,
-# frame geometry to add when the real frame has none: the planner's shape for grippers that serve none).
+# frame geometry to add when the real frame has none: the planner's shape for a gripper that serves
+# none of its own; every mujoco-sim gripper does now, the Lite6's own included).
 GRIPPERS = {
-    "viam:ufactory:gripper_lite": ({"asset": "lite6_gripper"}, "lite6",
-                                   {"type": "box", "x": 78, "y": 78, "z": 70, "translation": {"x": 0, "y": 0, "z": -35}}),
+    "viam:ufactory:gripper_lite": ({"asset": "lite6_gripper"}, "lite6", None),
 }
 COPY_MODULES = {"viam:obstacle-pack", "erh:vmodutils"}  # their components are copied as they are
 FAKE_APIS = {f"rdk:component:{a}" for a in (
