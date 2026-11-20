@@ -1004,3 +1004,15 @@ def test_a_swerve_base_takes_sideways_velocity_and_power(running_sim, tmp_path):
     run(base.set_power(Vector3(x=-0.5), Vector3()))  # half power to the left
     assert (handle._u, handle._v) == pytest.approx((-0.5 * handle.max_linear_mps, 0.0))
     run(base.close())
+
+
+def test_arm_starts_at_home_joints(running_sim):
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    home = [0.3, -0.2, 0.5, 0.1, 0.4, -0.3]
+    arm = MujocoArm.new(config("a", {"world": "sim-world", "asset": "lite6", "home_joints": home}), {})
+    got = run(arm.get_joint_positions()).values
+    assert [math.radians(v) for v in got] == pytest.approx(home, abs=1e-3)
+    with pytest.raises(ValueError, match="home_joints has 2 values; the arm has 6 joints"):
+        MujocoArm.new(config("b", {"world": "sim-world", "asset": "lite6", "home_joints": [0, 0]}), {})
+    with pytest.raises(ValueError, match="home_joints must be a list of joint values"):
+        MujocoArm.validate_config(config("c", {"world": "sim-world", "asset": "lite6", "home_joints": "up"}))

@@ -357,6 +357,7 @@ servos; moves are rate limited by `max_joint_deg_s`.
 | `flange_site` | string | No | `"attachment_site"` | The MJCF site at the flange, where Viam's kinematics chain ends. Not for a `.urdf`. |
 | `flange_link` | string | With a `.urdf` that has several end links | the file's one end link | The URDF link at the flange. Only for a `.urdf`. |
 | `home_keyframe` | string | No | `"home"` | The MJCF keyframe whose `ctrl` is the start pose; all zeros without one. |
+| `home_joints` | float array | No | - | The start pose, one value per joint in chain order (radians; meters for a slide). Overrides `home_keyframe`. A URDF has no keyframes, so set this when its zero pose puts the tool into a table. |
 | `base_offset` | pose | No | identity | From the arm's frame to the MJCF's world, for an MJCF whose base differs from its kinematics file. `{"translation": {"x", "y", "z"} mm, "orientation": {"o_x", "o_y", "o_z", "theta"} degrees}`. |
 | `flange_offset` | pose | No | identity (`lite6`: 180° about Z) | From `flange_site` to Viam's end-effector frame, in the same form. |
 | `collision` | string | No | `"kinematics"` with an SVA file that has geometries, else `"mesh"` (always `"mesh"` for derived kinematics) | What MuJoCo collides the arm links with; see [Collision shapes](#collision-shapes). |
@@ -447,8 +448,8 @@ URDF; see [From a URDF](#from-a-urdf).
   its name. Each must be a position actuator (`<position>` or
   `<general biastype="affine">`) with gear 1 and gain equal to `kp`, because
   the arm writes joint positions to `ctrl`.
-- **Home.** The `home_keyframe` keyframe's `ctrl` for those actuators, or its
-  joint `qpos` when the keyframe sets no `ctrl`.
+- **Home.** `home_joints` when set; otherwise the `home_keyframe` keyframe's
+  `ctrl` for those actuators, or its joint `qpos` when the keyframe sets no `ctrl`.
 - **Gripper.** An actuator in the arm MJCF that drives none of the arm joints
   is its integrated gripper (see the gripper model).
 - **Options.** The arm file's own non-default `<option>` `cone` and
