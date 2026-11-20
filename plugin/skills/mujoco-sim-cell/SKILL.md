@@ -5,7 +5,7 @@ description: Build a working simulated robot cell on Viam with the viam-labs:muj
 
 # Build a mujoco-sim cell from a prompt
 
-MODULE_VERSION: 0.19.0
+MODULE_VERSION: 0.19.1
 
 Every config you write uses this registry module, pinned:
 
