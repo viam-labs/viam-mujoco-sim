@@ -309,6 +309,14 @@ class ArmHandle:
             float(value)
             for value in robots.home(self.model, str(attrs.get("home_keyframe", "home")), self.actuators)
         )
+        if (home_joints := attrs.get("home_joints")) is not None:
+            # a URDF has no keyframes, and its zeros can start a tool inside the table
+            if len(home_joints) != len(self.actuators):
+                raise ValueError(
+                    f"{label}: home_joints has {len(home_joints)} values; the arm has "
+                    f"{len(self.actuators)} joints"
+                )
+            self._home = tuple(float(value) for value in home_joints)
         self.root_body = self.model.body(
             int(self.model.body_rootid[self.model.jnt_bodyid[self.joints[0]]])
         ).name

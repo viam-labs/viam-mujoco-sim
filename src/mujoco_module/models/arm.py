@@ -20,6 +20,10 @@ Attributes:
   flange_link (string)             - .urdf only: the link at the flange (default the
                                      file's one end link)
   home_keyframe (string)           - MJCF keyframe with the home ctrl (default home)
+  home_joints ([float])            - the arm's start pose, one value per joint in
+                                     chain order (radians; meters for a slide):
+                                     overrides home_keyframe. A URDF has no
+                                     keyframes, so it otherwise starts at zeros
   base_offset, flange_offset       - {translation: {x,y,z} mm, orientation: {o_x,o_y,
                                      o_z,theta deg}}: arm frame to MJCF world, and
                                      flange site to Viam's end effector
@@ -303,6 +307,13 @@ class MujocoArm(Arm, EasyResource):
             or not all(isinstance(joint, str) and joint for joint in joints)
         ):
             raise ValueError(f"{config.name}: joints must be a list of MJCF joint names")
+        home_joints = attrs.get("home_joints")
+        if home_joints is not None and (
+            not isinstance(home_joints, list)
+            or not home_joints
+            or not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in home_joints)
+        ):
+            raise ValueError(f"{config.name}: home_joints must be a list of joint values")
         for key in ("flange_site", "flange_link", "home_keyframe"):
             if key in attrs and (not isinstance(attrs[key], str) or not attrs[key]):
                 raise ValueError(f"{config.name}: {key} must be a name")
