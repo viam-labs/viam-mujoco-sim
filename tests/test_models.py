@@ -98,7 +98,7 @@ def test_gripper_holding_reports_firm_grasp(cell):
     assert status.meta["jaw_m"] == status.meta["jaw"]
     assert (status.meta["open_m"], status.meta["closed_m"]) == pytest.approx((-0.0081, -1e-5))
     run(gripper.open())
-    assert run(gripper.get_current_inputs()) == [0.0]
+    assert run(gripper.get_current_inputs()) == []  # matches its 0-DoF model
 
 
 def test_arm_dynamics_and_kinematics_url(cell):

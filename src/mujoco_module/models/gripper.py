@@ -171,7 +171,11 @@ class MujocoGripper(Gripper, EasyResource):
         return Gripper.HoldingStatus(is_holding_something=holding, meta=meta)
 
     async def get_current_inputs(self, **kwargs) -> list[float]:
-        return [1.0 if self._closed else 0.0]
+        # None: the planner's model of this gripper has no DoF (get_kinematics
+        # raises), and viam-server before 1.16 panics planning a joint goal
+        # when a frame's inputs outnumber its DoF. The latch is in
+        # IsHoldingSomething's meta["input"].
+        return []
 
     async def go_to_inputs(self, values: list[float], **kwargs) -> None:
         if len(values) != 1 or float(values[0]) not in (0.0, 1.0):
