@@ -48,6 +48,7 @@ def check_robot_file(label: str, spec: mujoco.MjSpec) -> str | None:
             raise ValueError(f"{label}: a robot file can't have {kind} (found {first!r})")
     roots = {body.name for body in spec.worldbody.bodies}
     floating: list[str] = []
+    unnamed = False
     for body in spec.bodies:
         if body.mocap:
             raise ValueError(f"{label}: a robot file can't have mocap bodies (found {body.name!r})")
@@ -60,11 +61,17 @@ def check_robot_file(label: str, spec: mujoco.MjSpec) -> str | None:
                     "floating base (the file's root body, e.g. a legged robot's trunk) may have one"
                 )
             floating.append(body.name)
+            unnamed = unnamed or not (joint.name and body.name)
     if len(floating) > 1:
         raise ValueError(f"{label}: more than one floating root ({floating}); a robot file has one")
     if floating and len(roots) > 1:
         raise ValueError(
             f"{label}: a floating robot file has one root body (its trunk), found more than one root body {sorted(roots)}"
+        )
+    if unnamed:
+        raise ValueError(
+            f"{label}: a floating base's free joint and its body need names (home and "
+            "state carry-over skip unnamed joints, and gravity compensation keys on the name)"
         )
     return floating[0] if floating else None
 

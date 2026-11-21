@@ -106,6 +106,9 @@ def test_a_free_root_homes_relative_to_the_robots_frame(sim, floater):
         # a free joint below the root
         (('<body name="l_thigh" pos="0 0.03 -0.03">', '<body name="l_thigh" pos="0 0.03 -0.03"><freejoint name="loose"/>'),
          "free joint on 'l_thigh', which isn't a root body"),
+        # an unnamed free joint, and an unnamed trunk
+        (('<freejoint name="root"/>', "<freejoint/>"), "free joint and its body need names"),
+        (('<body name="trunk" pos', '<body pos'), "free joint and its body need names"),
         # a second floating root
         (("</worldbody>", '<body name="other"><freejoint/><geom size="0.01"/></body></worldbody>'),
          "more than one floating root"),
