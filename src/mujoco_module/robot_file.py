@@ -226,6 +226,8 @@ class RobotHandle:
             wanted = np.asarray([float(v) for v in targets])
             if wanted.shape != (len(drive.names),):
                 raise ValueError(f"robot {self.name}: expected {len(drive.names)} targets, got {wanted.size}")
+            if not np.isfinite(wanted).all():
+                raise ValueError(f"robot {self.name}: targets must be finite")
 
         def exchange() -> dict[str, Any]:
             sim = self._sim

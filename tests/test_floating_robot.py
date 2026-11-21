@@ -2,11 +2,14 @@
 its BAM actuators, read-only limb arms and the io DoCommand. A synthetic two-legged robot stands in
 for the MicroDuck, whose meshes are CC BY-NC-SA and stay out of this repo."""
 
+import asyncio
 import time
 
 import mujoco
 import numpy as np
 import pytest
+from viam.proto.app.robot import ComponentConfig
+from viam.utils import dict_to_struct
 
 from mujoco_module.bam import BamConfig, rewrite_spec
 from mujoco_module.handles import ArmHandle
@@ -390,6 +393,44 @@ def test_io_validates(sim5, floater):
     duck = robot(sim5, floater, actuators=BAM)
     with pytest.raises(ValueError, match="expected 4 targets"):
         duck.io([0.0], None)
+    for bad in (float("nan"), float("inf")):
+        with pytest.raises(ValueError, match="must be finite"):
+            duck.io([bad, 0.0, 0.0, 0.0], None)
     plain = RobotHandle(sim5, "pd", {"mjcf": str(floater), "position": [2, 0, 0]})
     with pytest.raises(ValueError, match="io needs actuators"):
         plain.io(None, None)
+
+
+def _component(name, attrs):
+    return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
+
+
+def test_io_do_command(running_sim, floater):
+    from mujoco_module.models.robot import MujocoRobot
+    from mujoco_module.models.world import MujocoWorld
+
+    async def run():
+        world = MujocoWorld.new(_component("sim-world", {"physics_dt": 0.005}), {})
+        duck = MujocoRobot.new(_component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": BAM}), {})
+        first = await duck.do_command({"io": {"targets": None}})
+        second = await duck.do_command({"io": {"targets": STAND, "torque": True}})
+        third = await duck.do_command({"io": {"targets": STAND}})  # no torque: unchanged
+        with pytest.raises(ValueError, match="unknown command"):
+            await duck.do_command({"nope": 1})
+        await duck.close()
+        await world.close()
+        return first, second, third
+
+    first, second, third = asyncio.run(run())
+    assert first["joints"] == ["l_hip", "l_knee", "r_hip", "r_knee"]
+    assert second["t"] >= first["t"] and len(second["gravity"]) == 3
+    assert second["torque"] is True and third["torque"] is True
+
+
+def test_validate_rejects_bad_actuators(floater):
+    from mujoco_module.models.robot import MujocoRobot
+
+    with pytest.raises(ValueError, match="unknown actuators keys"):
+        MujocoRobot.validate_config(
+            _component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": {"model": "bam", "kp": 1}})
+        )
