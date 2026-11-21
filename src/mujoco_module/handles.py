@@ -353,6 +353,10 @@ class ArmHandle:
             data = mujoco.MjData(self.model)
             mujoco.mj_kinematics(self.model, data)
             reference, parent_end = 0, np.eye(4)
+            if above is None and holder.floating_root:
+                # a floating robot's limbs are framed on its trunk, which moves with them
+                reference = self.model.body(holder.floating_root).id
+                parent_end = robots.transform(data.xpos[reference], data.xquat[reference])
             if above is not None:
                 reference = int(self.model.site(above.flange_site).bodyid[0])
                 parent_end = robots.transform(data.xpos[reference], data.xquat[reference]) @ above.end_offset

@@ -123,3 +123,26 @@ def test_free_joint_errors(sim, floater, edit, message):
 def test_a_floating_robot_cannot_ride_a_base(sim, floater):
     with pytest.raises(ValueError, match="floating robot .* must be framed on the world"):
         robot(sim, floater, parent="rover")
+
+
+def leg(side, **extra):
+    # chain base is the trunk itself, so the arm's frame relative to the robot is the identity
+    return {"robot": "duck", "parent": "duck", "joints": [f"{side}_hip", f"{side}_knee"],
+            "flange_site": f"{side}_foot", "home_joints": STAND[:2], **extra}
+
+
+def test_limbs_bind_to_a_floating_trunk(sim, floater):
+    robot(sim, floater)
+    left = ArmHandle(sim, "left-leg", leg("l"))
+    ArmHandle(sim, "right-leg", leg("r"))
+    assert left.joint_names() == ("l_hip", "l_knee")
+    assert left.get_joint_positions() == pytest.approx(STAND[:2], abs=1e-9)
+    # the arm frame site sits on the trunk and moves with it
+    assert sim.data.site("left-leg/arm_frame").xpos == pytest.approx(sim.data.body("duck/trunk").xpos)
+
+
+def test_a_limb_frame_off_the_trunk_says_what_to_paste(sim, floater):
+    robot(sim, floater)
+    # -?: inv(parent_end) @ base can leave -1e-17, printed as -0.0
+    with pytest.raises(ValueError, match=r'set frame.translation to \{"x": -?0.0, "y": -?0.0, "z": -?0.0\}'):
+        ArmHandle(sim, "left-leg", leg("l", position=[0, 0, 0.1]))
