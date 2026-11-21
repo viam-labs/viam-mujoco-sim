@@ -3,8 +3,12 @@ name = "viam-mujoco-sim"
 version = "0.1.0"
 description = "Control and simulate robots in MuJoCo through Viam"
 license = "Apache-2.0"
-requires-python = ">=3.11"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    # Rhoban's BAM actuator models (Apache-2.0), at the commit pollen-robotics/microduck_rl locks:
+    # its MujocoController takes vin_drop_gain (the branch head renamed it). Archive URL, not git+,
+    # so installing needs no git binary.
+    "better-actuator-models @ https://github.com/Rhoban/bam/archive/62bd8ce12154340be97e06f7f41a0ca8f116d967.tar.gz",
     "coacd>=1.0.14",
     "mujoco>=4.0,<5",
     "numpy>=1.26.0",
