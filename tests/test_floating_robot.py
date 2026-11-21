@@ -434,3 +434,38 @@ def test_validate_rejects_bad_actuators(floater):
         MujocoRobot.validate_config(
             _component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": {"model": "bam", "kp": 1}})
         )
+
+
+def test_io_do_command_over_the_wire(running_sim, floater):
+    # viam-sdk decodes a protobuf null as int 0; requests go through that same round trip
+    from viam.utils import struct_to_dict
+
+    from mujoco_module.models.robot import MujocoRobot
+    from mujoco_module.models.world import MujocoWorld
+
+    def wire(command):
+        return struct_to_dict(dict_to_struct(command))
+
+    async def run():
+        world = MujocoWorld.new(_component("sim-world", {"physics_dt": 0.005}), {})
+        duck = MujocoRobot.new(_component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": BAM}), {})
+        off = await duck.do_command(wire({"io": {"targets": STAND, "torque": False}}))
+        nulled = await duck.do_command(wire({"io": {"torque": None, "targets": None}}))
+        omitted = await duck.do_command(wire({"io": {"targets": STAND}}))
+        whole = await duck.do_command(wire({"io": None}))
+        errors = []
+        for bad in ({"io": [1, 2]}, {"io": {"targets": 1.0}}, {"io": {"torque": "false"}}):
+            with pytest.raises(ValueError) as err:
+                await duck.do_command(wire(bad))
+            errors.append(str(err.value))
+        await duck.close()
+        await world.close()
+        return off, nulled, omitted, whole, errors
+
+    off, nulled, omitted, whole, errors = asyncio.run(run())
+    assert [r["torque"] for r in (off, nulled, omitted, whole)] == [False] * 4
+    assert errors == [
+        "io must be an object",
+        "io.targets must be a list of numbers or null",
+        "io.torque must be true, false or null",
+    ]

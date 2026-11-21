@@ -100,6 +100,20 @@ class MujocoRobot(Generic, EasyResource):
         if "io" in command:
             if self._handle is None:
                 raise RuntimeError(f"robot {self.name} is closed")
-            request = command["io"] or {}
-            return await asyncio.to_thread(self._handle.io, request.get("targets"), request.get("torque"))
+            # viam-sdk's struct_to_dict decodes a wire null as int 0, while real numbers arrive as
+            # float, so an exact int 0 is a null (bool is not exactly int, so False stays False).
+            def value(v):
+                return None if v is None or (type(v) is int and v == 0) else v
+
+            request = value(command["io"])
+            if request is None:
+                request = {}
+            if not isinstance(request, Mapping):
+                raise ValueError("io must be an object")
+            torque, targets = value(request.get("torque")), value(request.get("targets"))
+            if torque is not None and not isinstance(torque, bool):
+                raise ValueError("io.torque must be true, false or null")
+            if targets is not None and not isinstance(targets, list):
+                raise ValueError("io.targets must be a list of numbers or null")
+            return await asyncio.to_thread(self._handle.io, targets, torque)
         raise ValueError(f"robot {self.name}: unknown command {sorted(command)}; known: ['io']")
