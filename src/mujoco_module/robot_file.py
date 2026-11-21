@@ -204,6 +204,12 @@ class RobotHandle:
             if name and f"actuator:{name}" not in claimed:
                 data.ctrl[model.actuator(self.prefix + name).id] = own.key_ctrl[self._key, actuator]
 
+    def commanded(self, names: Sequence[str]) -> list[float]:
+        """BAM's targets for these scene actuator names (sim thread)."""
+        assert self.drive is not None
+        targets = self.drive.targets(self._sim)
+        return [float(targets[self.drive.names.index(n)]) for n in names]
+
     @property
     def home_ctrl(self) -> np.ndarray:
         """The home keyframe's controls (zeros without one), in the file's actuator order."""

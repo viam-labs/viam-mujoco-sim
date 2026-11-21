@@ -286,3 +286,37 @@ def test_world_reset_rebinds_bam_to_the_reset_pose(sim5, floater):
     sim5.advance(0.005)
     assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-6)
     assert duck.drive._generation == sim5.generation
+
+
+from mujoco_module.handles import JointTrajectoryPoint
+
+
+def test_limbs_of_a_bam_robot_are_read_only(sim5, floater):
+    robot(sim5, floater, actuators=BAM)
+    left = ArmHandle(sim5, "left-leg", leg("l"))
+    assert "arm:left-leg" not in sim5.step_callbacks  # its position hold would fight BAM for ctrl
+    for call in (lambda: left.set_joint_targets([0, 0]),
+                 lambda: left.start_trajectory([JointTrajectoryPoint(0.1, (0.0, 0.0))]),
+                 lambda: left.extend_trajectory([JointTrajectoryPoint(0.1, (0.0, 0.0))]),
+                 left.stop_trajectory):
+        with pytest.raises(RuntimeError, match="read-only: robot duck's io drives it"):
+            call()
+    left.stop()  # Stop (session end, e-stop) must not fail
+    sim5.advance(0.1)
+    assert left.get_commanded_positions() == pytest.approx(STAND[:2], abs=1e-6)  # BAM's q_target
+    assert left.get_joint_positions() == pytest.approx(STAND[:2], abs=0.05)
+
+
+def test_a_limb_outside_bams_joints_is_an_error(sim5, floater):
+    robot(sim5, floater, actuators={"model": "bam", "joints": "^r_"})
+    with pytest.raises(ValueError, match="isn't driven by robot duck's BAM actuators"):
+        ArmHandle(sim5, "left-leg", leg("l"))
+
+
+def test_arm_init_pose_rebinds_bam(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.01)
+    ArmHandle(sim5, "left-leg", leg("l", home_joints=[0.2, -0.5]))  # rebuild; the arm's init sets qpos
+    sim5.advance(0.005)
+    assert duck.drive._generation == sim5.generation
+    assert duck.drive.targets(sim5)[:2] == pytest.approx([0.2, -0.5], abs=1e-6)
