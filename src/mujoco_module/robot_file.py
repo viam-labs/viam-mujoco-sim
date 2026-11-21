@@ -80,6 +80,14 @@ def check_robot_file(label: str, spec: mujoco.MjSpec) -> str | None:
     return floating[0] if floating else None
 
 
+def gravity_in_trunk(quat: np.ndarray) -> np.ndarray:
+    """World gravity (unit) in the trunk frame; upright is [0, 0, -1]. What a legged policy
+    observes, and what the real robot's IMU filter reports."""
+    rotation = np.zeros(9)
+    mujoco.mju_quat2Mat(rotation, quat)
+    return -rotation.reshape(3, 3).T[:, 2]
+
+
 class RobotHandle:
     """One robot file in the scene, under "<name>/", at `position` /
     `orientation_wxyz` on the world, or with attrs["parent"] relative to that
@@ -205,6 +213,47 @@ class RobotHandle:
             name = own.actuator(actuator).name
             if name and f"actuator:{name}" not in claimed:
                 data.ctrl[model.actuator(self.prefix + name).id] = own.key_ctrl[self._key, actuator]
+
+    def io(self, targets: Sequence[float] | None, torque: bool | None) -> dict[str, Any]:
+        """One control tick's exchange, on the sim thread between physics steps: apply torque on/off
+        and BAM position targets (in "joints" order; None leaves them), then read every joint and
+        the trunk at that one instant."""
+        drive = self.drive
+        if drive is None:
+            raise ValueError(f"robot {self.name}: io needs actuators (BAM)")
+        wanted = None
+        if targets is not None:
+            wanted = np.asarray([float(v) for v in targets])
+            if wanted.shape != (len(drive.names),):
+                raise ValueError(f"robot {self.name}: expected {len(drive.names)} targets, got {wanted.size}")
+
+        def exchange() -> dict[str, Any]:
+            sim = self._sim
+            if torque is not None:
+                drive.set_torque(sim, bool(torque))
+            if wanted is not None:
+                drive.set_targets(sim, wanted)
+            ctrl = drive.ensure_bound(sim)
+            model, data = sim.model, sim.data
+            out: dict[str, Any] = {
+                "t": float(data.time),
+                "q": data.qpos[ctrl.qpos_indexes].tolist(),
+                "dq": data.qvel[ctrl.dof_indexes].tolist(),
+                "joints": list(self._bam_names),
+                "generation": int(sim.generation),
+                "torque": drive.torque,
+            }
+            if self.floating_root:
+                joint = model.body_jntadr[model.body(self.prefix + self.floating_root).id]
+                qa, da = model.jnt_qposadr[joint], model.jnt_dofadr[joint]
+                quat = data.qpos[qa + 3 : qa + 7]
+                out["trunk_pos"] = data.qpos[qa : qa + 3].tolist()
+                out["trunk_quat_wxyz"] = quat.tolist()
+                out["gyro"] = data.qvel[da + 3 : da + 6].tolist()  # free joint: body-frame angular velocity
+                out["gravity"] = gravity_in_trunk(quat).tolist()
+            return out
+
+        return self._sim.run(exchange)
 
     def commanded(self, names: Sequence[str]) -> list[float]:
         """BAM's targets for these scene actuator names (sim thread)."""

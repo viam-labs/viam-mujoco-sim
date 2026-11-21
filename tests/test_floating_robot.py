@@ -229,12 +229,7 @@ def test_bam_drives_the_robot_and_holds_a_stand(sim5, floater):
     adr = [sim5.model.joint(f"duck/{n}").qposadr[0] for n in ("l_hip", "l_knee", "r_hip", "r_knee")]
     # held near the keyframe; the knees sag ~0.03 rad under the trunk's weight (BAM's P-only law)
     assert sim5.data.qpos[adr] == pytest.approx(STAND, abs=0.06)
-    # still upright: gravity in the trunk frame points down its z (io, which reports it, comes later)
-    quat = free_qpos(sim5)[3:]
-    inv, up = np.zeros(4), np.zeros(3)
-    mujoco.mju_negQuat(inv, quat)
-    mujoco.mju_rotVecQuat(up, np.array([0.0, 0.0, -1.0]), inv)
-    assert up[2] < -0.99
+    assert duck.io(None, None)["gravity"][2] < -0.99  # still upright
     assert np.any(sim5.data.ctrl != 0.0)  # BAM is writing torques
 
 
@@ -334,3 +329,67 @@ def test_a_robot_on_a_running_sim_never_steps_unbound(running_sim, floater):
     z, targets = running_sim.run(lambda: (free_qpos(running_sim)[2], duck.drive.targets(running_sim)))
     assert z == pytest.approx(TRUNK_Z, abs=0.005)
     assert targets == pytest.approx(STAND, abs=1e-6)
+
+
+def test_io_reads_one_instant_and_applies_targets(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    snap = duck.io(None, None)  # binds on the spot: no step has run yet
+    assert snap["joints"] == ["l_hip", "l_knee", "r_hip", "r_knee"]
+    assert snap["q"] == pytest.approx(STAND, abs=1e-9)
+    assert snap["gravity"] == pytest.approx([0, 0, -1], abs=1e-9)
+    assert snap["trunk_pos"] == pytest.approx([0, 0, TRUNK_Z]) and snap["generation"] == sim5.generation
+    t0 = snap["t"]
+    crouch = [0.25, -0.5, 0.25, -0.5]
+    duck.io(crouch, True)
+    assert duck.drive.targets(sim5) == pytest.approx(crouch, abs=1e-12)  # applied exactly
+    sim5.advance(1.0)
+    snap = duck.io(None, None)
+    assert snap["t"] == pytest.approx(t0 + 1.0, abs=0.006)
+    # BAM's P-only firmware law plus stiction leaves ~0.1 rad of steady-state error under load
+    # (probe: [0.223, -0.616] at 0.5, 1 and 2 s), so assert the move, not the exact angle
+    assert snap["q"][1] < STAND[1] - 0.1 and snap["q"][3] < STAND[3] - 0.1  # knees went deeper
+    assert snap["gravity"][2] < -0.95  # still upright (probe: -0.970)
+
+
+def test_io_after_a_rebuild_acts_on_the_new_model(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.01)
+    ArmHandle(sim5, "left-leg", leg("l", home_joints=[0.2, -0.5]))  # rebuild; no step after it
+    snap = duck.io([0.2, -0.5, 0.15, -0.3], None)  # binds to the new model itself
+    assert duck.drive._generation == sim5.generation == snap["generation"]
+    assert snap["q"][:2] == pytest.approx([0.2, -0.5], abs=1e-6)
+
+
+def test_io_gravity_and_gyro_are_in_the_trunk_frame(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    adr = sim5.model.joint("duck/root").qposadr[0]
+    dof = sim5.model.joint("duck/root").dofadr[0]
+    sim5.data.qpos[adr + 3 : adr + 7] = [0.7071068, 0.7071068, 0, 0]  # rolled +90 deg about x
+    sim5.data.qvel[dof + 3 : dof + 6] = [0.1, 0.2, 0.3]
+    mujoco.mj_forward(sim5.model, sim5.data)
+    snap = duck.io(None, None)
+    assert snap["gravity"] == pytest.approx([0, -1, 0], abs=1e-6)  # world -z seen from the rolled trunk
+    assert snap["gyro"] == pytest.approx([0.1, 0.2, 0.3])  # free-joint angular qvel: body frame
+
+
+def test_torque_off_collapses_slowly_and_torque_on_resets_targets(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.2)
+    standing = duck.io(None, None)["trunk_pos"][2]
+    duck.io(None, False)
+    sim5.advance(0.05)
+    assert np.all(sim5.data.ctrl[[sim5.model.actuator(f"duck/{n}").id for n in ("l_hip", "l_knee")]] == 0.0)
+    sim5.advance(0.45)
+    sagged = duck.io(None, None)
+    assert sagged["trunk_pos"][2] < standing - 0.005  # it collapsed
+    duck.io(None, True)
+    assert duck.drive.targets(sim5) == pytest.approx(sagged["q"], abs=1e-9)  # not flung at STAND
+
+
+def test_io_validates(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    with pytest.raises(ValueError, match="expected 4 targets"):
+        duck.io([0.0], None)
+    plain = RobotHandle(sim5, "pd", {"mjcf": str(floater), "position": [2, 0, 0]})
+    with pytest.raises(ValueError, match="io needs actuators"):
+        plain.io(None, None)
