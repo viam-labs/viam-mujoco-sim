@@ -198,6 +198,15 @@ class MujocoGripper(Gripper, EasyResource):
         its arm's own file, whose kinematics carry it."""
         return list(self._handle.geometries) if self._handle is not None else []
 
+    def _position(self) -> dict:
+        """The jaw's opening as a percentage of its travel (100 = open), and the latched command."""
+        handle = self._h()
+        if handle.suction:
+            return {"position": 0.0 if self._closed else 100.0, "input": 1.0 if self._closed else 0.0}
+        span = handle.closed_q - handle.open_q
+        pct = 100.0 * (handle.closed_q - handle.jaw()) / span if span else 100.0
+        return {"position": float(min(100.0, max(0.0, pct))), "input": 1.0 if self._closed else 0.0}
+
     async def do_command(
         self,
         command: Mapping[str, ValueTypes],
@@ -207,4 +216,6 @@ class MujocoGripper(Gripper, EasyResource):
     ) -> Mapping[str, ValueTypes]:
         if command.get("command") == "measure":
             return await asyncio.to_thread(self._h().measure)
+        if command.get("command") == "position":
+            return await asyncio.to_thread(self._position)
         raise ValueError(f"unknown command: {command}")

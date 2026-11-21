@@ -441,3 +441,41 @@ def test_a_gripper_names_its_mount_once():
     ):
         with pytest.raises(ValueError, match=message):
             deps(attrs)
+
+
+def test_position_command_reports_opening_percent(running_sim):
+    import asyncio
+    import time
+
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.arm import MujocoArm
+    from mujoco_module.models.gripper import MujocoGripper
+    from mujoco_module.models.world import MujocoWorld
+
+    def config(name, attrs):
+        return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
+
+    def settle(gripper, timeout=5.0):
+        time.sleep(0.05)  # let the command reach the sim thread
+        end = time.monotonic() + timeout
+        while asyncio.run(gripper.is_moving()):
+            assert time.monotonic() < end, "gripper still moving"
+            time.sleep(0.02)
+
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    MujocoArm.new(config("arm", {"world": "sim-world", "asset": "lite6"}), {})
+    gripper = MujocoGripper.new(config("g", {"world": "sim-world", "arm": "arm"}), {})
+
+    asyncio.run(gripper.open())
+    settle(gripper)
+    opened = asyncio.run(gripper.do_command({"command": "position"}))
+    assert opened["position"] == pytest.approx(100.0, abs=1.0)
+    assert opened["input"] == 0.0
+
+    asyncio.run(gripper.grab())
+    settle(gripper)
+    closed = asyncio.run(gripper.do_command({"command": "position"}))
+    assert closed["position"] == pytest.approx(0.0, abs=1.0)  # closed on nothing
+    assert closed["input"] == 1.0
