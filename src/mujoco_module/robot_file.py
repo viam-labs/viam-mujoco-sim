@@ -34,26 +34,39 @@ ROBOT_ASSETS: dict[str, dict[str, Any]] = {
 }
 REJECTED = ("flexes", "skins", "plugins")
 _FREE = mujoco.mjtJoint.mjJNT_FREE
-_QPOS_WIDTH = {int(mujoco.mjtJoint.mjJNT_BALL): 4}  # hinge and slide: 1; free: rejected
+_QPOS_WIDTH = {int(mujoco.mjtJoint.mjJNT_BALL): 4, int(_FREE): 7}  # hinge and slide: 1
 
 
-def check_robot_file(label: str, spec: mujoco.MjSpec) -> None:
+def check_robot_file(label: str, spec: mujoco.MjSpec) -> str | None:
     """ValueError for what a robot file can't have: flexes, skins, plugins,
-    mocap bodies and free joints (a floating base isn't supported yet)."""
+    mocap bodies, and free joints anywhere but one root body (a legged
+    robot's trunk). Returns that floating root's name, or None."""
     for kind in REJECTED:
         found = list(getattr(spec, kind, ()))
         if found:
             first = getattr(found[0], "name", "") or "#0"
             raise ValueError(f"{label}: a robot file can't have {kind} (found {first!r})")
+    roots = {body.name for body in spec.worldbody.bodies}
+    floating: list[str] = []
     for body in spec.bodies:
         if body.mocap:
             raise ValueError(f"{label}: a robot file can't have mocap bodies (found {body.name!r})")
         for joint in body.joints:
-            if joint.type == _FREE:
+            if joint.type != _FREE:
+                continue
+            if body.name not in roots:
                 raise ValueError(
-                    f"{label}: a robot file can't have a free joint yet (found one on {body.name!r}); "
-                    "its limbs must hang from fixed bodies"
+                    f"{label}: free joint on {body.name!r}, which isn't a root body; only a "
+                    "floating base (the file's root body, e.g. a legged robot's trunk) may have one"
                 )
+            floating.append(body.name)
+    if len(floating) > 1:
+        raise ValueError(f"{label}: more than one floating root ({floating}); a robot file has one")
+    if floating and len(roots) > 1:
+        raise ValueError(
+            f"{label}: a floating robot file has one root body (its trunk), found more than one root body {sorted(roots)}"
+        )
+    return floating[0] if floating else None
 
 
 class RobotHandle:
@@ -71,7 +84,12 @@ class RobotHandle:
         if self.mjcf.suffix.lower() != ".xml":
             raise ValueError(f"{label}: a robot file must be MJCF (.xml), got {self.mjcf.name}")
         spec = robots.load_mjcf(self.mjcf, None)
-        check_robot_file(label, spec)
+        self.floating_root = check_robot_file(label, spec)
+        if self.floating_root:
+            # load_mjcf gravity-compensates every body, as a fixed arm's controller does; a
+            # floating robot carries its own weight on its legs, or it hovers
+            for body in spec.bodies:
+                body.gravcomp = 0
         self.model = spec.copy().compile()  # with its keyframes, for the arms' homes
         keyframe = attrs.get("home_keyframe")
         if keyframe is None:
@@ -93,6 +111,11 @@ class RobotHandle:
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
         self.origin = robots.transform(position, quat)
         parent = attrs.get("parent")
+        if self.floating_root and parent:
+            raise ValueError(
+                f"{label}: a floating robot (free joint on {self.floating_root!r}) must be framed on "
+                f"the world, not ride {parent!r}"
+            )
         file_spec = spec
 
         def build(spec: mujoco.MjSpec) -> bool | None:
@@ -138,7 +161,16 @@ class RobotHandle:
             width = _QPOS_WIDTH.get(int(own.jnt_type[joint]), 1)
             src = own.jnt_qposadr[joint]
             dst = model.joint(self.prefix + name).qposadr[0]
-            data.qpos[dst : dst + width] = own.key_qpos[self._key, src : src + width]
+            key = own.key_qpos[self._key, src : src + width]
+            if int(own.jnt_type[joint]) == _FREE:
+                # the keyframe's trunk pose is in the file's world: put it in the robot's frame
+                pose = self.origin @ robots.transform(key[:3], key[3:])
+                data.qpos[dst : dst + 3] = pose[:3, 3]
+                data.qpos[dst + 3 : dst + 7] = robots.quat(pose)
+                dof = model.joint(self.prefix + name).dofadr[0]
+                data.qvel[dof : dof + 6] = 0.0
+            else:
+                data.qpos[dst : dst + width] = key
         for actuator in range(own.nu):
             name = own.actuator(actuator).name
             if name and f"actuator:{name}" not in claimed:

@@ -206,7 +206,7 @@ def test_a_failed_contribution_leaves_nothing_behind(sim, torso, monkeypatch):
 
 
 @pytest.mark.parametrize("insert,message", [
-    ('<body name="loose"><freejoint/><geom size="0.01"/></body>', "can't have a free joint yet"),
+    ('<body name="loose"><freejoint/><geom size="0.01"/></body>', "more than one root body|floating root"),
     ('<body name="ghost" mocap="true"><geom size="0.01" contype="0" conaffinity="0"/></body>', "can't have mocap bodies"),
 ])
 def test_robot_file_rejects(sim, torso, insert, message):
