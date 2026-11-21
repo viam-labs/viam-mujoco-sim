@@ -2,9 +2,11 @@
 its BAM actuators, read-only limb arms and the io DoCommand. A synthetic two-legged robot stands in
 for the MicroDuck, whose meshes are CC BY-NC-SA and stay out of this repo."""
 
+import mujoco
 import numpy as np
 import pytest
 
+from mujoco_module.bam import BamConfig, rewrite_spec
 from mujoco_module.handles import ArmHandle
 from mujoco_module.robot_file import RobotHandle
 
@@ -146,3 +148,50 @@ def test_a_limb_frame_off_the_trunk_says_what_to_paste(sim, floater):
     # -?: inv(parent_end) @ base can leave -1e-17, printed as -0.0
     with pytest.raises(ValueError, match=r'set frame.translation to \{"x": -?0.0, "y": -?0.0, "z": -?0.0\}'):
         ArmHandle(sim, "left-leg", leg("l", position=[0, 0, 0.1]))
+
+
+POLLEN_SOLREF = (-5.0e4, -2.0e2)
+POLLEN_SOLIMP = (0.99, 0.9999, 0.001, 0.5, 2.0)
+
+
+def pollen_rewrite(spec, bam_model):
+    """microduck_rl@0daab16 scripts/infer_policy.py load_mujoco_with_bam, the spec part."""
+    force_limit = bam_model.actuator.vin * bam_model.kt.value / bam_model.R.value
+    for act in spec.actuators:
+        if act.target.startswith("passive_"):
+            continue
+        act.set_to_motor()
+        act.forcelimited = True
+        act.forcerange = (-force_limit, force_limit)
+        act.ctrllimited = False
+        act.gear = [1.0, 0, 0, 0, 0, 0]
+        joint = spec.joint(act.target)
+        joint.damping = np.zeros(np.shape(joint.damping))
+        joint.frictionloss = 0.0
+        joint.solref_friction = POLLEN_SOLREF
+        joint.solimp_friction = POLLEN_SOLIMP
+
+
+def test_bam_config_defaults_and_errors():
+    cfg = BamConfig.from_attrs({"model": "bam"}, "robot duck")
+    assert (cfg.motor, cfg.bam_model, cfg.kp_fw, cfg.vin, cfg.vin_drop_gain, cfg.vin_min) == (
+        "xl330", "m6", 200.0, 7.4, 0.1, 6.0)
+    with pytest.raises(ValueError, match='actuators.model must be "bam"'):
+        BamConfig.from_attrs({"model": "pd"}, "robot duck")
+    with pytest.raises(ValueError, match="unknown actuators keys"):
+        BamConfig.from_attrs({"model": "bam", "kp": 3}, "robot duck")
+    with pytest.raises(ValueError, match="BAM has no motor"):
+        BamConfig.from_attrs({"model": "bam", "motor": "nope"}, "robot duck")
+
+
+def test_rewrite_matches_pollens_load_mujoco_with_bam():
+    cfg = BamConfig.from_attrs({"model": "bam"}, "t")
+    ours, theirs = mujoco.MjSpec.from_string(FLOATER), mujoco.MjSpec.from_string(FLOATER)
+    names = rewrite_spec(ours, cfg, cfg.load())
+    pollen_rewrite(theirs, cfg.load())
+    assert names == ["l_hip", "l_knee", "r_hip", "r_knee"]
+    a, b = ours.compile(), theirs.compile()
+    for field in ("actuator_gainprm", "actuator_biasprm", "actuator_gear", "actuator_forcerange",
+                  "actuator_forcelimited", "actuator_ctrllimited", "actuator_dyntype",
+                  "dof_damping", "dof_frictionloss", "dof_solref", "dof_solimp"):
+        assert getattr(a, field) == pytest.approx(getattr(b, field)), field
