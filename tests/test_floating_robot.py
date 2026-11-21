@@ -453,6 +453,8 @@ def test_io_do_command_over_the_wire(running_sim, floater):
         nulled = await duck.do_command(wire({"io": {"torque": None, "targets": None}}))
         omitted = await duck.do_command(wire({"io": {"targets": STAND}}))
         whole = await duck.do_command(wire({"io": None}))
+        await duck.do_command(wire({"io": {"torque": True}}))
+        still_on = await duck.do_command(wire({"io": {"torque": None}}))
         errors = []
         for bad in ({"io": [1, 2]}, {"io": {"targets": 1.0}}, {"io": {"torque": "false"}}):
             with pytest.raises(ValueError) as err:
@@ -460,12 +462,13 @@ def test_io_do_command_over_the_wire(running_sim, floater):
             errors.append(str(err.value))
         await duck.close()
         await world.close()
-        return off, nulled, omitted, whole, errors
+        return off, nulled, omitted, whole, still_on, errors
 
-    off, nulled, omitted, whole, errors = asyncio.run(run())
+    off, nulled, omitted, whole, still_on, errors = asyncio.run(run())
     assert [r["torque"] for r in (off, nulled, omitted, whole)] == [False] * 4
+    assert still_on["torque"] is True  # a wire null (int 0) must not turn torque off
     assert errors == [
-        "io must be an object",
-        "io.targets must be a list of numbers or null",
-        "io.torque must be true, false or null",
+        "robot duck: io must be an object",
+        "robot duck: io.targets must be a list of numbers or null",
+        "robot duck: io.torque must be true, false or null",
     ]

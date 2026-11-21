@@ -109,11 +109,11 @@ class MujocoRobot(Generic, EasyResource):
             if request is None:
                 request = {}
             if not isinstance(request, Mapping):
-                raise ValueError("io must be an object")
+                raise ValueError(f"robot {self.name}: io must be an object")
             torque, targets = value(request.get("torque")), value(request.get("targets"))
             if torque is not None and not isinstance(torque, bool):
-                raise ValueError("io.torque must be true, false or null")
+                raise ValueError(f"robot {self.name}: io.torque must be true, false or null")
             if targets is not None and not isinstance(targets, list):
-                raise ValueError("io.targets must be a list of numbers or null")
+                raise ValueError(f"robot {self.name}: io.targets must be a list of numbers or null")
             return await asyncio.to_thread(self._handle.io, targets, torque)
         raise ValueError(f"robot {self.name}: unknown command {sorted(command)}; known: ['io']")
