@@ -42,3 +42,8 @@ This product includes third-party material:
 - src/mujoco_module/models/arm.py, src/mujoco_module/models/utils.py, src/main.py,
   env.sh and run.nodetect.sh are adapted from viam-modules/viam-isaac-sim, Apache-2.0,
   Copyright Viam; modified for MuJoCo.
+- src/mujoco_module/bam.py (rewrite_spec) is a port of pollen-robotics/microduck_rl at commit
+  0daab160d3fb1c2cbaba16a4a19052f36709dd9e, scripts/infer_policy.py load_mujoco_with_bam,
+  Apache-2.0, Pollen Robotics. The pollen_rewrite oracle in tests/test_floating_robot.py is the
+  same code. src/mujoco_module/robot_file.py gravity_in_trunk follows that repository's
+  sim/body_server.py gravity_in_trunk.
