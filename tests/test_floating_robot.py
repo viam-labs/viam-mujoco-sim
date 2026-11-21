@@ -2,6 +2,8 @@
 its BAM actuators, read-only limb arms and the io DoCommand. A synthetic two-legged robot stands in
 for the MicroDuck, whose meshes are CC BY-NC-SA and stay out of this repo."""
 
+import time
+
 import mujoco
 import numpy as np
 import pytest
@@ -298,6 +300,7 @@ def test_limbs_of_a_bam_robot_are_read_only(sim5, floater):
     for call in (lambda: left.set_joint_targets([0, 0]),
                  lambda: left.start_trajectory([JointTrajectoryPoint(0.1, (0.0, 0.0))]),
                  lambda: left.extend_trajectory([JointTrajectoryPoint(0.1, (0.0, 0.0))]),
+                 lambda: left.extend_trajectory([]),
                  left.stop_trajectory):
         with pytest.raises(RuntimeError, match="read-only: robot duck's io drives it"):
             call()
@@ -320,3 +323,14 @@ def test_arm_init_pose_rebinds_bam(sim5, floater):
     sim5.advance(0.005)
     assert duck.drive._generation == sim5.generation
     assert duck.drive.targets(sim5)[:2] == pytest.approx([0.2, -0.5], abs=1e-6)
+
+
+def test_a_robot_on_a_running_sim_never_steps_unbound(running_sim, floater):
+    # the contribution and the BAM callback must land in one sim-thread task: a step in
+    # between would feed the keyframe's joint angles to the motors as torques
+    running_sim.configure_world(WorldConfig.from_attrs({"physics_dt": 0.005, "real_time": False}))
+    duck = robot(running_sim, floater, actuators=BAM)
+    time.sleep(0.5)
+    z, targets = running_sim.run(lambda: (free_qpos(running_sim)[2], duck.drive.targets(running_sim)))
+    assert z == pytest.approx(TRUNK_Z, abs=0.005)
+    assert targets == pytest.approx(STAND, abs=1e-6)

@@ -782,6 +782,7 @@ class ArmHandle:
         """Append points, timed from the end of what came before, to the running
         trajectory (same future), or start one from the commanded pose when none is
         running (the first batch of a stream, or after it ran dry)."""
+        self._check_writable()
         if not points:
             raise ValueError("trajectory needs at least one point")
         if any(b.time_s < a.time_s for a, b in itertools.pairwise(points)) or points[0].time_s < 0:

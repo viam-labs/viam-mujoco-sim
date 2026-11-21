@@ -157,14 +157,16 @@ class RobotHandle:
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             self._home(model, data)
 
-        def register() -> None:
+        def add() -> None:
+            # one sim-thread task: a step between the contribution and the BAM callback
+            # would feed the keyframe's joint angles to the motors as torques
+            sim.set_contribution(name, Contribution(build=build, init=init))  # inline on the sim thread
             sim.robots[name] = self
             if self.drive is not None:
                 drive = self.drive
                 sim.step_callbacks[self._callback_key] = lambda _dt: drive.step(sim)
 
-        sim.set_contribution(name, Contribution(build=build, init=init))
-        sim.run(register)
+        sim.run(add)
 
     def close(self) -> None:
         def detach() -> None:
