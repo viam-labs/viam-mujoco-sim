@@ -182,11 +182,18 @@ def test_bam_config_defaults_and_errors():
         BamConfig.from_attrs({"model": "bam", "kp": 3}, "robot duck")
     with pytest.raises(ValueError, match="BAM has no motor"):
         BamConfig.from_attrs({"model": "bam", "motor": "nope"}, "robot duck")
+    for bad in ({"vin": 0}, {"vin": float("nan")}, {"kp_fw": -1}, {"vin_drop_gain": -0.1}, {"vin_min": -1}):
+        with pytest.raises(ValueError, match=next(iter(bad))):
+            BamConfig.from_attrs({"model": "bam", **bad}, "robot duck")
 
 
 def test_rewrite_matches_pollens_load_mujoco_with_bam():
     cfg = BamConfig.from_attrs({"model": "bam"}, "t")
-    ours, theirs = mujoco.MjSpec.from_string(FLOATER), mujoco.MjSpec.from_string(FLOATER)
+    # one actuator with a ctrlrange and gear, so the gear and ctrllimited comparisons bite
+    xml = FLOATER.replace('<position name="l_hip" joint="l_hip"/>',
+                          '<position name="l_hip" joint="l_hip" ctrlrange="-1 1" gear="2"/>')
+    assert xml != FLOATER
+    ours, theirs = mujoco.MjSpec.from_string(xml), mujoco.MjSpec.from_string(xml)
     names = rewrite_spec(ours, cfg, cfg.load())
     pollen_rewrite(theirs, cfg.load())
     assert names == ["l_hip", "l_knee", "r_hip", "r_knee"]
@@ -195,3 +202,87 @@ def test_rewrite_matches_pollens_load_mujoco_with_bam():
                   "actuator_forcelimited", "actuator_ctrllimited", "actuator_dyntype",
                   "dof_damping", "dof_frictionloss", "dof_solref", "dof_solimp"):
         assert getattr(a, field) == pytest.approx(getattr(b, field)), field
+
+
+from mujoco_module.sim import Contribution, WorldConfig
+
+BAM = {"model": "bam"}
+
+
+@pytest.fixture
+def sim5(sim):
+    """The sim fixture's world at BAM's 5 ms step."""
+    sim.configure_world(WorldConfig.from_attrs({"physics_dt": 0.005}))
+    return sim
+
+
+def test_bam_drives_the_robot_and_holds_a_stand(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    assert sim5.model.actuator("duck/l_hip").gainprm[0] == 1.0  # a motor now
+    sim5.advance(0.005)
+    # binding must not move anything (MujocoController's mj_setConst resets the data it's given)
+    assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-9)
+    assert free_qpos(sim5)[2] == pytest.approx(TRUNK_Z, abs=0.002)
+    sim5.advance(1.0)
+    adr = [sim5.model.joint(f"duck/{n}").qposadr[0] for n in ("l_hip", "l_knee", "r_hip", "r_knee")]
+    # held near the keyframe; the knees sag ~0.03 rad under the trunk's weight (BAM's P-only law)
+    assert sim5.data.qpos[adr] == pytest.approx(STAND, abs=0.06)
+    # still upright: gravity in the trunk frame points down its z (io, which reports it, comes later)
+    quat = free_qpos(sim5)[3:]
+    inv, up = np.zeros(4), np.zeros(3)
+    mujoco.mju_negQuat(inv, quat)
+    mujoco.mju_rotVecQuat(up, np.array([0.0, 0.0, -1.0]), inv)
+    assert up[2] < -0.99
+    assert np.any(sim5.data.ctrl != 0.0)  # BAM is writing torques
+
+
+def test_bam_rollout_equals_the_controller_run_directly(sim5, floater):
+    """Same model, same start: mujoco-sim's BAM callback and a bare MujocoController agree."""
+    from bam.mujoco import MujocoController
+
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.005)  # bind
+    ref_data = mujoco.MjData(sim5.model)
+    # construct first (its mj_setConst resets ref_data), then copy the live state in exactly
+    ref = MujocoController(duck.drive.cfg.load(), list(duck.drive.names), sim5.model, ref_data,
+                           vin_drop_gain=0.1, vin_min=6.0)
+    mujoco.mj_copyData(ref_data, sim5.model, sim5.data)
+    ref.q_target[:] = duck.drive.targets(sim5)
+    ref._prev_motor_torque[:] = duck.drive._ctrl._prev_motor_torque
+    ref.last_ts = duck.drive._ctrl.last_ts
+    steps = 200
+    sim5.advance(steps * 0.005)
+    for _ in range(steps):
+        ref.update()
+        mujoco.mj_step(sim5.model, ref_data)
+    assert sim5.data.qpos == pytest.approx(ref_data.qpos, abs=1e-9)
+
+
+def test_adding_a_limb_rebinds_bam_to_the_new_model(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.01)
+    first = duck.drive._ctrl
+    # a rebuild; a limb arm on a BAM robot is Task 6's, so its init pose isn't checked here
+    sim5.set_contribution("extra", Contribution(build=lambda spec: None))
+    sim5.advance(0.005)
+    assert duck.drive._ctrl is not first and duck.drive._generation == sim5.generation
+    dof = sim5.model.joint("duck/l_hip").dofadr[0]
+    assert sim5.model.dof_armature[dof] == pytest.approx(duck.drive.cfg.load().actuator.get_extra_inertia())
+    # q_target restarts at the current pose (the knees have sagged ~2e-4 rad in 10 ms)
+    assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-3)
+
+
+def test_bam_warns_off_its_fitted_step(sim, floater, caplog):
+    robot(sim, floater, actuators=BAM)  # the fixture's world runs at 2 ms
+    assert "fitted at 0.005" in caplog.text
+
+
+def test_world_reset_rebinds_bam_to_the_reset_pose(sim5, floater):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.01)
+    duck.drive.set_targets(sim5, np.array([0.5, -0.9, 0.5, -0.9]))
+    sim5.advance(0.05)
+    sim5.reset()
+    sim5.advance(0.005)
+    assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-6)
+    assert duck.drive._generation == sim5.generation

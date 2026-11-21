@@ -885,6 +885,7 @@ class SimManager:
                 if init is not None:
                     init(self.model, self.data)
             mujoco.mj_forward(self.model, self.data)
+            self.generation += 1  # state jumped: BAM rebinds and re-homes its targets
             self.slips = 0
             self._rtf_samples.clear()
             self._reanchor()

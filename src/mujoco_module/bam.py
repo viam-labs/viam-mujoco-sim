@@ -15,7 +15,6 @@ then, which follows every contribution's init.
 from __future__ import annotations
 
 import dataclasses
-import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -26,8 +25,6 @@ import numpy as np
 
 if TYPE_CHECKING:
     from .sim import SimManager
-
-LOGGER = logging.getLogger(__name__)
 
 # BAM's stiff friction-loss constraint (bam.mjlab.BamActuator stiff_frictionloss), as infer_policy.py
 STIFF_SOLREF_FRICTION = (-5.0e4, -2.0e2)
@@ -60,6 +57,12 @@ class BamConfig:
             raise ValueError(f"{label}: unknown actuators keys {unknown}; known: {sorted(known)}")
         try:
             cfg = cls(**{k: (str(v) if k in _STRINGS else float(v)) for k, v in attrs.items()})
+            for key in ("vin", "kp_fw"):
+                if not np.isfinite(getattr(cfg, key)) or getattr(cfg, key) <= 0:
+                    raise ValueError(f"{key} must be a positive number")
+            for key in ("vin_drop_gain", "vin_min"):
+                if not np.isfinite(getattr(cfg, key)) or getattr(cfg, key) < 0:
+                    raise ValueError(f"{key} must be a non-negative number")
             re.compile(cfg.joints)
         except (TypeError, ValueError, re.error) as error:
             raise ValueError(f"{label}: actuators: {error}") from None

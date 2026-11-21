@@ -11,6 +11,7 @@ only what nobody claims, from its home keyframe.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -19,9 +20,12 @@ import numpy as np
 from viam.proto.common import Geometry
 
 from . import robots
+from .bam import FIT_DT, BamConfig, BamDrive, rewrite_spec
 from .handles import VIAM_FRAME_SITE, _mount
 from .scenes import geom_geometry, _label
 from .sim import Contribution, SimManager
+
+LOGGER = logging.getLogger(__name__)
 
 # Bundled robot files: default attributes for the robot's `asset`. Paths are
 # relative to assets/.
@@ -97,6 +101,19 @@ class RobotHandle:
             # floating robot carries its own weight on its legs, or it hovers
             for body in spec.bodies:
                 body.gravcomp = 0
+        self.drive: BamDrive | None = None
+        if attrs.get("actuators") is not None:
+            cfg = BamConfig.from_attrs(attrs["actuators"], label)
+            names = rewrite_spec(spec, cfg, cfg.load())  # before compile, so self.model has motors too
+            self.drive = BamDrive(cfg, [self.prefix + n for n in names])
+            self._bam_names = tuple(names)  # file names, io's "joints" order
+            dt = sim.run(lambda: sim.cfg.physics_dt if sim.cfg is not None else None)
+            if dt is not None and abs(dt - FIT_DT) > 1e-9:
+                LOGGER.warning(
+                    "%s: BAM's servo model is fitted at 0.005 s physics steps; the world runs at %s "
+                    "(set the world's physics_dt to 0.005)", label, dt,
+                )
+        self._callback_key = f"robot-bam:{name}"
         self.model = spec.copy().compile()  # with its keyframes, for the arms' homes
         keyframe = attrs.get("home_keyframe")
         if keyframe is None:
@@ -142,12 +159,16 @@ class RobotHandle:
 
         def register() -> None:
             sim.robots[name] = self
+            if self.drive is not None:
+                drive = self.drive
+                sim.step_callbacks[self._callback_key] = lambda _dt: drive.step(sim)
 
         sim.set_contribution(name, Contribution(build=build, init=init))
         sim.run(register)
 
     def close(self) -> None:
         def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
             if self._sim.robots.get(self.name) is self:
                 del self._sim.robots[self.name]
 
