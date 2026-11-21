@@ -9,11 +9,15 @@ import mujoco
 import numpy as np
 import pytest
 from viam.proto.app.robot import ComponentConfig
-from viam.utils import dict_to_struct
+from bam.mujoco import MujocoController
+from viam.utils import dict_to_struct, struct_to_dict
 
 from mujoco_module.bam import BamConfig, rewrite_spec
-from mujoco_module.handles import ArmHandle
+from mujoco_module.handles import ArmHandle, JointTrajectoryPoint
+from mujoco_module.models.robot import MujocoRobot
+from mujoco_module.models.world import MujocoWorld
 from mujoco_module.robot_file import RobotHandle
+from mujoco_module.sim import Contribution, WorldConfig
 
 # A 0.3 kg trunk on a free joint, and two 2-hinge legs about y with wide flat box feet, so it
 # stands statically. Actuator order interleaves the legs the way the duck's file does (left, then
@@ -209,8 +213,6 @@ def test_rewrite_matches_pollens_load_mujoco_with_bam():
         assert getattr(a, field) == pytest.approx(getattr(b, field)), field
 
 
-from mujoco_module.sim import Contribution, WorldConfig
-
 BAM = {"model": "bam"}
 
 
@@ -238,8 +240,6 @@ def test_bam_drives_the_robot_and_holds_a_stand(sim5, floater):
 
 def test_bam_rollout_equals_the_controller_run_directly(sim5, floater):
     """Same model, same start: mujoco-sim's BAM callback and a bare MujocoController agree."""
-    from bam.mujoco import MujocoController
-
     duck = robot(sim5, floater, actuators=BAM)
     sim5.advance(0.005)  # bind
     ref_data = mujoco.MjData(sim5.model)
@@ -286,9 +286,6 @@ def test_world_reset_rebinds_bam_to_the_reset_pose(sim5, floater):
     sim5.advance(0.005)
     assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-6)
     assert duck.drive._generation == sim5.generation
-
-
-from mujoco_module.handles import JointTrajectoryPoint
 
 
 def test_limbs_of_a_bam_robot_are_read_only(sim5, floater):
@@ -405,13 +402,15 @@ def _component(name, attrs):
     return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
 
 
-def test_io_do_command(running_sim, floater):
-    from mujoco_module.models.robot import MujocoRobot
-    from mujoco_module.models.world import MujocoWorld
+def _world_and_duck(floater):
+    world = MujocoWorld.new(_component("sim-world", {"physics_dt": 0.005}), {})
+    duck = MujocoRobot.new(_component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": BAM}), {})
+    return world, duck
 
+
+def test_io_do_command(running_sim, floater):
     async def run():
-        world = MujocoWorld.new(_component("sim-world", {"physics_dt": 0.005}), {})
-        duck = MujocoRobot.new(_component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": BAM}), {})
+        world, duck = _world_and_duck(floater)
         first = await duck.do_command({"io": {"targets": None}})
         second = await duck.do_command({"io": {"targets": STAND, "torque": True}})
         third = await duck.do_command({"io": {"targets": STAND}})  # no torque: unchanged
@@ -428,8 +427,6 @@ def test_io_do_command(running_sim, floater):
 
 
 def test_validate_rejects_bad_actuators(floater):
-    from mujoco_module.models.robot import MujocoRobot
-
     with pytest.raises(ValueError, match="unknown actuators keys"):
         MujocoRobot.validate_config(
             _component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": {"model": "bam", "kp": 1}})
@@ -438,17 +435,11 @@ def test_validate_rejects_bad_actuators(floater):
 
 def test_io_do_command_over_the_wire(running_sim, floater):
     # viam-sdk decodes a protobuf null as int 0; requests go through that same round trip
-    from viam.utils import struct_to_dict
-
-    from mujoco_module.models.robot import MujocoRobot
-    from mujoco_module.models.world import MujocoWorld
-
     def wire(command):
         return struct_to_dict(dict_to_struct(command))
 
     async def run():
-        world = MujocoWorld.new(_component("sim-world", {"physics_dt": 0.005}), {})
-        duck = MujocoRobot.new(_component("duck", {"world": "sim-world", "mjcf": str(floater), "actuators": BAM}), {})
+        world, duck = _world_and_duck(floater)
         off = await duck.do_command(wire({"io": {"targets": STAND, "torque": False}}))
         nulled = await duck.do_command(wire({"io": {"torque": None, "targets": None}}))
         omitted = await duck.do_command(wire({"io": {"targets": STAND}}))
@@ -472,3 +463,63 @@ def test_io_do_command_over_the_wire(running_sim, floater):
         "robot duck: io.targets must be a list of numbers or null",
         "robot duck: io.torque must be true, false or null",
     ]
+
+
+def test_a_fixed_robot_with_actuators_has_no_gravity_compensation(sim5, tmp_path):
+    fixed = FLOATER.replace('<freejoint name="root"/>', "").replace("0 0 0.234 1 0 0 0  ", "")
+    path = tmp_path / "fixed.xml"
+    path.write_text(fixed)
+    robot(sim5, path, actuators=BAM)
+    assert not sim5.model.body_gravcomp.any()
+
+
+def test_a_limb_reads_the_live_robot_after_a_rebuild(sim5, floater):
+    old = robot(sim5, floater, actuators=BAM)
+    left = ArmHandle(sim5, "left-leg", leg("l"))
+    old.close()
+    new = robot(sim5, floater, actuators=BAM)
+    assert new.drive is not old.drive
+    new.io([0.2, -0.5, 0.15, -0.3], None)
+    assert left.get_commanded_positions() == pytest.approx([0.2, -0.5], abs=1e-9)
+    new.close()
+    with pytest.raises(RuntimeError, match="not in the scene"):
+        left.get_commanded_positions()
+
+
+def test_a_failing_bam_update_keeps_the_callback(sim5, floater, monkeypatch):
+    duck = robot(sim5, floater, actuators=BAM)
+    sim5.advance(0.005)
+    calls = []
+    real = duck.drive._ctrl.update
+
+    def update():
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        real()
+
+    monkeypatch.setattr(duck.drive._ctrl, "update", update)
+    sim5.advance(0.005)
+    assert "robot-bam:duck" in sim5.step_callbacks
+    sim5.advance(0.01)
+    assert len(calls) == 3  # it kept stepping after the failure
+
+
+def test_two_bam_robots_have_independent_targets(sim5, floater):
+    one = RobotHandle(sim5, "one", {"mjcf": str(floater), "actuators": BAM, "position": [0, 0, 0]})
+    two = RobotHandle(sim5, "two", {"mjcf": str(floater), "actuators": BAM, "position": [2, 0, 0]})
+    one.io([0.25, -0.5, 0.25, -0.5], None)
+    assert one.drive.targets(sim5) == pytest.approx([0.25, -0.5, 0.25, -0.5])
+    assert two.drive.targets(sim5) == pytest.approx(STAND)
+    sim5.advance(0.1)
+    assert two.io(None, None)["q"] == pytest.approx(STAND, abs=0.05)
+
+
+def test_a_robot_closed_and_recreated_under_one_name_stands(sim5, floater):
+    robot(sim5, floater, actuators=BAM).close()
+    assert "robot-bam:duck" not in sim5.step_callbacks
+    duck = robot(sim5, floater, actuators=BAM)
+    assert "robot-bam:duck" in sim5.step_callbacks
+    sim5.advance(0.2)
+    assert free_qpos(sim5)[2] == pytest.approx(TRUNK_Z, abs=0.005)
+    assert duck.drive.targets(sim5) == pytest.approx(STAND, abs=1e-6)

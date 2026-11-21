@@ -15,6 +15,7 @@ then, which follows every contribution's init.
 from __future__ import annotations
 
 import dataclasses
+import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -22,6 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 import mujoco
 import numpy as np
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .sim import SimManager
@@ -119,6 +122,7 @@ class BamDrive:
         self.torque = True
         self._ctrl: Any = None
         self._generation = -1
+        self._failed_generation = -1
 
     def present(self, sim: SimManager) -> bool:
         return sim.model is not None and mujoco.mj_name2id(
@@ -147,12 +151,17 @@ class BamDrive:
         return self._ctrl
 
     def step(self, sim: SimManager) -> None:
-        """The step callback's body: never raises while the robot is absent (step_once drops a
-        callback that raises)."""
+        """The step callback's body: never raises (step_once drops a callback that raises)."""
         if not self.present(sim):
             return
-        ctrl = self.ensure_bound(sim)
-        ctrl.update()
+        try:
+            ctrl = self.ensure_bound(sim)
+            ctrl.update()
+        except Exception:
+            if self._failed_generation != sim.generation:  # once per generation, not per step
+                self._failed_generation = sim.generation
+                LOGGER.exception("BAM step failed for %s; skipping it", self.names[0])
+            return
         if not self.torque:  # limp: no motor torque; BAM's friction on the back-driven gears stays
             sim.data.ctrl[ctrl.act_indexes] = 0.0
 

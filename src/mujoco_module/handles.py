@@ -316,7 +316,7 @@ class ArmHandle:
                     f"{label}: actuator {missing[0].removeprefix(self.file_prefix)!r} isn't driven by "
                     f"robot {self.robot}'s BAM actuators (its actuators.joints); a limb of a BAM robot is read-only"
                 )
-        self._bam_robot = holder if driven else None
+        self._bam = bool(driven)  # the live robot is looked up per call: a rebuilt robot has a new drive
         self._home = tuple(
             float(value)
             for value in robots.home(self.model, str(attrs.get("home_keyframe", "home")), self.actuators)
@@ -519,7 +519,7 @@ class ArmHandle:
             sim.set_contribution(name, contribution)  # inline on the sim thread
             if holder is not None:
                 claim(sim, self.robot, claims, name)
-            if self._bam_robot is None:  # its position hold would fight BAM for ctrl
+            if not self._bam:  # its position hold would fight BAM for ctrl
                 sim.step_callbacks[self._callback_key] = self._on_step
             sim.arms[name] = self
 
@@ -680,7 +680,7 @@ class ArmHandle:
         return self._sim.run(read)
 
     def _check_writable(self) -> None:
-        if self._bam_robot is not None:
+        if self._bam:
             raise RuntimeError(
                 f"arm {self.name!r} is read-only: robot {self.robot}'s io drives it (BAM actuators)"
             )
@@ -690,9 +690,12 @@ class ArmHandle:
         point): measured positions trail it; a BAM robot's limb reports BAM's targets."""
 
         def read() -> list[float]:
-            if self._bam_robot is not None:
+            if self._bam:
                 self._now()  # raises while the arm is out of the scene
-                return self._bam_robot.commanded(self._actuator_names)
+                live = self._sim.robots.get(self.robot)
+                if live is None:
+                    raise self._absent()
+                return live.commanded(self._actuator_names)
             data, ids = self._now()
             return [float(value) for value in data.ctrl[ids.ctrl]]
 
@@ -813,7 +816,7 @@ class ArmHandle:
         self._sim.run(stop)
 
     def stop(self) -> None:
-        if self._bam_robot is not None:
+        if self._bam:
             return
 
         def stop() -> None:

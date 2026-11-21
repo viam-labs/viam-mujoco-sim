@@ -104,9 +104,10 @@ class RobotHandle:
             raise ValueError(f"{label}: a robot file must be MJCF (.xml), got {self.mjcf.name}")
         spec = robots.load_mjcf(self.mjcf, None)
         self.floating_root = check_robot_file(label, spec)
-        if self.floating_root:
+        if self.floating_root or attrs.get("actuators") is not None:
             # load_mjcf gravity-compensates every body, as a fixed arm's controller does; a
-            # floating robot carries its own weight on its legs, or it hovers
+            # floating robot carries its own weight on its legs, or it hovers, and BAM models the
+            # load: gravcomp would hide the sag it exists to model
             for body in spec.bodies:
                 body.gravcomp = 0
         self.drive: BamDrive | None = None
