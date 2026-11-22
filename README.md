@@ -1480,6 +1480,7 @@ left arm set the block down in the middle and the right arm carry it on.
 | `asset` | string | One of `asset`, `mjcf` | | A bundled robot: `"aloha"` or `"tiago"`. |
 | `mjcf` | string | One of `asset`, `mjcf` | | Your robot's `.xml` MJCF file: an absolute path, `~/...`, or a path relative to the module's `assets/`. URDF robot files aren't supported yet. |
 | `home_keyframe` | string | No | the file's first keyframe | Sets the joints no arm or gripper drives. |
+| `actuators` | object | No | | Drive the file's actuators as BAM servos ([below](#floating-base-bam-servos-and-io)). |
 
 The robot's frame parent is `world` or a mujoco-sim base (any mujoco-sim
 component with a Viam frame): the robot then rides it at the frame's offset
@@ -1487,7 +1488,8 @@ from the base's frame, and is built after it. While the base is missing, the
 robot, its arms and grippers are out of the scene and their calls error, as
 for an arm on a base. The file
 can have actuators, tendons and equality constraints; mocap bodies, plugins,
-flexes, skins and free joints are errors. Its names in the scene get the
+flexes and skins are errors, and so is a free joint unless it is the floating
+base below. Its names in the scene get the
 prefix `<name>/`.
 
 ### Limbs
@@ -1519,11 +1521,73 @@ arms can't share a joint. A gripper on the arm finds its actuator below the
 arm's last joint (an `actuator` you name must be one of those), as for an arm
 with its gripper in its own MJCF.
 
+### Floating base, BAM servos and io
+
+For a free-standing legged robot, such as a biped, driven by servo models
+instead of position actuators.
+
+**Floating base.** The file may have one free joint, on its single root body
+(the trunk). Both need names. The robot must then be framed on `world`, and the
+keyframe's trunk pose is applied in the robot's frame. Gravity compensation is
+off, so the robot stands on its legs. Limb arms are framed on the trunk, and
+their config error gives the values to paste. The robot's own Viam frame stays
+where it is configured, so read the trunk's pose from the `io` DoCommand, which
+needs `actuators` (BAM): a floating robot without `actuators` has no `io`.
+
+**`actuators`.** Optional. `"model": "bam"` is required when it is set; the rest
+are optional, with these defaults:
+
+```json
+"actuators": {"model": "bam", "motor": "xl330", "bam_model": "m6", "kp_fw": 200, "vin": 7.4,
+              "vin_drop_gain": 0.1, "vin_min": 6.0, "joints": "^(?!passive_).*"}
+```
+
+The actuators whose joint matches the `joints` regex become torque motors driven
+by Rhoban's [BAM](https://github.com/Rhoban/bam) (better-actuator-models,
+Apache-2.0), including its supply-voltage sag (`vin_drop_gain` 0 turns it off).
+`joints` is matched with `re.match`, so it is anchored at the start; the default
+excludes `passive_*` joints. Every matched actuator must drive a joint (a tendon
+actuator is an error). A gripper on a BAM robot should have its actuator excluded
+via `joints`.
+
+BAM's fit is valid at 5 ms, so set the world's `physics_dt` to 0.005; the robot
+warns otherwise, checked when the robot is configured. Gravity compensation is
+off for floating robots and for any robot with `actuators`: BAM models the load,
+and compensation would hide the sag. Limb arms on a BAM robot are read-only:
+motion commands error, `stop` does nothing, and commanded positions are BAM's
+targets. Every actuator of such an arm must be BAM-driven, or the arm's config
+errors. BAM rebinds when the scene is rebuilt and on a world reset, and its
+targets restart at the current pose.
+
+**`io` DoCommand.** One exchange at one sim instant: targets are applied, then
+the state is read. `null` or omitted leaves `targets` or `torque` unchanged
+(non-finite targets are rejected).
+
+```json
+{"io": {"targets": [0.0, 0.1], "torque": true}}
+```
+
+```json
+{"t": 12.34, "q": [], "dq": [], "joints": [], "generation": 3, "torque": true,
+ "trunk_pos": [0, 0, 0.2], "trunk_quat_wxyz": [1, 0, 0, 0],
+ "gyro": [0, 0, 0], "gravity": [0, 0, -1]}
+```
+
+`q`, `dq` and `joints` are in the order of the matched actuators. The last four
+keys are for floating robots only: `gyro` is the trunk's angular velocity in the
+trunk frame, and `gravity` the unit gravity vector in the trunk frame (upright is
+`[0, 0, -1]`). `generation` changes when the scene is rebuilt or reset, so a
+controller should stop if it changes; through Viam, numbers arrive as floats, so
+compare `int(generation)`. `torque: false` goes limp, with BAM's gear friction
+left. `torque: true` after `false` restarts the targets at the current pose;
+targets sent in the same call win, because torque is applied first.
+
 ### Supported API
 
 | Method | Notes |
 |---|---|
 | `GetGeometries` | The file's fixed parts, in the robot's frame, except the bodies a limb hangs from (its arm's kinematics carry those). ALOHA and TIAGo have none (TIAGo's column is the torso arm's). |
+| `DoCommand` | `{"io": {"targets": [...], "torque": true}}` exchanges targets and state with a BAM robot's servos in one step; errors without `actuators`. See [Floating base, BAM servos and io](#floating-base-bam-servos-and-io). |
 
 If the robot is removed, its arms and grippers error until it's back; then the
 arms return to their home and the grippers keep their last command.
@@ -2774,7 +2838,7 @@ move).
 
 ## Run it locally
 
-Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.11 itself),
+Requires [uv](https://docs.astral.sh/uv/) (it installs Python 3.12 itself; 3.12 only, since BAM requires <3.13),
 `make`, and `viam-server` for running on a machine.
 
 ```sh

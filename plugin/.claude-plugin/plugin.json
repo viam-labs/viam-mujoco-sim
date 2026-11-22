@@ -1,6 +1,6 @@
 {
   "name": "mujoco-sim",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Build and test simulated Viam robot cells in MuJoCo from a prompt, with the viam-labs:mujoco-sim module.",
   "author": { "name": "Viam Labs" },
   "homepage": "https://github.com/viam-labs/viam-mujoco-sim",

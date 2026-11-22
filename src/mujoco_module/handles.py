@@ -302,9 +302,21 @@ class ArmHandle:
         if urdf:
             robots.prepare_urdf_arm(spec, [self.model.joint(j).name for j in self.joints], flange, where)
             self.model = spec.compile()
-        self.actuators = robots.arm_actuators(self.model, self.joints, where)
+        driven = () if holder is None or holder.drive is None else {
+            n.removeprefix(holder.prefix) for n in holder.drive.names
+        }
+        self.actuators = robots.arm_actuators(self.model, self.joints, where, driven)
         self._joint_names = tuple(self.file_prefix + self.model.joint(j).name for j in self.joints)
         self._actuator_names = tuple(self.file_prefix + self.model.actuator(a).name for a in self.actuators)
+        if driven:
+            # a BAM robot's limb is read-only: its io drives the servos
+            missing = [n for n in self._actuator_names if n not in holder.drive.names]
+            if missing:
+                raise ValueError(
+                    f"{label}: actuator {missing[0].removeprefix(self.file_prefix)!r} isn't driven by "
+                    f"robot {self.robot}'s BAM actuators (its actuators.joints); a limb of a BAM robot is read-only"
+                )
+        self._bam = bool(driven)  # the live robot is looked up per call: a rebuilt robot has a new drive
         self._home = tuple(
             float(value)
             for value in robots.home(self.model, str(attrs.get("home_keyframe", "home")), self.actuators)
@@ -353,6 +365,10 @@ class ArmHandle:
             data = mujoco.MjData(self.model)
             mujoco.mj_kinematics(self.model, data)
             reference, parent_end = 0, np.eye(4)
+            if above is None and holder.floating_root:
+                # a floating robot's limbs are framed on its trunk, which moves with them
+                reference = self.model.body(holder.floating_root).id
+                parent_end = robots.transform(data.xpos[reference], data.xquat[reference])
             if above is not None:
                 reference = int(self.model.site(above.flange_site).bodyid[0])
                 parent_end = robots.transform(data.xpos[reference], data.xquat[reference]) @ above.end_offset
@@ -503,7 +519,8 @@ class ArmHandle:
             sim.set_contribution(name, contribution)  # inline on the sim thread
             if holder is not None:
                 claim(sim, self.robot, claims, name)
-            sim.step_callbacks[self._callback_key] = self._on_step
+            if not self._bam:  # its position hold would fight BAM for ctrl
+                sim.step_callbacks[self._callback_key] = self._on_step
             sim.arms[name] = self
 
         sim.run(add)
@@ -662,17 +679,30 @@ class ArmHandle:
 
         return self._sim.run(read)
 
+    def _check_writable(self) -> None:
+        if self._bam:
+            raise RuntimeError(
+                f"arm {self.name!r} is read-only: robot {self.robot}'s io drives it (BAM actuators)"
+            )
+
     def get_commanded_positions(self) -> list[float]:
         """Where the servos are being driven now (on a trajectory, its current
-        point): measured positions trail it."""
+        point): measured positions trail it; a BAM robot's limb reports BAM's targets."""
 
         def read() -> list[float]:
+            if self._bam:
+                self._now()  # raises while the arm is out of the scene
+                live = self._sim.robots.get(self.robot)
+                if live is None:
+                    raise self._absent()
+                return live.commanded(self._actuator_names)
             data, ids = self._now()
             return [float(value) for value in data.ctrl[ids.ctrl]]
 
         return self._sim.run(read)
 
     def set_joint_targets(self, positions: Sequence[float]) -> None:
+        self._check_writable()
         targets = np.asarray([float(value) for value in positions])
         if targets.shape != (len(self._joint_names),):
             raise ValueError(f"expected {len(self._joint_names)} joint targets")
@@ -728,6 +758,7 @@ class ArmHandle:
     def start_trajectory(self, points: Sequence[JointTrajectoryPoint]) -> Future:
         """Follow timestamped points in sim time. The future resolves when the
         last point's time passes; the arm then holds that point."""
+        self._check_writable()
         if not points:
             raise ValueError("trajectory needs at least one point")
         count = len(self._joint_names)
@@ -754,6 +785,7 @@ class ArmHandle:
         """Append points, timed from the end of what came before, to the running
         trajectory (same future), or start one from the commanded pose when none is
         running (the first batch of a stream, or after it ran dry)."""
+        self._check_writable()
         if not points:
             raise ValueError("trajectory needs at least one point")
         if any(b.time_s < a.time_s for a, b in itertools.pairwise(points)) or points[0].time_s < 0:
@@ -775,6 +807,8 @@ class ArmHandle:
         return future if future is not None else self.start_trajectory(points)
 
     def stop_trajectory(self) -> None:
+        self._check_writable()
+
         def stop() -> None:
             if self._drop_trajectory() is not None:
                 self._hold_measured()
@@ -782,6 +816,9 @@ class ArmHandle:
         self._sim.run(stop)
 
     def stop(self) -> None:
+        if self._bam:
+            return
+
         def stop() -> None:
             if not self._in_scene():
                 return  # nothing to hold; Stop (session end, e-stop) must not fail

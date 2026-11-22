@@ -11,6 +11,7 @@ only what nobody claims, from its home keyframe.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any
 
@@ -19,9 +20,12 @@ import numpy as np
 from viam.proto.common import Geometry
 
 from . import robots
+from .bam import FIT_DT, BamConfig, BamDrive, rewrite_spec
 from .handles import VIAM_FRAME_SITE, _mount
 from .scenes import geom_geometry, _label
 from .sim import Contribution, SimManager
+
+LOGGER = logging.getLogger(__name__)
 
 # Bundled robot files: default attributes for the robot's `asset`. Paths are
 # relative to assets/.
@@ -34,26 +38,54 @@ ROBOT_ASSETS: dict[str, dict[str, Any]] = {
 }
 REJECTED = ("flexes", "skins", "plugins")
 _FREE = mujoco.mjtJoint.mjJNT_FREE
-_QPOS_WIDTH = {int(mujoco.mjtJoint.mjJNT_BALL): 4}  # hinge and slide: 1; free: rejected
+_QPOS_WIDTH = {int(mujoco.mjtJoint.mjJNT_BALL): 4, int(_FREE): 7}  # hinge and slide: 1
 
 
-def check_robot_file(label: str, spec: mujoco.MjSpec) -> None:
+def check_robot_file(label: str, spec: mujoco.MjSpec) -> str | None:
     """ValueError for what a robot file can't have: flexes, skins, plugins,
-    mocap bodies and free joints (a floating base isn't supported yet)."""
+    mocap bodies, and free joints anywhere but one root body (a legged
+    robot's trunk). Returns that floating root's name, or None."""
     for kind in REJECTED:
         found = list(getattr(spec, kind, ()))
         if found:
             first = getattr(found[0], "name", "") or "#0"
             raise ValueError(f"{label}: a robot file can't have {kind} (found {first!r})")
+    roots = {body.name for body in spec.worldbody.bodies}
+    floating: list[str] = []
+    unnamed = False
     for body in spec.bodies:
         if body.mocap:
             raise ValueError(f"{label}: a robot file can't have mocap bodies (found {body.name!r})")
         for joint in body.joints:
-            if joint.type == _FREE:
+            if joint.type != _FREE:
+                continue
+            if body.name not in roots:
                 raise ValueError(
-                    f"{label}: a robot file can't have a free joint yet (found one on {body.name!r}); "
-                    "its limbs must hang from fixed bodies"
+                    f"{label}: free joint on {body.name!r}, which isn't a root body; only a "
+                    "floating base (the file's root body, e.g. a legged robot's trunk) may have one"
                 )
+            floating.append(body.name)
+            unnamed = unnamed or not (joint.name and body.name)
+    if len(floating) > 1:
+        raise ValueError(f"{label}: more than one floating root ({floating}); a robot file has one")
+    if floating and len(roots) > 1:
+        raise ValueError(
+            f"{label}: a floating robot file has one root body (its trunk), found more than one root body {sorted(roots)}"
+        )
+    if unnamed:
+        raise ValueError(
+            f"{label}: a floating base's free joint and its body need names (home and "
+            "state carry-over skip unnamed joints, and gravity compensation keys on the name)"
+        )
+    return floating[0] if floating else None
+
+
+def gravity_in_trunk(quat: np.ndarray) -> np.ndarray:
+    """World gravity (unit) in the trunk frame; upright is [0, 0, -1]. What a legged policy
+    observes, and what the real robot's IMU filter reports."""
+    rotation = np.zeros(9)
+    mujoco.mju_quat2Mat(rotation, quat)
+    return -rotation.reshape(3, 3).T[:, 2]
 
 
 class RobotHandle:
@@ -71,7 +103,26 @@ class RobotHandle:
         if self.mjcf.suffix.lower() != ".xml":
             raise ValueError(f"{label}: a robot file must be MJCF (.xml), got {self.mjcf.name}")
         spec = robots.load_mjcf(self.mjcf, None)
-        check_robot_file(label, spec)
+        self.floating_root = check_robot_file(label, spec)
+        if self.floating_root or attrs.get("actuators") is not None:
+            # load_mjcf gravity-compensates every body, as a fixed arm's controller does; a
+            # floating robot carries its own weight on its legs, or it hovers, and BAM models the
+            # load: gravcomp would hide the sag it exists to model
+            for body in spec.bodies:
+                body.gravcomp = 0
+        self.drive: BamDrive | None = None
+        if attrs.get("actuators") is not None:
+            cfg = BamConfig.from_attrs(attrs["actuators"], label)
+            names = rewrite_spec(spec, cfg, cfg.load())  # before compile, so self.model has motors too
+            self.drive = BamDrive(cfg, [self.prefix + n for n in names])
+            self._bam_names = tuple(names)  # file names, io's "joints" order
+            dt = sim.run(lambda: sim.cfg.physics_dt if sim.cfg is not None else None)
+            if dt is not None and abs(dt - FIT_DT) > 1e-9:
+                LOGGER.warning(
+                    "%s: BAM's servo model is fitted at 0.005 s physics steps; the world runs at %s "
+                    "(set the world's physics_dt to 0.005)", label, dt,
+                )
+        self._callback_key = f"robot-bam:{name}"
         self.model = spec.copy().compile()  # with its keyframes, for the arms' homes
         keyframe = attrs.get("home_keyframe")
         if keyframe is None:
@@ -93,6 +144,11 @@ class RobotHandle:
         quat = [float(v) for v in attrs.get("orientation_wxyz", (1.0, 0.0, 0.0, 0.0))]
         self.origin = robots.transform(position, quat)
         parent = attrs.get("parent")
+        if self.floating_root and parent:
+            raise ValueError(
+                f"{label}: a floating robot (free joint on {self.floating_root!r}) must be framed on "
+                f"the world, not ride {parent!r}"
+            )
         file_spec = spec
 
         def build(spec: mujoco.MjSpec) -> bool | None:
@@ -110,14 +166,20 @@ class RobotHandle:
         def init(model: mujoco.MjModel, data: mujoco.MjData) -> None:
             self._home(model, data)
 
-        def register() -> None:
+        def add() -> None:
+            # one sim-thread task: a step between the contribution and the BAM callback
+            # would feed the keyframe's joint angles to the motors as torques
+            sim.set_contribution(name, Contribution(build=build, init=init))  # inline on the sim thread
             sim.robots[name] = self
+            if self.drive is not None:
+                drive = self.drive
+                sim.step_callbacks[self._callback_key] = lambda _dt: drive.step(sim)
 
-        sim.set_contribution(name, Contribution(build=build, init=init))
-        sim.run(register)
+        sim.run(add)
 
     def close(self) -> None:
         def detach() -> None:
+            self._sim.step_callbacks.pop(self._callback_key, None)
             if self._sim.robots.get(self.name) is self:
                 del self._sim.robots[self.name]
 
@@ -138,11 +200,69 @@ class RobotHandle:
             width = _QPOS_WIDTH.get(int(own.jnt_type[joint]), 1)
             src = own.jnt_qposadr[joint]
             dst = model.joint(self.prefix + name).qposadr[0]
-            data.qpos[dst : dst + width] = own.key_qpos[self._key, src : src + width]
+            key = own.key_qpos[self._key, src : src + width]
+            if int(own.jnt_type[joint]) == _FREE:
+                # the keyframe's trunk pose is in the file's world: put it in the robot's frame
+                pose = self.origin @ robots.transform(key[:3], key[3:])
+                data.qpos[dst : dst + 3] = pose[:3, 3]
+                data.qpos[dst + 3 : dst + 7] = robots.quat(pose)
+                dof = model.joint(self.prefix + name).dofadr[0]
+                data.qvel[dof : dof + 6] = 0.0
+            else:
+                data.qpos[dst : dst + width] = key
         for actuator in range(own.nu):
             name = own.actuator(actuator).name
             if name and f"actuator:{name}" not in claimed:
                 data.ctrl[model.actuator(self.prefix + name).id] = own.key_ctrl[self._key, actuator]
+
+    def io(self, targets: Sequence[float] | None, torque: bool | None) -> dict[str, Any]:
+        """One control tick's exchange, on the sim thread between physics steps: apply torque on/off
+        and BAM position targets (in "joints" order; None leaves them), then read every joint and
+        the trunk at that one instant."""
+        drive = self.drive
+        if drive is None:
+            raise ValueError(f"robot {self.name}: io needs actuators (BAM)")
+        wanted = None
+        if targets is not None:
+            wanted = np.asarray([float(v) for v in targets])
+            if wanted.shape != (len(drive.names),):
+                raise ValueError(f"robot {self.name}: expected {len(drive.names)} targets, got {wanted.size}")
+            if not np.isfinite(wanted).all():
+                raise ValueError(f"robot {self.name}: targets must be finite")
+
+        def exchange() -> dict[str, Any]:
+            sim = self._sim
+            if torque is not None:
+                drive.set_torque(sim, bool(torque))
+            if wanted is not None:
+                drive.set_targets(sim, wanted)
+            ctrl = drive.ensure_bound(sim)
+            model, data = sim.model, sim.data
+            out: dict[str, Any] = {
+                "t": float(data.time),
+                "q": data.qpos[ctrl.qpos_indexes].tolist(),
+                "dq": data.qvel[ctrl.dof_indexes].tolist(),
+                "joints": list(self._bam_names),
+                "generation": int(sim.generation),
+                "torque": drive.torque,
+            }
+            if self.floating_root:
+                joint = model.body_jntadr[model.body(self.prefix + self.floating_root).id]
+                qa, da = model.jnt_qposadr[joint], model.jnt_dofadr[joint]
+                quat = data.qpos[qa + 3 : qa + 7]
+                out["trunk_pos"] = data.qpos[qa : qa + 3].tolist()
+                out["trunk_quat_wxyz"] = quat.tolist()
+                out["gyro"] = data.qvel[da + 3 : da + 6].tolist()  # free joint: body-frame angular velocity
+                out["gravity"] = gravity_in_trunk(quat).tolist()
+            return out
+
+        return self._sim.run(exchange)
+
+    def commanded(self, names: Sequence[str]) -> list[float]:
+        """BAM's targets for these scene actuator names (sim thread)."""
+        assert self.drive is not None
+        targets = self.drive.targets(self._sim)
+        return [float(targets[self.drive.names.index(n)]) for n in names]
 
     @property
     def home_ctrl(self) -> np.ndarray:

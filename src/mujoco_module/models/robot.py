@@ -14,6 +14,8 @@ Attributes:
   asset (string)           - a bundled robot: "aloha", or "tiago" (on a pal_tiago_base base)
   mjcf (string)            - your own .xml robot file (path, assets-relative); one of asset, mjcf
   home_keyframe (string)   - the keyframe for undriven joints (default: the file's first)
+  actuators (object)       - {"model": "bam", ...}: BAM servo physics for the matching actuators
+                             (motor, bam_model, kp_fw, vin, vin_drop_gain, vin_min, joints); see README
 """
 
 import asyncio
@@ -26,8 +28,10 @@ from viam.proto.common import Geometry, ResourceName
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
+from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE, robots
+from ..bam import BamConfig
 from ..robot_file import ROBOT_ASSETS, RobotHandle
 from ..sim import SimManager
 from .utils import apply_frame_to_attrs, frame_parent, get_attrs, validate_sim_component
@@ -65,7 +69,10 @@ class MujocoRobot(Generic, EasyResource):
 
     @classmethod
     def validate_config(cls, config: ComponentConfig) -> tuple[Sequence[str], Sequence[str]]:
-        _source(config, get_attrs(config))
+        attrs = get_attrs(config)
+        _source(config, attrs)
+        if attrs.get("actuators") is not None:
+            BamConfig.from_attrs(attrs["actuators"], config.name)
         # a robot is placed on the world or on a mujoco-sim component with a
         # viam_frame (a base); another parent never appears, so the robot waits
         deps, _ = validate_sim_component(config, needs_asset=False, world_frame_only=False)
@@ -86,3 +93,27 @@ class MujocoRobot(Generic, EasyResource):
 
     async def get_geometries(self, **kwargs) -> list[Geometry]:
         return self._handle.geometries() if self._handle is not None else []
+
+    async def do_command(
+        self, command: Mapping[str, ValueTypes], *, timeout: float | None = None, **kwargs
+    ) -> Mapping[str, ValueTypes]:
+        if "io" in command:
+            if self._handle is None:
+                raise RuntimeError(f"robot {self.name} is closed")
+            # viam-sdk's struct_to_dict decodes a wire null as int 0, while real numbers arrive as
+            # float, so an exact int 0 is a null (bool is not exactly int, so False stays False).
+            def value(v):
+                return None if v is None or (type(v) is int and v == 0) else v
+
+            request = value(command["io"])
+            if request is None:
+                request = {}
+            if not isinstance(request, Mapping):
+                raise ValueError(f"robot {self.name}: io must be an object")
+            torque, targets = value(request.get("torque")), value(request.get("targets"))
+            if torque is not None and not isinstance(torque, bool):
+                raise ValueError(f"robot {self.name}: io.torque must be true, false or null")
+            if targets is not None and not isinstance(targets, list):
+                raise ValueError(f"robot {self.name}: io.targets must be a list of numbers or null")
+            return await asyncio.to_thread(self._handle.io, targets, torque)
+        raise ValueError(f"robot {self.name}: unknown command {sorted(command)}; known: ['io']")

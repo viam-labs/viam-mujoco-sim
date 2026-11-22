@@ -17,7 +17,7 @@ import re
 import tempfile
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping, Sequence
+from collections.abc import Container, Mapping, Sequence
 from dataclasses import dataclass
 from logging import getLogger
 from pathlib import Path
@@ -698,8 +698,12 @@ def control_type(model: mujoco.MjModel, actuator: int, label: str) -> str:
     )
 
 
-def arm_actuators(model: mujoco.MjModel, joints: Sequence[int], label: str) -> list[int]:
-    """The position actuator driving each arm joint, matched by transmission target."""
+def arm_actuators(
+    model: mujoco.MjModel, joints: Sequence[int], label: str, driven: Container[str] = ()
+) -> list[int]:
+    """The position actuator driving each arm joint, matched by transmission target.
+    Actuators named in `driven` (a BAM robot's torque motors) skip the position
+    checks: the arm there is read-only and never writes ctrl."""
     result = []
     for joint in joints:
         found = [
@@ -711,6 +715,9 @@ def arm_actuators(model: mujoco.MjModel, joints: Sequence[int], label: str) -> l
                 f"{label}: joint {_name(model, mujoco.mjtObj.mjOBJ_JOINT, joint)!r} needs exactly "
                 f"one actuator, found {len(found)}"
             )
+        if model.actuator(found[0]).name in driven:
+            result.append(found[0])
+            continue
         if control_type(model, found[0], label) != "position":
             raise ValueError(
                 f"{label}: arm actuator {_name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, found[0])!r} "
