@@ -226,3 +226,24 @@ def test_a_slow_camera_stream_doesnt_hold_up_the_physics(running_sim, monkeypatc
     assert len(frames) >= 8  # it streamed
     assert running_sim.slips == slips  # the step loop never fell behind
     assert advanced == pytest.approx(time.monotonic() - start, rel=0.1)
+
+
+def test_get_images_stamps_captured_at(running_sim):
+    import asyncio
+    import time
+
+    from viam.proto.app.robot import ComponentConfig
+    from viam.utils import dict_to_struct
+
+    from mujoco_module.models.camera import MujocoCamera
+    from mujoco_module.models.world import MujocoWorld
+
+    def config(name, attrs):
+        return ComponentConfig(name=name, attributes=dict_to_struct(attrs))
+
+    MujocoWorld.new(config("sim-world", {"real_time": False}), {})
+    camera = MujocoCamera.new(config("cam", {"world": "sim-world", "width": 64, "height": 48}), {})
+    images, meta = asyncio.run(camera.get_images())
+    assert images
+    assert meta.captured_at.seconds > 0
+    assert abs(meta.captured_at.seconds - time.time()) < 5

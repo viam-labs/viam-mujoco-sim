@@ -30,6 +30,7 @@ import math
 from io import BytesIO
 from typing import Any, ClassVar, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from google.protobuf.timestamp_pb2 import Timestamp
 from PIL import Image
 from typing_extensions import Self
 from viam.components.camera import Camera
@@ -139,8 +140,10 @@ class MujocoCamera(Camera, EasyResource):
     async def get_images(
         self, *, filter_source_names: Optional[Sequence[str]] = None, **kwargs
     ) -> Tuple[List[NamedImage], ResponseMetadata]:
+        captured = Timestamp()
+        captured.GetCurrentTime()  # before the render, as a real camera stamps exposure
         images = await asyncio.to_thread(self._images, filter_source_names)
-        return images, ResponseMetadata()
+        return images, ResponseMetadata(captured_at=captured)
 
     async def get_point_cloud(self, **kwargs) -> Tuple[bytes, str]:
         points, colors = await asyncio.to_thread(self._h().point_cloud)

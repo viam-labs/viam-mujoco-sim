@@ -647,6 +647,7 @@ fingertip center: use the TCP value from the table above, or for your own
 | `GetKinematics` | Not supported; RDK falls back to `GetGeometries`. |
 | `GetGeometries` | Its colliding geoms, open and closed, in its frame (see above). A gripper in its arm's or robot's own file (`lite6_gripper`, `aloha`, `tiago`) serves its own bodies' geoms (the subtree below the arm's last link that its actuator drives), from the file settled at its home with the jaw open and closed. |
 | `DoCommand` | `{"command": "measure"}` returns `tcp_mm` (one number), and `jaw_gap_mm` and `finger_reach_mm` (each `{open, closed}`); for suction, `cup_diameter_mm` and `tcp_mm`. It measures a scratch copy of the gripper, never the live sim. `tcp_mm` is the fingertips' distance from the flange when open: set it as the gripper frame's `translation.z`. |
+| `DoCommand` (position) | `{"command": "position"}` returns `{"position": 0-100, 100 = open; "input": 0 or 1}`: the jaw's opening as a percentage of its travel, and the latched open/close command. Handy as a data-capture `docommand_input`. |
 
 `IsHoldingSomething` always fills `meta`:
 
