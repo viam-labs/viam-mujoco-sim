@@ -4,7 +4,7 @@ import mujoco
 import numpy as np
 import pytest
 
-from mujoco_module.handles import BaseHandle, LidarHandle, PhotoEyeHandle
+from mujoco_module.handles import BaseHandle, CameraHandle, LidarHandle, PhotoEyeHandle
 from mujoco_module.sim import Contribution, WorldConfig
 
 
@@ -189,3 +189,50 @@ def test_validate_3d_rejects(attrs, message):
 
     with pytest.raises(ValueError, match=message):
         MujocoLidar.validate_config(lidar_config(attrs))
+
+
+
+def test_frames_keep_the_lidars_parent_while_it_scans(running_sim):
+    """Cameras build their scene on the render thread while the sim thread
+    moves on; a lidar cast there hides its parent. A frame must never catch
+    the parent hidden."""
+    import threading
+
+    running_sim.configure_world(WorldConfig.from_attrs({"props": [], "real_time": False}))
+    BaseHandle(running_sim, "rover", {"asset": "viam_rover"})
+    lidar = LidarHandle(running_sim, "lidar", {"parent": "rover", "position": [0, 0, 0.08]})
+    camera = CameraHandle(running_sim, "cam", {
+        "width": 64, "height": 48, "position": [0.8, 0.8, 0.6], "target": [0, 0, 0.05],
+    })
+    running_sim.run(lambda: setattr(running_sim, "playing", False))  # a still scene: frames compare exactly
+    camera.get_rgb()  # the first frame of a model differs from later ones in a few pixels
+    before = camera.get_rgb()
+    building, casting, built = threading.Event(), threading.Event(), threading.Event()
+    update_scene, cast = mujoco.Renderer.update_scene, mujoco.mj_multiRay
+
+    def slow_update_scene(self, *args, **kwargs):
+        # the sim thread is free now: let a cast start, and build the scene inside it
+        building.set()
+        casting.wait(timeout=1.0)
+        try:
+            return update_scene(self, *args, **kwargs)
+        finally:
+            built.set()
+
+    def slow_cast(*args):
+        casting.set()
+        built.wait(timeout=1.0)
+        return cast(*args)
+
+    frames = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(mujoco.Renderer, "update_scene", slow_update_scene)
+        patch.setattr(mujoco, "mj_multiRay", slow_cast)
+        drawer = threading.Thread(target=lambda: frames.append(camera.get_rgb()))
+        drawer.start()
+        assert building.wait(timeout=5.0)
+        lidar.scan()
+        drawer.join(timeout=5.0)
+    assert np.array_equal(camera.get_rgb(), before)  # the scene is still: only a hidden rover changes a frame
+    changed = int(np.any(frames[0] != before, axis=2).sum())
+    assert changed == 0, f"{changed} pixels lost the rover"

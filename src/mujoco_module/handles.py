@@ -27,6 +27,7 @@ from . import bases, robots
 from .sim import (
     BELT_CONAFFINITY,
     FREE_CONTYPE,
+    GEOM_GROUP_LOCK,
     GRIPPER_ASSETS,
     KNOWN_ASSETS,
     LOGGER,
@@ -1847,13 +1848,17 @@ def hidden_geoms(model: mujoco.MjModel, geoms: np.ndarray):
     """Rays skip `geoms` inside the block: they move to HIDDEN_GROUP, which
     RAY_GROUPS leaves out, and get their groups back afterwards. A mounted
     sensor never sees its own parent this way, in one ray call. Only for the
-    sim thread, which owns the model (and renders on the same thread)."""
-    saved = model.geom_group[geoms].copy()
-    model.geom_group[geoms] = HIDDEN_GROUP
-    try:
-        yield
-    finally:
-        model.geom_group[geoms] = saved
+    sim thread, which owns the model. Cameras build their scenes from the same
+    model on the render thread, and renderers hide HIDDEN_GROUP too, so the
+    block holds GEOM_GROUP_LOCK: a frame waits out the cast instead of drawing
+    the parent missing. Keep the block to the ray call."""
+    with GEOM_GROUP_LOCK:
+        saved = model.geom_group[geoms].copy()
+        model.geom_group[geoms] = HIDDEN_GROUP
+        try:
+            yield
+        finally:
+            model.geom_group[geoms] = saved
 
 
 class LidarHandle:
