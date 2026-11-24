@@ -243,7 +243,11 @@ def test_get_images_stamps_captured_at(running_sim):
 
     MujocoWorld.new(config("sim-world", {"real_time": False}), {})
     camera = MujocoCamera.new(config("cam", {"world": "sim-world", "width": 64, "height": 48}), {})
+    # Bound the stamp by the call, not by a fixed window: a cold first render
+    # takes seconds on a slow CI runner, and the stamp is taken before it.
+    before = time.time()
     images, meta = asyncio.run(camera.get_images())
+    after = time.time()
     assert images
-    assert meta.captured_at.seconds > 0
-    assert abs(meta.captured_at.seconds - time.time()) < 5
+    stamped = meta.captured_at.seconds + meta.captured_at.nanos / 1e9
+    assert before <= stamped <= after
