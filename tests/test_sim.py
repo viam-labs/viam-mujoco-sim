@@ -152,6 +152,21 @@ def test_rebuild_carries_state_and_inits_only_new_contributions(sim):
     assert inits == [1, 1]
 
 
+def test_reconfigure_moves_a_prop_whose_config_pose_changed(sim):
+    other = {"name": "other", "size": 0.03, "position": [-0.5, -0.5, 0.5]}
+    sim.configure_world(WorldConfig.from_attrs({"props": [BLOCK, other]}))
+    # both props move in the sim; only the block's config changes
+    sim.set_prop_pose("pick_block", [0.4, 0.4, 0.4], [1, 0, 0, 0])
+    sim.set_prop_pose("other", [-0.2, -0.2, 0.2], [1, 0, 0, 0])
+    moved = dict(BLOCK, position=[0.7, -0.3, 0.25], orientation_wxyz=[0, 0, 0, 1])
+    sim.configure_world(WorldConfig.from_attrs({"props": [moved, other]}))
+    block = sim.get_prop_pose("pick_block")
+    assert block["position"] == pytest.approx(moved["position"])
+    assert block["orientation_wxyz"] == pytest.approx(moved["orientation_wxyz"])
+    # an unchanged prop keeps its simulated pose across the rebuild
+    assert sim.get_prop_pose("other")["position"] == pytest.approx([-0.2, -0.2, 0.2])
+
+
 def test_prop_shapes_build_matching_geoms(sim):
     import mujoco
 

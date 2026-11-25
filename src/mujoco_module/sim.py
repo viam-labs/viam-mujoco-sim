@@ -621,12 +621,25 @@ class SimManager:
 
         def configure() -> None:
             old = self.cfg, self.prop_pieces, self.textures
+            # _rebuild carries each movable prop's simulated pose over by joint
+            # name; a prop whose configured pose changed goes to the new one
+            before = {p.name: p for p in self.cfg.props} if self.cfg is not None else {}
+            moved = [
+                p for p in cfg.props
+                if not p.fixed and p.name in before
+                and (p.position, p.orientation_wxyz)
+                != (before[p.name].position, before[p.name].orientation_wxyz)
+            ]
             self.cfg, self.prop_pieces, self.textures = cfg, pieces, textures
             try:
                 self._rebuild()
             except BaseException:
                 self.cfg, self.prop_pieces, self.textures = old
                 raise
+            if moved:
+                for prop in moved:
+                    self._place_prop(prop.name, prop.position, prop.orientation_wxyz)
+                mujoco.mj_forward(self.model, self.data)
 
         self.run(configure)
 
