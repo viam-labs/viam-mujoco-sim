@@ -120,6 +120,10 @@ GRIPPER_ASSETS: dict[str, dict[str, Any]] = {
 MAX_SUBSTEPS = 50
 SLIP_THRESHOLD_S = 0.1
 RTF_WINDOW_S = 2.0
+# Held while geom groups are rewritten (a ray cast hiding its sensor's parent,
+# on the sim thread) and while a renderer reads them (update_scene, on the
+# render thread), so no frame is built from a mid-cast model.
+GEOM_GROUP_LOCK = threading.Lock()
 # Props win contact-parameter mixing and use a stiffer solref than MuJoCo's
 # default. Without this the Menagerie fingertips' solimp averages with the
 # prop's into a soft contact and the jaws sink ~9 mm into a block.
@@ -1031,12 +1035,14 @@ class SimManager:
             model.vis.map.znear = near_m / model.stat.extent
         try:
             renderer = self._renderer(model, lights, width, height)
-            renderer.update_scene(data, camera=camera)
+            with GEOM_GROUP_LOCK:
+                renderer.update_scene(data, camera=camera)
             rgb = renderer.render().copy()
             if depth_size is None:
                 return rgb, None
             renderer = self._renderer(model, lights, *depth_size)
-            renderer.update_scene(data, camera=camera)
+            with GEOM_GROUP_LOCK:
+                renderer.update_scene(data, camera=camera)
             renderer.enable_depth_rendering()
             try:
                 meters = renderer.render().copy()
