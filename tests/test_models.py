@@ -538,6 +538,22 @@ def test_base_drives_through_the_model(rover_cell):
     assert geometry.center.z == pytest.approx(80)
 
 
+def test_base_reports_its_true_pose(rover_cell):
+    _, base = rover_cell
+    start = run(base.do_command({"command": "get_true_pose"}))["pose"]
+    assert start["x"] == pytest.approx(0, abs=1)
+    assert start["y"] == pytest.approx(0, abs=1)
+    assert start["theta"] == pytest.approx(0, abs=0.5)
+    run(base.move_straight(300, 300))
+    run(base.spin(90, 180))
+    pose = run(base.do_command({"command": "get_true_pose"}))["pose"]
+    assert pose["x"] == pytest.approx(0, abs=10)
+    assert pose["y"] == pytest.approx(300, abs=10)
+    assert pose["theta"] == pytest.approx(90, abs=2)
+    with pytest.raises(ValueError, match="try get_true_pose"):
+        run(base.do_command({"command": "teleport"}))
+
+
 def test_base_set_power_rejects_nan(rover_cell):
     _, base = rover_cell
     with pytest.raises(ValueError, match="finite"):

@@ -1307,6 +1307,20 @@ class BaseHandle:
             )
 
         return self._sim.run(read)
+    def true_pose(self) -> dict[str, float]:
+        """The viam frame's true pose in the world frame, read from the physics
+        rather than odometry, for grading an estimate against: x, y, z in
+        millimetres and theta (yaw about world +Z) in degrees, as Viam poses
+        are."""
+
+        def read() -> dict[str, float]:
+            data, ids = self._now()
+            x, y, z = (float(value) * 1000.0 for value in data.site_xpos[ids.site])
+            axes = data.site_xmat[ids.site].reshape(3, 3)
+            theta = math.degrees(math.atan2(axes[1, 0], axes[0, 0]))
+            return {"x": x, "y": y, "z": z, "theta": theta}
+
+        return self._sim.run(read)
 
 
 def _jointed(body: Any) -> list[Any]:

@@ -1095,6 +1095,7 @@ This one sits 120 mm ahead of the origin and 150 mm up:
 | `IsMoving` | True while the base is commanded to move or is moving. |
 | `GetProperties` | Width is the track, 0 turning radius, wheel circumference 2π × radius (Rover: 0.356 m and 0.381 m; Husky: 0.555 m and 1.037 m). |
 | `GetGeometries` | One box around the chassis's collision geoms, not the wheels or casters, in the base's frame (Rover: 260 x 300 x 100 mm, centered 80 mm up). With `planning_geometry` `"mesh"`, those geoms' convex hulls (a primitive tessellated) as one mesh instead. |
+| `DoCommand` | `{"command": "get_true_pose"}` returns `{"pose": {"x", "y", "z", "theta"}}`: the base frame's true pose in the world frame, read from the physics rather than odometry, in millimetres and degrees. For checking a SLAM or odometry estimate against ground truth. |
 
 ## Model viam-labs:mujoco-sim:lidar
 

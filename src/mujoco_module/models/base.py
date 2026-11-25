@@ -47,6 +47,7 @@ from viam.proto.common import Geometry, Mesh, Pose, RectangularPrism, ResourceNa
 from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
+from viam.utils import ValueTypes
 
 from .. import FAMILY, NAMESPACE, robots
 from ..bases import FORWARD_AXES
@@ -196,6 +197,13 @@ class MujocoBase(Base, EasyResource):
 
     async def is_moving(self) -> bool:
         return await asyncio.to_thread(self._h().is_moving)
+
+    async def do_command(
+        self, command: Mapping[str, ValueTypes], **kwargs
+    ) -> Mapping[str, ValueTypes]:
+        if command.get("command") == "get_true_pose":
+            return {"pose": await asyncio.to_thread(self._h().true_pose)}
+        raise ValueError(f"unknown command {command.get('command')!r}; try get_true_pose")
 
     async def get_properties(self, **kwargs) -> Base.Properties:
         base = self._h().base
